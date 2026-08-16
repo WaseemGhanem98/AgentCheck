@@ -41,6 +41,7 @@ from agentcheck.store import (
     list_runs_readonly,
     resolve_store_path,
 )
+from agentcheck.review.store import load_reviews_for_run
 
 from .render import render_report
 
@@ -180,6 +181,7 @@ def render_stored_run(
     out: str | None = None,
 ) -> StoredReport:
     loaded = load_stored_run(target, run_id=run_id, latest=latest)
+    reviews = load_reviews_for_run(loaded.root, loaded.config, loaded.run_id)
     html = render_report(
         run_id=loaded.run_id,
         target=str(loaded.root),
@@ -193,6 +195,7 @@ def render_stored_run(
         seed=loaded.seed,
         frozen_suite=loaded.frozen_suite,
         selection_plan=loaded.selection,
+        reviews=reviews,
     )
     destination = _report_destination(loaded, out)
     try:

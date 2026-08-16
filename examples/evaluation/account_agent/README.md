@@ -24,6 +24,9 @@ agentcheck replay examples/evaluation/account_agent \
   --manifest .agentcheck/replay/<run-id>.json
 agentcheck shrink examples/evaluation/account_agent \
   --manifest .agentcheck/replay/<run-id>.json
+agentcheck review examples/evaluation/account_agent \
+  --run-id <run-id> --finding-id finding:duplicate_side_effect \
+  --decision accepted --note "Confirmed regression"
 ```
 
 `generate` is optional. Without a frozen suite file, `test` still runs the

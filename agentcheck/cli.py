@@ -26,6 +26,8 @@ from agentcheck.initialize import DEFAULT_ADAPTER, SUPPORTED_ADAPTERS, write_ini
 from agentcheck.inspect.capabilities import ExtractedCapability, extract_capabilities
 from agentcheck.privacy import redact_artifact, redact_log_text
 from agentcheck.report import render_stored_run
+from agentcheck.review import HUMAN_DECISIONS, HumanDecision
+from agentcheck.review.service import record_finding_review
 from agentcheck.shrink import (
     DEFAULT_MAX_CANDIDATES,
     DEFAULT_MAX_ROUNDS,
@@ -350,6 +352,44 @@ def _parser() -> argparse.ArgumentParser:
         "--no-store",
         action="store_true",
         help="skip writing the local SQLite evaluation index for verification",
+    )
+
+    review_parser = commands.add_parser(
+        "review",
+        help="record a human decision on an automated finding",
+        description=(
+            "Append an immutable human review bound to a stored finding. This "
+            "command never imports the target, never spawns a worker, never "
+            "calls ToolGateway, and never changes the automated PASS/FAIL/"
+            "INCONCLUSIVE/INFRA_ERROR result."
+        ),
+    )
+    review_parser.add_argument("target", nargs="?", default=".")
+    review_parser.add_argument(
+        "--run-id",
+        type=_run_id,
+        required=True,
+        help="stored run that owns the finding",
+    )
+    review_parser.add_argument(
+        "--finding-id",
+        required=True,
+        help="finding_id from findings.json",
+    )
+    review_parser.add_argument(
+        "--decision",
+        required=True,
+        choices=HUMAN_DECISIONS,
+        help="human decision; does not rewrite the automated verdict",
+    )
+    review_parser.add_argument(
+        "--note",
+        default="",
+        help="optional untrusted annotation (bounded and secret-screened)",
+    )
+    review_parser.add_argument(
+        "--reviewer",
+        help="optional explicit reviewer label",
     )
     return parser
 
@@ -743,6 +783,45 @@ def _shrink_command(
     return 0
 
 
+def _review_command(
+    target: str,
+    *,
+    run_id: str,
+    finding_id: str,
+    decision: HumanDecision,
+    note: str,
+    reviewer: str | None,
+) -> int:
+    recorded = record_finding_review(
+        target,
+        run_id=run_id,
+        finding_id=finding_id,
+        decision=decision,
+        note=note,
+        reviewer=reviewer,
+    )
+    review = recorded.review
+    print("Recording human review...")
+    print()
+    print(f"Run ID: {review.run_id}")
+    print(f"Finding: {review.finding_id}")
+    print(f"Automated verdict: {review.automated_verdict}")
+    print(f"Human decision: {review.decision}")
+    if review.note:
+        print(f"Note: {redact_log_text(review.note)}")
+    if review.reviewer:
+        print(f"Reviewer: {review.reviewer}")
+    print()
+    print("Review record:")
+    print(recorded.path)
+    print()
+    print(
+        "The automated finding is unchanged. Re-run agentcheck report to include "
+        "this annotation in HTML."
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -798,6 +877,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_candidates=args.max_candidates,
                 max_rounds=args.max_rounds,
                 persist_store=not args.no_store,
+            )
+        if args.command == "review":
+            return _review_command(
+                args.target,
+                run_id=args.run_id,
+                finding_id=args.finding_id,
+                decision=args.decision,
+                note=args.note,
+                reviewer=args.reviewer,
             )
     except KeyboardInterrupt:
         print("AgentCheck interrupted.", file=sys.stderr)

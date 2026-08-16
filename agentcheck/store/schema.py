@@ -48,7 +48,27 @@ MIGRATION_1_STATEMENTS: tuple[str, ...] = (
     """,
 )
 
-MIGRATIONS: tuple[tuple[str, ...], ...] = (MIGRATION_1_STATEMENTS,)
+MIGRATION_2_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE reviews (
+        review_id TEXT NOT NULL PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        finding_id TEXT NOT NULL,
+        finding_fingerprint TEXT NOT NULL,
+        decision TEXT NOT NULL,
+        recorded_at TEXT NOT NULL,
+        artifact_path TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX idx_reviews_run_finding ON reviews (run_id, finding_id, recorded_at)
+    """,
+)
+
+MIGRATIONS: tuple[tuple[str, ...], ...] = (
+    MIGRATION_1_STATEMENTS,
+    MIGRATION_2_STATEMENTS,
+)
 CURRENT_SCHEMA_VERSION = len(MIGRATIONS)
 
 __all__ = [

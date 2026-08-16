@@ -151,7 +151,7 @@ def test_bootstrap_and_idempotent_migrations(tmp_path: Path) -> None:
     finally:
         connection.close()
 
-    assert versions == [CURRENT_SCHEMA_VERSION]
+    assert versions == list(range(1, CURRENT_SCHEMA_VERSION + 1))
     loaded = store.get_run("run-1")
     assert loaded is not None
     assert loaded.index_key() == _sample_run().index_key()

@@ -10,10 +10,49 @@ from agentcheck.domain import AgentSpec, CanonicalRun, CaseEvaluation, Finding, 
 from agentcheck.generate.selection import SelectionPlan
 from agentcheck.generate.suite import FrozenSuite
 from agentcheck.privacy import redact_artifact
+from agentcheck.review.contract import HumanReview, bound_reviews_for_finding
 
 
 def _escape(value: Any) -> str:
     return html.escape(str(redact_artifact(value)), quote=True)
+
+
+def _review_html(finding: Finding, reviews: tuple[HumanReview, ...]) -> str:
+    related = tuple(item for item in reviews if item.finding_id == finding.finding_id)
+    bound = bound_reviews_for_finding(finding, related)
+    bound_ids = {item.review_id for item in bound}
+    latest = bound[-1] if bound else None
+    latest_decision = latest.decision if latest is not None else "none"
+    latest_note = latest.note if latest is not None and latest.note else "None"
+    mismatch = len(related) - len(bound)
+    mismatch_html = (
+        (
+            f"<p class=\"muted\">{mismatch} human review record(s) no longer bind to "
+            "this finding identity. The automated result is unchanged.</p>"
+        )
+        if mismatch
+        else ""
+    )
+    history = "".join(
+        f"<li><span class=\"mono\">{_escape(item.recorded_at.isoformat())}</span> — "
+        f"{_escape(item.decision)}"
+        + (f" · {_escape(item.note)}" if item.note else "")
+        + (
+            " · bound"
+            if item.review_id in bound_ids
+            else " · finding identity mismatch"
+        )
+        + "</li>"
+        for item in related
+    ) or "<li class=\"muted\">No human reviews.</li>"
+    return (
+        f"<p><b>Human review:</b> {_escape(latest_decision)} · "
+        f"{len(bound)} bound of {_escape(len(related))} recorded</p>"
+        f"<p><b>Latest note:</b> {_escape(latest_note)}</p>"
+        f"{mismatch_html}"
+        f"<details><summary>Review history ({len(related)})</summary>"
+        f"<ul>{history}</ul></details>"
+    )
 
 
 def _json(value: Any) -> str:
@@ -61,6 +100,7 @@ def render_report(
     seed: int | None = None,
     frozen_suite: FrozenSuite | None = None,
     selection_plan: SelectionPlan | None = None,
+    reviews: tuple[HumanReview, ...] = (),
 ) -> str:
     """Render a single escaped HTML file with no external resources or JavaScript."""
 
@@ -115,6 +155,7 @@ def render_report(
         f"""
         <article class="finding severity-{_escape(finding.severity.value)}">
           <h3>{_escape(finding.title)}</h3>
+          <p><b>Automated verdict:</b> FAIL</p>
           <p><b>Severity:</b> {_escape(finding.severity.value.upper())} · <b>Confidence:</b> {finding.confidence:.0%}</p>
           <p>{_escape(finding.description)}</p>
           <p><b>Affected:</b> {_escape(', '.join(finding.affected_scenario_ids))}</p>
@@ -123,6 +164,7 @@ def render_report(
           <p><b>Likely cause:</b> {_escape(finding.likely_cause or 'Unknown')}</p>
           {''.join(f'<p><b>Suggested fix (human review required):</b> {_escape(fix.summary)}</p>' for fix in finding.suggested_fixes)}
           <p class="mono"><b>Evidence:</b> {_escape(', '.join(finding.evidence_ids))}</p>
+          {_review_html(finding, reviews)}
         </article>
         """
         for finding in findings

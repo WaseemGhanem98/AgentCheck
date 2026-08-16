@@ -172,6 +172,63 @@ class SqliteEvaluationStore:
             finally:
                 connection.close()
 
+    def record_review(
+        self,
+        *,
+        review_id: str,
+        run_id: str,
+        finding_id: str,
+        finding_fingerprint: str,
+        decision: str,
+        recorded_at: str,
+        artifact_path: str,
+    ) -> None:
+        """Index a review file. JSON remains authoritative."""
+
+        payload = redact_artifact(
+            {
+                "review_id": review_id,
+                "run_id": run_id,
+                "finding_id": finding_id,
+                "finding_fingerprint": finding_fingerprint,
+                "decision": decision,
+                "recorded_at": recorded_at,
+                "artifact_path": artifact_path,
+            }
+        )
+        if not isinstance(payload, dict):
+            raise StoreError("evaluation store redaction produced a non-object")
+        with self._lock:
+            connection = self._connect()
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO reviews (
+                        review_id, run_id, finding_id, finding_fingerprint,
+                        decision, recorded_at, artifact_path
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        str(payload["review_id"]),
+                        str(payload["run_id"]),
+                        str(payload["finding_id"]),
+                        str(payload["finding_fingerprint"]),
+                        str(payload["decision"]),
+                        str(payload["recorded_at"]),
+                        str(payload["artifact_path"]),
+                    ),
+                )
+                connection.execute("COMMIT")
+            except StoreError:
+                _rollback_quietly(connection)
+                raise
+            except sqlite3.Error as exc:
+                _rollback_quietly(connection)
+                raise StoreError(f"evaluation store is unavailable: {exc}") from exc
+            finally:
+                connection.close()
+
     def _connect(self) -> sqlite3.Connection:
         _ensure_private_database(self.path)
         try:
