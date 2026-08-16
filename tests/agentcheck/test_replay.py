@@ -292,10 +292,36 @@ def test_secret_shaped_case_is_omitted_while_others_are_kept() -> None:
 
 
 def test_spec_id_mismatch_is_configuration_error(tmp_path: Path) -> None:
+    from agentcheck.replay.bind import entrypoint_digest
+    from agentcheck.replay.fileset import collect_source_file_set
+
     target = _copy_example(tmp_path)
-    (target / "replay-unit.json").write_bytes(encode_replay_manifest(_manifest()))
+    digest = entrypoint_digest(target, "agent.py:agent")
+    manifest = ReplayManifest(
+        created_from_run_id="unit-replay-001",
+        agentcheck_version="0.1.0",
+        seed=SEED,
+        spec_binding=SpecBinding(
+            spec_id="agentspec-unit-test",
+            adapter="openai_agents",
+            entrypoint="agent.py:agent",
+        ),
+        source_binding=SourceBinding(
+            git_revision=None,
+            entrypoint_digest=digest,
+            framework="openai_agents",
+            framework_version="0.20.0",
+            file_set=collect_source_file_set(target),
+        ),
+        environment_requirements=EnvironmentRequirements(names=()),
+        cases=(_scenario(),),
+    )
+    (target / ".agentcheck" / "replay").mkdir(parents=True, exist_ok=True)
+    (target / ".agentcheck" / "replay" / "replay-unit.json").write_bytes(
+        encode_replay_manifest(manifest)
+    )
     with pytest.raises(ConfigurationError, match="bound to spec"):
-        replay_suite(target, "replay-unit.json")
+        replay_suite(target, ".agentcheck/replay/replay-unit.json")
 
 
 def test_git_revision_mismatch_is_configuration_error(
@@ -460,6 +486,9 @@ def test_execute_suite_emits_replay_manifest_and_replay_reproduces(
 
     loaded = load_replay_manifest_path(execution.replay_manifest_path)
     assert loaded.schema_version == REPLAY_MANIFEST_CONTRACT_VERSION
+    assert loaded.source_binding.file_set is not None
+    assert loaded.source_binding.file_set.schema_version == "agentcheck.source_file_set.v1"
+    assert "agent.py" in {item.path for item in loaded.source_binding.file_set.files}
     assert loaded.created_from_run_id == "replay-source"
     assert loaded.environment_requirements.names == ()
     assert loaded.seed == execution.seed

@@ -755,8 +755,15 @@ def test_malformed_manifest_never_executes_shrink(
         shrink_suite(target, "broken.json")
 
 
-def test_spec_mismatch_never_executes_shrink(tmp_path: Path) -> None:
+def test_spec_mismatch_never_executes_shrink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import agentcheck.application as application
+    from agentcheck.replay.bind import entrypoint_digest
+    from agentcheck.replay.fileset import collect_source_file_set
+
     target = _copy_example(tmp_path)
+    digest = entrypoint_digest(target, "agent.py:agent")
     manifest = ReplayManifest(
         created_from_run_id="unit-shrink-001",
         agentcheck_version="0.1.0",
@@ -768,15 +775,24 @@ def test_spec_mismatch_never_executes_shrink(tmp_path: Path) -> None:
         ),
         source_binding=SourceBinding(
             git_revision=None,
-            entrypoint_digest="sha256:" + "b" * 64,
+            entrypoint_digest=digest,
             framework="openai_agents",
             framework_version="0.20.0",
+            file_set=collect_source_file_set(target),
         ),
         cases=(_delete_scenario(),),
     )
-    (target / "replay-unit.json").write_bytes(encode_replay_manifest(manifest))
+    (target / ".agentcheck" / "replay").mkdir(parents=True, exist_ok=True)
+    (target / ".agentcheck" / "replay" / "replay-unit.json").write_bytes(
+        encode_replay_manifest(manifest)
+    )
+
+    def explode(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("worker must not start after a spec mismatch")
+
+    monkeypatch.setattr(application, "run_scenario_in_subprocess", explode)
     with pytest.raises(ConfigurationError, match="bound to spec"):
-        shrink_suite(target, "replay-unit.json")
+        shrink_suite(target, ".agentcheck/replay/replay-unit.json")
 
 
 def test_environment_mismatch_never_executes_shrink(
@@ -835,11 +851,13 @@ def test_shrink_suite_reduces_padded_failure_and_replays(
         environment_requirements=loaded.environment_requirements,
         cases=tuple(padded_cases),
     )
-    (target / "padded.json").write_bytes(encode_replay_manifest(padded_manifest))
+    (target / ".agentcheck" / "replay" / "padded.json").write_bytes(
+        encode_replay_manifest(padded_manifest)
+    )
 
     shrunk = shrink_suite(
         target,
-        "padded.json",
+        ".agentcheck/replay/padded.json",
         scenario_id="delete_without_confirmation",
         run_id="shrink-min",
         persist_store=False,

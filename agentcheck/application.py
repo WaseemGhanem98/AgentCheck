@@ -56,11 +56,13 @@ from agentcheck.report import render_report
 from agentcheck.replay import (
     ReplayManifest,
     build_replay_manifest,
+    collect_source_file_set,
     entrypoint_digest,
     git_revision,
     load_replay_manifest,
     secret_shaped_reason,
-    verify_replay_bindings,
+    verify_replay_source_bindings,
+    verify_replay_spec_bindings,
     write_replay_manifest,
 )
 from agentcheck.replay.manifest import replay_manifest_relative_path
@@ -410,16 +412,14 @@ def replay_suite(
     manifest = load_replay_manifest(root, manifest_path)
     suite_run_id = run_id or new_run_id()
     revision = _git_revision(root)
+    verify_replay_source_bindings(manifest, root=root, config=config)
+    _warn_legacy_source_binding(manifest)
     inspection = inspect_in_subprocess(root, config)
     packs = resolve_policy_packs(root, config)
     spec = attach_declared_policies(inspection.require_value(), packs)
     pack_ids = tuple(pack.pack_id for pack in packs)
-    verify_replay_bindings(
-        manifest,
-        root=root,
-        config=config,
-        spec=spec,
-        policy_pack_ids=pack_ids,
+    verify_replay_spec_bindings(
+        manifest, spec=spec, policy_pack_ids=pack_ids
     )
     valid: list[Scenario] = []
     invalid: list[InvalidScenario] = []
@@ -493,16 +493,14 @@ def shrink_suite(
             "refusing to overwrite the source replay manifest; pass a different --run-id"
         )
 
+    verify_replay_source_bindings(source_manifest, root=root, config=config)
+    _warn_legacy_source_binding(source_manifest)
     inspection = inspect_in_subprocess(root, config)
     packs = resolve_policy_packs(root, config)
     spec = attach_declared_policies(inspection.require_value(), packs)
     pack_ids = tuple(pack.pack_id for pack in packs)
-    verify_replay_bindings(
-        source_manifest,
-        root=root,
-        config=config,
-        spec=spec,
-        policy_pack_ids=pack_ids,
+    verify_replay_spec_bindings(
+        source_manifest, spec=spec, policy_pack_ids=pack_ids
     )
 
     original, original_evaluation = _select_shrink_target(
@@ -876,6 +874,7 @@ def _emit_replay_manifest(
 
     try:
         digest = entrypoint_digest(root, config.entrypoint)
+        file_set = collect_source_file_set(root)
         manifest, omitted = build_replay_manifest(
             run_id=run_id,
             seed=seed,
@@ -885,6 +884,7 @@ def _emit_replay_manifest(
             git_revision=revision,
             entrypoint_digest=digest,
             policy_pack_ids=policy_pack_ids,
+            file_set=file_set,
         )
         if manifest is None:
             print(
@@ -910,6 +910,16 @@ def _emit_replay_manifest(
             file=sys.stderr,
         )
         return None
+
+
+def _warn_legacy_source_binding(manifest: ReplayManifest) -> None:
+    if manifest.source_binding.file_set is not None:
+        return
+    print(
+        "AgentCheck warning: replay manifest has no source file-set; only the "
+        "entrypoint digest is bound. Re-run test to emit the stronger binding.",
+        file=sys.stderr,
+    )
 
 
 def _persist_execution(execution: SuiteExecution) -> None:

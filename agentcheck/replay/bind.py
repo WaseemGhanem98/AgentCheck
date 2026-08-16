@@ -11,6 +11,7 @@ from agentcheck.config import AgentCheckConfig, resolve_entrypoint
 from agentcheck.domain import AgentSpec
 from agentcheck.errors import ConfigurationError
 
+from .fileset import collect_source_file_set, describe_file_set_mismatch, git_command_env
 from .manifest import ReplayManifest
 
 
@@ -24,6 +25,7 @@ def git_revision(root: Path) -> str | None:
             capture_output=True,
             text=True,
             timeout=5,
+            env=git_command_env(),
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -41,6 +43,7 @@ def git_worktree_is_dirty(root: Path) -> bool:
             capture_output=True,
             text=True,
             timeout=5,
+            env=git_command_env(),
         )
     except (OSError, subprocess.SubprocessError):
         return True
@@ -76,22 +79,15 @@ def entrypoint_digest(root: Path, entrypoint: str) -> str:
     return f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
 
-def verify_replay_bindings(
+def verify_replay_source_bindings(
     manifest: ReplayManifest,
     *,
     root: Path,
     config: AgentCheckConfig,
-    spec: AgentSpec,
-    policy_pack_ids: tuple[str, ...],
 ) -> None:
-    """Refuse replay when the live target is not the bound source."""
+    """Refuse replay when source/config identity differs. Does not import the target."""
 
     binding = manifest.spec_binding
-    if spec.spec_id != binding.spec_id:
-        raise ConfigurationError(
-            f"replay manifest was bound to spec {binding.spec_id}, "
-            f"but this target inspects as {spec.spec_id}"
-        )
     if config.adapter != binding.adapter:
         raise ConfigurationError(
             f"replay manifest adapter {binding.adapter} does not match "
@@ -102,26 +98,12 @@ def verify_replay_bindings(
             f"replay manifest entrypoint {binding.entrypoint} does not match "
             f"configured entrypoint {config.entrypoint}"
         )
-    live_packs = tuple(sorted(set(policy_pack_ids)))
-    bound_packs = tuple(sorted(set(binding.policy_pack_ids)))
-    if live_packs != bound_packs:
-        raise ConfigurationError(
-            "declared policy packs do not match the replay manifest"
-        )
 
     source = manifest.source_binding
     live_digest = entrypoint_digest(root, config.entrypoint)
     if live_digest != source.entrypoint_digest:
         raise ConfigurationError(
             "entrypoint source digest does not match the replay manifest"
-        )
-    if spec.identity.framework.value != source.framework:
-        raise ConfigurationError(
-            "inspected framework does not match the replay manifest"
-        )
-    if spec.identity.framework_version.value != source.framework_version:
-        raise ConfigurationError(
-            "inspected framework version does not match the replay manifest"
         )
     if source.git_revision is not None:
         live_revision = git_revision(root)
@@ -147,10 +129,66 @@ def verify_replay_bindings(
             + ", ".join(missing)
         )
 
+    if source.file_set is None:
+        return
+    live_files = collect_source_file_set(root)
+    reason = describe_file_set_mismatch(source.file_set, live_files)
+    if reason:
+        raise ConfigurationError(reason)
+
+
+def verify_replay_spec_bindings(
+    manifest: ReplayManifest,
+    *,
+    spec: AgentSpec,
+    policy_pack_ids: tuple[str, ...],
+) -> None:
+    """Refuse replay when the inspected spec is not the bound surface."""
+
+    binding = manifest.spec_binding
+    if spec.spec_id != binding.spec_id:
+        raise ConfigurationError(
+            f"replay manifest was bound to spec {binding.spec_id}, "
+            f"but this target inspects as {spec.spec_id}"
+        )
+    live_packs = tuple(sorted(set(policy_pack_ids)))
+    bound_packs = tuple(sorted(set(binding.policy_pack_ids)))
+    if live_packs != bound_packs:
+        raise ConfigurationError(
+            "declared policy packs do not match the replay manifest"
+        )
+    source = manifest.source_binding
+    if spec.identity.framework.value != source.framework:
+        raise ConfigurationError(
+            "inspected framework does not match the replay manifest"
+        )
+    if spec.identity.framework_version.value != source.framework_version:
+        raise ConfigurationError(
+            "inspected framework version does not match the replay manifest"
+        )
+
+
+def verify_replay_bindings(
+    manifest: ReplayManifest,
+    *,
+    root: Path,
+    config: AgentCheckConfig,
+    spec: AgentSpec,
+    policy_pack_ids: tuple[str, ...],
+) -> None:
+    """Refuse replay when the live target is not the bound source."""
+
+    verify_replay_source_bindings(manifest, root=root, config=config)
+    verify_replay_spec_bindings(
+        manifest, spec=spec, policy_pack_ids=policy_pack_ids
+    )
+
 
 __all__ = [
     "entrypoint_digest",
     "git_revision",
     "git_worktree_is_dirty",
     "verify_replay_bindings",
+    "verify_replay_source_bindings",
+    "verify_replay_spec_bindings",
 ]

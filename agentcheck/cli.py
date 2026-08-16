@@ -279,8 +279,9 @@ def _parser() -> argparse.ArgumentParser:
         help="re-execute a stored replay manifest without using disclosure artifacts",
         description=(
             "Load an agentcheck.replay_manifest.v1 document as untrusted input, "
-            "verify spec and source bindings, and re-run its scenarios through "
-            "the existing isolated ToolGateway. Frozen suites, suite.json, SQLite, "
+            "verify spec and source bindings (including the source file-set when "
+            "present), and re-run its scenarios through the existing isolated "
+            "ToolGateway. Frozen suites, suite.json, SQLite, "
             "and HTML reports are not replay manifests. This command executes "
             "trusted local agent code and is not a sandbox for hostile repositories."
         ),

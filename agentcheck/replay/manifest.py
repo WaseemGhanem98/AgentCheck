@@ -28,6 +28,7 @@ from agentcheck.domain import (
 )
 from agentcheck.errors import ConfigurationError
 from agentcheck.privacy import redact_artifact, redact_log_text
+from agentcheck.replay.fileset import SourceFileSet, omit_absent_file_set
 
 
 REPLAY_MANIFEST_CONTRACT_VERSION: Literal["agentcheck.replay_manifest.v1"] = (
@@ -49,12 +50,22 @@ class SpecBinding(ContractModel):
 
 
 class SourceBinding(ContractModel):
-    """Source identity. Git revision is absent for non-git targets."""
+    """Source identity. Git revision is absent for non-git targets.
+
+    ``file_set`` is additive. Slice 1 manifests omit it and keep the weaker
+    entrypoint-only digest; new manifests include the bounded source inventory.
+    Absence is not equivalent to a file-set match.
+    """
 
     git_revision: str | None = Field(default=None, max_length=64)
     entrypoint_digest: str = Field(min_length=8, max_length=80)
     framework: str = Field(min_length=1, max_length=100)
     framework_version: str | None = Field(default=None, max_length=100)
+    file_set: SourceFileSet | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_legacy_file_set(self, serializer: Any) -> dict[str, Any]:
+        return omit_absent_file_set(serializer(self))
 
     @model_validator(mode="after")
     def validate_revision_shape(self) -> "SourceBinding":
@@ -204,6 +215,7 @@ def build_replay_manifest(
     git_revision: str | None,
     entrypoint_digest: str,
     policy_pack_ids: Sequence[str] = (),
+    file_set: SourceFileSet | None = None,
 ) -> tuple[ReplayManifest | None, tuple[OmittedCase, ...]]:
     """Build a manifest from pre-redaction scenarios. Omits unscreenable cases."""
 
@@ -239,6 +251,7 @@ def build_replay_manifest(
             entrypoint_digest=entrypoint_digest,
             framework=spec.identity.framework.value,
             framework_version=spec.identity.framework_version.value,
+            file_set=file_set,
         ),
         environment_requirements=EnvironmentRequirements(names=environment_names),
         cases=tuple(kept),
@@ -298,6 +311,7 @@ __all__ = [
     "OmittedCase",
     "ReplayManifest",
     "SourceBinding",
+    "SourceFileSet",
     "SpecBinding",
     "build_replay_manifest",
     "encode_replay_manifest",
