@@ -17,6 +17,8 @@ from agentcheck.application import (
     replay_suite,
     shrink_suite,
 )
+from agentcheck.baseline.contract import DEFAULT_BASELINE_FILENAME
+from agentcheck.baseline.service import check_baseline, create_baseline, encode_comparison
 from agentcheck.config import DEFAULT_ENTRYPOINT, entrypoint_location
 from agentcheck.domain import AgentSpec, Severity, Verdict
 from agentcheck.errors import ConfigurationError, ScenarioValidationError
@@ -390,6 +392,86 @@ def _parser() -> argparse.ArgumentParser:
     review_parser.add_argument(
         "--reviewer",
         help="optional explicit reviewer label",
+    )
+
+    baseline_parser = commands.add_parser(
+        "baseline",
+        help="create or check a trusted evaluation baseline for CI gating",
+        description=(
+            "Snapshot automated AgentCheck results into agentcheck.baseline.v1, "
+            "or compare a later stored run against that snapshot. These commands "
+            "never import the target, never spawn a worker, never call "
+            "ToolGateway, and never make a network call. A failing run is never "
+            "implicitly accepted as a baseline. HTML, SQLite, and human reviews "
+            "are not comparison inputs."
+        ),
+    )
+    baseline_commands = baseline_parser.add_subparsers(
+        dest="baseline_command",
+        required=True,
+    )
+    create_parser = baseline_commands.add_parser(
+        "create",
+        help="write a trusted baseline from a stored run",
+        description=(
+            "Write agentcheck.baseline.v1 from stored JSON/JSONL run artifacts. "
+            "This does not bless failures automatically; creating or replacing a "
+            "baseline is always an explicit command."
+        ),
+    )
+    create_parser.add_argument("target", nargs="?", default=".")
+    create_parser.add_argument(
+        "--run-id",
+        type=_run_id,
+        help="stored run ID to snapshot",
+    )
+    create_parser.add_argument(
+        "--latest",
+        action="store_true",
+        help="snapshot the most recently indexed run (default when --run-id is omitted)",
+    )
+    create_parser.add_argument(
+        "--out",
+        help=(
+            "relative path inside the target for the baseline "
+            f"(default {DEFAULT_BASELINE_FILENAME})"
+        ),
+    )
+    create_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="replace an existing baseline instead of refusing",
+    )
+    check_parser = baseline_commands.add_parser(
+        "check",
+        help="fail CI on new authoritative regressions against a baseline",
+        description=(
+            "Compare a stored run to a trusted agentcheck.baseline.v1 document. "
+            "Exit 1 only for new or changed high-confidence FAIL identities. "
+            "INCONCLUSIVE is not FAIL. Current INFRA_ERROR exits 2. Human "
+            "reviews do not change automated correctness."
+        ),
+    )
+    check_parser.add_argument("target", nargs="?", default=".")
+    check_parser.add_argument(
+        "--baseline",
+        required=True,
+        help="relative path inside the target to agentcheck.baseline.v1",
+    )
+    check_parser.add_argument(
+        "--run-id",
+        type=_run_id,
+        help="stored run ID to compare as current",
+    )
+    check_parser.add_argument(
+        "--latest",
+        action="store_true",
+        help="compare the most recently indexed run (default when --run-id is omitted)",
+    )
+    check_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="write agentcheck.baseline_comparison.v1 JSON to stdout",
     )
     return parser
 
@@ -822,6 +904,63 @@ def _review_command(
     return 0
 
 
+def _baseline_create_command(
+    target: str,
+    *,
+    run_id: str | None,
+    latest: bool,
+    out: str | None,
+    force: bool,
+) -> int:
+    created = create_baseline(
+        target,
+        run_id=run_id,
+        latest=latest,
+        out=out,
+        force=force,
+    )
+    print("Writing evaluation baseline...")
+    print()
+    print(f"Source run: {created.baseline.created_from_run_id}")
+    print(f"Baseline ID: {created.baseline.baseline_id}")
+    print(f"Scenarios: {len(created.baseline.cases)}")
+    print(
+        "Known failures: "
+        f"{sum(1 for item in created.baseline.cases if item.verdict == 'FAIL')}"
+    )
+    print()
+    print("Baseline:")
+    print(created.path)
+    print()
+    print(
+        "This snapshot does not bless failures. Commit it only when you intend "
+        "those identities to be the trusted CI baseline."
+    )
+    return 0
+
+
+def _baseline_check_command(
+    target: str,
+    *,
+    baseline: str,
+    run_id: str | None,
+    latest: bool,
+    as_json: bool,
+) -> int:
+    checked = check_baseline(
+        target,
+        baseline_path=baseline,
+        run_id=run_id,
+        latest=latest,
+    )
+    if as_json:
+        print(checked.summary, end="", file=sys.stderr)
+        print(encode_comparison(checked.comparison))
+    else:
+        print(checked.summary, end="")
+    return checked.exit_code
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -887,6 +1026,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                 note=args.note,
                 reviewer=args.reviewer,
             )
+        if args.command == "baseline":
+            if args.baseline_command == "create":
+                return _baseline_create_command(
+                    args.target,
+                    run_id=args.run_id,
+                    latest=args.latest,
+                    out=args.out,
+                    force=args.force,
+                )
+            if args.baseline_command == "check":
+                return _baseline_check_command(
+                    args.target,
+                    baseline=args.baseline,
+                    run_id=args.run_id,
+                    latest=args.latest,
+                    as_json=args.json,
+                )
     except KeyboardInterrupt:
         print("AgentCheck interrupted.", file=sys.stderr)
         return 130

@@ -368,3 +368,5 @@ def test_existing_commands_remain_available(capsys: pytest.CaptureFixture[str]) 
     assert "report" in help_text
     assert "replay" in help_text
     assert "shrink" in help_text
+    assert "review" in help_text
+    assert "baseline" in help_text

@@ -27,6 +27,9 @@ agentcheck shrink examples/evaluation/account_agent \
 agentcheck review examples/evaluation/account_agent \
   --run-id <run-id> --finding-id finding:duplicate_side_effect \
   --decision accepted --note "Confirmed regression"
+agentcheck baseline create examples/evaluation/account_agent --latest
+agentcheck baseline check examples/evaluation/account_agent \
+  --baseline agentcheck-baseline.json --latest
 ```
 
 `generate` is optional. Without a frozen suite file, `test` still runs the
