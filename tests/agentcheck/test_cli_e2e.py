@@ -148,6 +148,20 @@ def test_offline_cli_initializes_a_target_before_inspecting_it(tmp_path: Path) -
 
     assert inspection.returncode == 0, inspection.stderr
     assert "Agent: Account Support Agent" in inspection.stdout
+    assert "- 4 capabilities" in inspection.stdout
+    assert "✓ delete_account (state-changing, destructive)" in inspection.stdout
+    assert (
+        "Capabilities (action kind and risk are inferred, not authoritative):"
+        in inspection.stdout
+    )
+    assert (
+        "- lookup_account: lookup, read-only (confidence 0.60); "
+        "1 required, 0 optional argument(s)" in inspection.stdout
+    )
+    assert (
+        "- delete_account: delete, state-changing, destructive (confidence 0.70); "
+        "1 required, 0 optional argument(s)" in inspection.stdout
+    )
 
 
 def test_offline_cli_runs_complete_phase1_flow_with_intercepted_tools(

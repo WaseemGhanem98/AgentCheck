@@ -23,14 +23,12 @@ from jsonschema import SchemaError  # type: ignore[import-untyped]
 from pydantic import BaseModel, TypeAdapter
 
 from agentcheck.domain import (
-    ActionKind,
     AgentProperty,
     AgentSpec,
     CanonicalEvent,
     CanonicalEventType,
     CanonicalRun,
     CapabilitiesSpec,
-    Capability,
     ConversationRole,
     ConversationTurn,
     Guardrail,
@@ -60,6 +58,7 @@ from agentcheck.domain import (
     canonical_hash,
     utc_now,
 )
+from agentcheck.inspect.capabilities import classify_tool, extract_capabilities
 from agentcheck.schema_safety import UnsafeSchemaReference, offline_validator
 from agentcheck.runner.budgets import BudgetExceeded
 
@@ -208,30 +207,6 @@ def _unknown_property(value: Any, *, locator: str, summary: str) -> AgentPropert
     )
 
 
-def _action_kind(tool_name: str) -> tuple[ActionKind, bool, bool]:
-    tokens = tool_name.lower().replace("-", "_").split("_")
-    token_set = set(tokens)
-    if token_set & {"delete", "remove", "destroy", "erase", "purge"}:
-        return ActionKind.DELETE, True, True
-    if token_set & {"cancel", "terminate", "close"}:
-        return ActionKind.MODIFY, True, True
-    if token_set & {"update", "modify", "change", "set", "edit"}:
-        return ActionKind.MODIFY, True, False
-    if token_set & {"create", "add", "open", "register"}:
-        return ActionKind.CREATE, True, False
-    if token_set & {"send", "email", "notify", "publish"}:
-        return ActionKind.SEND, True, False
-    if token_set & {"schedule", "book", "reserve"}:
-        return ActionKind.SCHEDULE, True, False
-    if token_set & {"lookup", "find", "search", "get", "read"}:
-        return ActionKind.LOOKUP, False, False
-    if token_set & {"retrieve", "fetch"}:
-        return ActionKind.RETRIEVE, False, False
-    if token_set & {"summarize", "summary"}:
-        return ActionKind.SUMMARIZE, False, False
-    return ActionKind.OTHER, False, False
-
-
 def _output_schema(agent: Any) -> tuple[dict[str, Any] | None, str | None]:
     output_type = agent.output_type
     if output_type is None:
@@ -264,7 +239,7 @@ def _model_identity(
 
 
 def _tool_definition(tool: Any) -> ToolDefinition:
-    _, state_changing, destructive = _action_kind(tool.name)
+    _, state_changing, destructive = classify_tool(tool.name, tool.description or None)
     return ToolDefinition(
         name=tool.name,
         description=tool.description or None,
@@ -1087,12 +1062,13 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
             )
 
         tool_properties: list[AgentProperty[Any]] = []
-        capability_properties: list[AgentProperty[Any]] = []
+        definitions: list[ToolDefinition] = []
         fingerprint_tools: list[Any] = []
         for index, tool in enumerate(target.tools):
             locator = f"{source}.agent.tools[{index}]"
             if isinstance(tool, FunctionTool):
                 definition = _tool_definition(tool)
+                definitions.append(definition)
                 fingerprint_tools.append(definition.model_dump(mode="json"))
                 tool_properties.append(
                     _property(
@@ -1101,26 +1077,6 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
                         summary="Function tool name, description, and schemas read from the SDK object.",
                         kind=SourceKind.TOOL_SCHEMA,
                         confidence=0.9,
-                        inferred=True,
-                        authoritative=False,
-                    )
-                )
-                action_kind, state_changing, destructive = _action_kind(tool.name)
-                capability_properties.append(
-                    _property(
-                        Capability(
-                            capability_id=f"tool:{tool.name}",
-                            name=tool.name.replace("_", " ").strip().title(),
-                            description=tool.description
-                            or f"Capability exposed by {tool.name}.",
-                            action_kind=action_kind,
-                            state_changing=state_changing,
-                            destructive=destructive,
-                        ),
-                        locator=f"{locator}.name",
-                        summary="Capability label and risk are mechanically inferred from the tool definition.",
-                        kind=SourceKind.TOOL_SCHEMA,
-                        confidence=0.7,
                         inferred=True,
                         authoritative=False,
                     )
@@ -1147,6 +1103,27 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
                         ),
                     )
                 )
+
+        capability_properties: list[AgentProperty[Any]] = []
+        for extracted in extract_capabilities(definitions):
+            capability_properties.append(
+                AgentProperty(
+                    value=extracted.capability,
+                    source=SourceReference(
+                        kind=SourceKind.TOOL_SCHEMA,
+                        locator=f"tool:{extracted.tool_name}",
+                        description=(
+                            "Argument surface read from the declared schema; action "
+                            "kind and side-effect risk are inferred and not authoritative."
+                        ),
+                    ),
+                    confidence=extracted.confidence,
+                    evidence=extracted.evidence,
+                    inferred=True,
+                    authoritative=False,
+                )
+            )
+            unknowns.extend(extracted.unknowns)
 
         fingerprint = {
             "source": source,

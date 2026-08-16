@@ -23,11 +23,13 @@ from pydantic import BaseModel
 
 from agentcheck.adapters import OpenAIAgentsAdapter, UnsupportedTargetError
 from agentcheck.domain import (
+    ActionKind,
     CanonicalEventType,
     ResourceBudgets,
     RunTermination,
     SimulatedToolOutcome,
     SimulatedToolStatus,
+    SourceKind,
     ToolFixture,
     ToolOutcomeStatus,
     Verdict,
@@ -35,7 +37,14 @@ from agentcheck.domain import (
 )
 from agentcheck.evaluate import evaluate_run
 from agentcheck.generate import build_account_support_suite
-from agentcheck.inspect import TargetLoadError, load_target, resolve_entrypoint
+from agentcheck.inspect import (
+    TargetLoadError,
+    classify_tool,
+    extract_capabilities,
+    load_target,
+    resolve_entrypoint,
+)
+from agentcheck.inspect.capabilities import JsonSchemaType
 from agentcheck.runner import ToolGateway
 
 
@@ -302,6 +311,111 @@ def test_real_tool_gateway_state_transition_is_normalized_into_run() -> None:
         run.state_transitions[0].transition_id,
     )
     assert run.tool_outcomes[0].metadata["simulated"] is True
+
+
+def test_inspect_derives_capabilities_from_schema_evidence() -> None:
+    @function_tool
+    def delete_account(account_id: str, reason: str | None = None) -> str:
+        """Permanently delete one account after explicit confirmation."""
+
+        return account_id
+
+    agent = Agent(
+        name="Account Support",
+        instructions="Confirm before deleting.",
+        tools=[delete_account],
+        model=ScriptedModel([[_message("unused")]]),
+    )
+
+    spec = OpenAIAgentsAdapter().inspect(agent, source="example/agent.py:agent")
+
+    (capability_property,) = spec.capabilities.items
+    capability = capability_property.value
+    assert capability.capability_id == "tool:delete_account"
+    assert capability.action_kind is ActionKind.DELETE
+    assert capability.state_changing is True
+    assert capability.destructive is True
+    assert capability_property.inferred is True
+    assert capability_property.authoritative is False
+    assert capability_property.confidence < 0.8
+    assert capability_property.source.kind is SourceKind.TOOL_SCHEMA
+
+    summaries = [item.summary for item in capability_property.evidence]
+    assert any("never authoritative" in summary for summary in summaries)
+    assert any("2 required and 0 optional parameter(s)" in summary for summary in summaries)
+    assert any("Parameter 'account_id' is required" in summary for summary in summaries)
+    assert [item.locator for item in capability_property.evidence][0] == (
+        "tool:delete_account"
+    )
+
+    # A strict SDK schema lists every property as required and expresses an
+    # optional Python argument as a nullable union, so the extractor reports the
+    # declared contract rather than the source signature.
+    (extracted,) = extract_capabilities([item.value for item in spec.tools.items])
+    assert [item.name for item in extracted.arguments.required_parameters] == [
+        "account_id",
+        "reason",
+    ]
+    assert extracted.arguments.optional_parameters == ()
+    reason = extracted.arguments.parameters[1]
+    assert reason.types == (JsonSchemaType.NULL, JsonSchemaType.STRING)
+    assert extracted.arguments.additional_properties_allowed is False
+
+
+def test_inspect_records_an_unclassifiable_tool_as_unknown_rather_than_guessing() -> None:
+    @function_tool
+    def frobnicate(payload: str) -> str:
+        """Perform an operation this adapter cannot classify."""
+
+        return payload
+
+    agent = Agent(
+        name="Opaque",
+        instructions="Do the thing.",
+        tools=[frobnicate],
+        model=ScriptedModel([[_message("unused")]]),
+    )
+
+    spec = OpenAIAgentsAdapter().inspect(agent, source="example/agent.py:agent")
+
+    capability = spec.capabilities.items[0].value
+    assert capability.action_kind is ActionKind.OTHER
+    assert capability.state_changing is False
+    assert capability.destructive is False
+    assert [item.path for item in spec.unknowns] == ["capabilities.items[0].action_kind"]
+    assert spec.unknowns[0].source.kind is SourceKind.UNKNOWN
+    assert spec.unknowns[0].confidence == 0.0
+
+
+def test_prepared_tool_risk_matches_the_extractor_classification() -> None:
+    @function_tool
+    def delete_account(account_id: str) -> str:
+        """Delete one account."""
+
+        return account_id
+
+    @function_tool
+    def lookup_account(account_id: str) -> str:
+        """Look up one account."""
+
+        return account_id
+
+    agent = Agent(
+        name="Account Support",
+        instructions="Confirm before deleting.",
+        tools=[delete_account, lookup_account],
+        model=ScriptedModel([[_message("unused")]]),
+    )
+
+    prepared = OpenAIAgentsAdapter().prepare(agent, RecordingGateway())
+
+    assert prepared.metadata["tool_risks"] == {
+        "delete_account": (True, True),
+        "lookup_account": (False, False),
+    }
+    assert prepared.metadata["tool_risks"]["delete_account"] == classify_tool(
+        "delete_account"
+    )[1:]
 
 
 def test_unsupported_tool_fails_preflight_before_model_execution() -> None:

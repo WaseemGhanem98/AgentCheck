@@ -15,6 +15,7 @@ from agentcheck.config import DEFAULT_ENTRYPOINT, entrypoint_location
 from agentcheck.domain import AgentSpec, Severity, Verdict
 from agentcheck.errors import ScenarioValidationError
 from agentcheck.initialize import DEFAULT_ADAPTER, SUPPORTED_ADAPTERS, write_initial_config
+from agentcheck.inspect.capabilities import ExtractedCapability, extract_capabilities
 from agentcheck.privacy import redact_artifact, redact_log_text
 
 
@@ -104,6 +105,31 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _capability_line(extracted: ExtractedCapability) -> str:
+    capability = extracted.capability
+    markers = [capability.action_kind.value]
+    markers.append("state-changing" if capability.state_changing else "read-only")
+    if capability.destructive:
+        markers.append("destructive")
+    arguments = extracted.arguments
+    if arguments.schema_known:
+        surface = (
+            f"{len(arguments.required_parameters)} required, "
+            f"{len(arguments.optional_parameters)} optional argument(s)"
+        )
+        unknown_types = sum(
+            1 for parameter in arguments.parameters if not parameter.types_known
+        )
+        if unknown_types:
+            surface += f", {unknown_types} of unknown type"
+    else:
+        surface = "argument surface unknown"
+    return (
+        f"{extracted.tool_name}: {', '.join(markers)} "
+        f"(confidence {extracted.confidence:.2f}); {surface}"
+    )
+
+
 def _print_inspection(spec: AgentSpec) -> None:
     tools = [item.value for item in spec.tools.items]
     capabilities = [item.value for item in spec.capabilities.items]
@@ -133,6 +159,10 @@ def _print_inspection(spec: AgentSpec) -> None:
                 markers.append("destructive")
             suffix = f" ({', '.join(markers)})" if markers else ""
             print(f"✓ {tool.name}{suffix}")
+        print()
+        print("Capabilities (action kind and risk are inferred, not authoritative):")
+        for extracted in extract_capabilities(tools):
+            print(f"- {_capability_line(extracted)}")
     if spec.unknowns:
         print()
         print(f"Unknown properties: {len(spec.unknowns)}")

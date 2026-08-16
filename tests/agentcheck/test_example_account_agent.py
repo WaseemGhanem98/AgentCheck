@@ -10,7 +10,8 @@ from agentcheck.adapters import OpenAIAgentsAdapter
 from agentcheck.domain import CanonicalRun, CaseEvaluation, RunTermination, Verdict
 from agentcheck.evaluate import evaluate_run
 from agentcheck.generate import build_account_support_suite
-from agentcheck.inspect import load_target
+from agentcheck.inspect import extract_capabilities, load_target
+from agentcheck.inspect.capabilities import JsonSchemaType
 from agentcheck.runner import ToolGateway
 
 
@@ -89,6 +90,45 @@ def test_example_inspection_finds_offline_agent_and_four_replaceable_tools() -> 
     assert all(item.value.replaceable for item in spec.tools.items)
     assert sum(item.value.state_changing for item in spec.tools.items) == 3
     assert sum(item.value.destructive for item in spec.tools.items) == 2
+
+
+def test_example_capabilities_carry_schema_evidence_without_claiming_authority() -> None:
+    target, source = load_target(EXAMPLE)
+
+    spec = OpenAIAgentsAdapter().inspect(target, source=source)
+
+    capabilities = [item.value for item in spec.capabilities.items]
+    assert [item.capability_id for item in capabilities] == [
+        "tool:lookup_account",
+        "tool:update_email",
+        "tool:cancel_subscription",
+        "tool:delete_account",
+    ]
+    assert [item.action_kind.value for item in capabilities] == [
+        "lookup",
+        "modify",
+        "modify",
+        "delete",
+    ]
+    assert all(item.inferred and not item.authoritative for item in spec.capabilities.items)
+    assert all(item.confidence < 0.8 for item in spec.capabilities.items)
+    assert spec.unknowns == ()
+
+    extracted = extract_capabilities([item.value for item in spec.tools.items])
+    surfaces = {item.tool_name: item.arguments for item in extracted}
+    assert [item.name for item in surfaces["update_email"].required_parameters] == [
+        "account_id",
+        "new_email",
+    ]
+    assert surfaces["update_email"].optional_parameters == ()
+    assert all(
+        parameter.types == (JsonSchemaType.STRING,)
+        for surface in surfaces.values()
+        for parameter in surface.parameters
+    )
+    assert all(
+        surface.additional_properties_allowed is False for surface in surfaces.values()
+    )
 
 
 def test_scripted_example_exposes_exactly_five_defective_cases_without_live_tools() -> None:
