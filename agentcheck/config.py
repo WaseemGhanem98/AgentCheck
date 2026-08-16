@@ -32,6 +32,7 @@ class AgentCheckConfig(BaseModel):
     include_instructions_in_report: bool = False
     artifacts_directory: str = ".agentcheck"
     suite_path: str | None = None
+    policy_packs: tuple[str, ...] | None = None
 
     @field_validator("entrypoint")
     @classmethod
@@ -72,6 +73,26 @@ class AgentCheckConfig(BaseModel):
         if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
             raise ValueError("suite_path must be a safe relative path")
         return path.as_posix()
+
+    @field_validator("policy_packs")
+    @classmethod
+    def validate_policy_packs(
+        cls, values: tuple[str, ...] | None
+    ) -> tuple[str, ...] | None:
+        if values is None:
+            return None
+        result: list[str] = []
+        for value in values:
+            name = value.strip()
+            if not name:
+                raise ValueError("policy pack names must not be empty")
+            path = Path(name)
+            if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+                raise ValueError("policy pack names must be a safe relative path")
+            normalized = path.as_posix()
+            if normalized not in result:
+                result.append(normalized)
+        return tuple(result)
 
 
 def normalize_target(target: str | os.PathLike[str]) -> Path:

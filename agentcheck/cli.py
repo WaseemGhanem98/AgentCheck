@@ -146,6 +146,16 @@ def _parser() -> argparse.ArgumentParser:
             f"default {DEFAULT_MAX_MUTATIONS})"
         ),
     )
+    generate_parser.add_argument(
+        "--policy-pack",
+        action="append",
+        dest="policy_packs",
+        metavar="NAME",
+        help=(
+            "declare a versioned policy pack by built-in name or in-target path "
+            "(repeatable)"
+        ),
+    )
 
     test_parser = commands.add_parser(
         "test",
@@ -219,6 +229,12 @@ def _print_inspection(spec: AgentSpec) -> None:
         print("Capabilities (action kind and risk are inferred, not authoritative):")
         for extracted in extract_capabilities(tools):
             print(f"- {_capability_line(extracted)}")
+    if spec.policies.items:
+        print()
+        print("Declared policy packs:")
+        for item in spec.policies.items:
+            version = item.value.version or "unknown"
+            print(f"- {item.value.policy_id} (v{version})")
     if spec.unknowns:
         print()
         print(f"Unknown properties: {len(spec.unknowns)}")
@@ -263,6 +279,7 @@ def _generate_command(
     force: bool,
     include_mutations: bool,
     max_mutations: int | None,
+    policy_packs: list[str] | None,
 ) -> int:
     if max_mutations is not None and not include_mutations:
         raise ConfigurationError("--max-mutations requires --mutations")
@@ -275,6 +292,7 @@ def _generate_command(
         force=force,
         include_mutations=include_mutations,
         max_mutations=max_mutations,
+        policy_packs=policy_packs,
     )
     _print_inspection(generation.spec)
     print()
@@ -394,6 +412,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 force=args.force,
                 include_mutations=args.mutations,
                 max_mutations=args.max_mutations,
+                policy_packs=args.policy_packs,
             )
         if args.command == "test":
             return _test_command(args.target, seed=args.seed, run_id=args.run_id)

@@ -7,7 +7,7 @@ from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 from agentcheck.analyze import analyze_failures
 from agentcheck.artifacts import ArtifactStore, new_run_id
@@ -31,6 +31,11 @@ from agentcheck.generate.suite import (
     configured_frozen_suite,
     resolve_suite_destination,
     write_frozen_suite,
+)
+from agentcheck.policies import (
+    apply_policy_packs_to_many,
+    attach_declared_policies,
+    resolve_policy_packs,
 )
 from agentcheck.report import render_report
 from agentcheck.runner.orchestrator import (
@@ -91,14 +96,26 @@ def inspect_target(
     timeout_seconds: float = 30.0,
 ) -> tuple[Path, AgentCheckConfig, ProcessResult[AgentSpec]]:
     root, config = load_config(target)
+    inspection = inspect_in_subprocess(
+        root,
+        config,
+        timeout_seconds=timeout_seconds,
+    )
+    if inspection.value is not None:
+        packs = resolve_policy_packs(root, config)
+        inspection = ProcessResult(
+            value=attach_declared_policies(inspection.value, packs),
+            infrastructure_error=None,
+            stdout=inspection.stdout,
+            stderr=inspection.stderr,
+            returncode=inspection.returncode,
+            timed_out=inspection.timed_out,
+            worker_pid=inspection.worker_pid,
+        )
     return (
         root,
         config,
-        inspect_in_subprocess(
-            root,
-            config,
-            timeout_seconds=timeout_seconds,
-        ),
+        inspection,
     )
 
 
@@ -136,6 +153,7 @@ def generate_suite(
     force: bool = False,
     include_mutations: bool = False,
     max_mutations: int | None = None,
+    policy_packs: Sequence[str] | None = None,
     timeout_seconds: float = 30.0,
 ) -> SuiteGeneration:
     """Inspect a target, freeze its deterministic suite, and persist a reviewable file."""
@@ -149,13 +167,15 @@ def generate_suite(
             "re-run with --force to replace it"
         )
     inspection = inspect_in_subprocess(root, config, timeout_seconds=timeout_seconds)
-    spec = inspection.require_value()
+    packs = resolve_policy_packs(root, config, policy_packs)
+    spec = attach_declared_policies(inspection.require_value(), packs)
     suite = build_frozen_suite(
         spec,
         config,
         seed=actual_seed,
         include_mutations=include_mutations,
         max_mutations=max_mutations,
+        policy_packs=packs,
     )
     write_frozen_suite(destination, suite, force=force)
     return SuiteGeneration(
@@ -204,12 +224,15 @@ def execute_suite(
     # Freeze repository identity before importing or executing target code.
     revision = _git_revision(root)
     inspection = inspect_in_subprocess(root, config)
-    spec = inspection.require_value()
+    packs = resolve_policy_packs(root, config)
+    spec = attach_declared_policies(inspection.require_value(), packs)
 
     frozen: FrozenSuite | None = None
     if configured is None:
         effective_seed = _effective_seed(config, seed)
-        candidates = _suite(config, seed)
+        candidates = apply_policy_packs_to_many(
+            _suite(config, seed), packs, declared=True
+        )
     else:
         suite_path, frozen = configured
         if frozen.spec_id != spec.spec_id:

@@ -35,6 +35,7 @@ from agentcheck.domain import (
     canonical_hash,
 )
 from agentcheck.errors import ConfigurationError, ScenarioValidationError
+from agentcheck.policies import PolicyPack, apply_policy_packs
 from agentcheck.privacy import redact_log_text
 
 from .boundaries import build_boundary_cases, unsupported_boundary_reasons
@@ -153,6 +154,14 @@ class GeneratorProvenance(ContractModel):
     generator: str = Field(min_length=1, max_length=200)
     generator_version: str = Field(min_length=1, max_length=100)
     sources: tuple[str, ...] = Field(min_length=1)
+    policy_packs: tuple[str, ...] = ()
+
+    @model_serializer(mode="wrap")
+    def omit_idle_policy_packs(self, serializer: Any) -> dict[str, Any]:
+        data = serializer(self)
+        if not data.get("policy_packs"):
+            data.pop("policy_packs", None)
+        return data
 
 
 class SuiteCoverage(ContractModel):
@@ -307,6 +316,7 @@ def build_frozen_suite(
     seed: int,
     include_mutations: bool = False,
     max_mutations: int | None = None,
+    policy_packs: Sequence[PolicyPack] = (),
 ) -> FrozenSuite:
     """Derive, deduplicate, lint, and freeze every supported case for a target."""
 
@@ -400,6 +410,45 @@ def build_frozen_suite(
             seen.add(generated.scenario.fingerprint)
             cases.append(FrozenCase(scenario=generated.scenario, lineage=lineage))
 
+    if policy_packs:
+        applied_cases: list[FrozenCase] = []
+        applied_seen: set[str] = set()
+        for case in cases:
+            scenario = apply_policy_packs(
+                case.scenario, policy_packs, declared=True
+            )
+            if scenario.fingerprint in applied_seen:
+                rejected.append(
+                    RejectedCase(
+                        scenario=scenario,
+                        lineage=case.lineage,
+                        issues=(
+                            LintIssueRecord(
+                                code="duplicate_scenario_fingerprint",
+                                message=(
+                                    "a structurally identical case was already frozen"
+                                ),
+                                severity="error",
+                            ),
+                        ),
+                    )
+                )
+                continue
+            if scenario.fingerprint != case.scenario.fingerprint:
+                issues = lint_scenario(scenario, spec)
+                if issues:
+                    rejected.append(
+                        RejectedCase(
+                            scenario=scenario,
+                            lineage=case.lineage,
+                            issues=_issue_records(issues),
+                        )
+                    )
+                    continue
+            applied_seen.add(scenario.fingerprint)
+            applied_cases.append(FrozenCase(scenario=scenario, lineage=case.lineage))
+        cases = applied_cases
+
     if not cases:
         raise ScenarioValidationError(
             "No valid scenarios remain after linting; refusing to freeze a suite "
@@ -438,6 +487,7 @@ def build_frozen_suite(
             generator=GENERATOR_NAME,
             generator_version=__version__,
             sources=sources,
+            policy_packs=tuple(pack.pack_id for pack in policy_packs),
         ),
         coverage=coverage,
         cases=tuple(cases),
