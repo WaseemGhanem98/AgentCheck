@@ -70,6 +70,8 @@ def _case_from_evaluation(
     fingerprint: str,
     evaluation: CaseEvaluation,
 ) -> BaselineCase:
+    # Shrink identity is optional on a baseline case. Absence must never make
+    # an authoritative FAIL look like a non-regression in comparison.
     signature = None
     if evaluation.verdict == Verdict.FAIL:
         try:

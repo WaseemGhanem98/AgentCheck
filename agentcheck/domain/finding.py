@@ -62,6 +62,13 @@ class CriticalFindingBasis(str, Enum):
 
 
 class Finding(ContractModel):
+    """Structural grouping of related automated FAILs.
+
+    ``failure_signature`` is a lexical analysis key (for example
+    ``duplicate_side_effect``). It is not the versioned shrink/regression
+    contract ``agentcheck.failure_signature.v1``.
+    """
+
     contract_version: Literal["agentcheck.finding.v1"] = FINDING_CONTRACT_VERSION
     finding_id: str = Field(min_length=1, max_length=200)
     failure_signature: str = Field(min_length=1, max_length=500)

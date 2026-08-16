@@ -447,9 +447,12 @@ def _parser() -> argparse.ArgumentParser:
         help="fail CI on new authoritative regressions against a baseline",
         description=(
             "Compare a stored run to a trusted agentcheck.baseline.v1 document. "
-            "Exit 1 only for new or changed high-confidence FAIL identities. "
-            "INCONCLUSIVE is not FAIL. Current INFRA_ERROR exits 2. Human "
-            "reviews do not change automated correctness."
+            "Exit 1 for new or changed high-confidence FAIL identities, including "
+            "authoritative FAILs that have no shrink signature. Exit 2 when a "
+            "current FAIL cannot be compared to a baseline FAIL because a stable "
+            "signature is missing on one or both sides, and for current "
+            "INFRA_ERROR. INCONCLUSIVE is not FAIL. Human reviews do not change "
+            "automated correctness."
         ),
     )
     check_parser.add_argument("target", nargs="?", default=".")

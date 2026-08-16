@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .contract import (
     BLOCKING_CATEGORIES,
+    CERTIFICATION_FAILURE_CATEGORIES,
     BaselineCase,
     BaselineComparison,
     ComparisonCategory,
@@ -15,6 +16,7 @@ from .contract import (
 _CATEGORY_ORDER = (
     "new_regression",
     "changed_failure",
+    "uncertifiable_failure",
     "unchanged_failure",
     "resolved_failure",
     "changed_scenario",
@@ -52,7 +54,7 @@ def compare_baselines(
 def gate_exit_code(comparison: BaselineComparison) -> int:
     """CI status for a completed comparison. Distinct from ``agentcheck test``."""
 
-    if any(item.category == "infra_change" for item in comparison.items):
+    if any(item.category in CERTIFICATION_FAILURE_CATEGORIES for item in comparison.items):
         return 2
     if any(item.blocking for item in comparison.items):
         return 1
@@ -60,6 +62,17 @@ def gate_exit_code(comparison: BaselineComparison) -> int:
 
 
 def format_comparison(comparison: BaselineComparison) -> str:
+    removed_known_failures = sum(
+        1
+        for item in comparison.items
+        if item.category == "removed_scenario" and item.baseline_verdict == "FAIL"
+    )
+    fail_to_inconclusive = sum(
+        1
+        for item in comparison.items
+        if item.baseline_verdict == "FAIL" and item.current_verdict == "INCONCLUSIVE"
+    )
+    uncertifiable = _count(comparison.items, "uncertifiable_failure")
     lines = [
         "Baseline:",
         f"{comparison.baseline_scenario_count} scenarios",
@@ -77,7 +90,15 @@ def format_comparison(comparison: BaselineComparison) -> str:
         "",
         "UNCHANGED:",
         str(comparison.unchanged_failure_count),
+        "",
+        "Removed known failures:",
+        str(removed_known_failures),
+        "",
+        "FAIL -> INCONCLUSIVE:",
+        str(fail_to_inconclusive),
     ]
+    if uncertifiable:
+        lines.extend(["", "Uncertifiable failures:", str(uncertifiable)])
     regressions = [
         item
         for item in comparison.items
@@ -91,6 +112,30 @@ def format_comparison(comparison: BaselineComparison) -> str:
             lines.append(
                 f"- {item.scenario_id} ({item.fingerprint}) {transition} [{item.category}]"
             )
+    uncertifiable_items = [
+        item
+        for item in comparison.items
+        if item.category == "uncertifiable_failure"
+    ]
+    if uncertifiable_items:
+        lines.append("")
+        lines.append("Uncertifiable failure details:")
+        for item in uncertifiable_items:
+            transition = _transition(item)
+            lines.append(
+                f"- {item.scenario_id} ({item.fingerprint}) {transition} [{item.category}]"
+            )
+    if removed_known_failures:
+        lines.append("")
+        lines.append(
+            "Removed known failures do not block by default; they are not "
+            "equivalent to a clean stable suite."
+        )
+    if fail_to_inconclusive:
+        lines.append("")
+        lines.append(
+            "FAIL -> INCONCLUSIVE does not block; weak evidence is not a PASS."
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -190,29 +235,29 @@ def _classify(
         return "infra_change", False
     if current is None:
         return "removed_scenario", False
-    if baseline is None:
-        if current.verdict == "FAIL" and _signature_fingerprint(current) is not None:
-            return "new_regression", True
-        if current.verdict == "INCONCLUSIVE":
-            return "inconclusive_change", False
-        return "new_scenario", False
 
     current_sig = _signature_fingerprint(current)
     baseline_sig = _signature_fingerprint(baseline)
-    if current.verdict == "FAIL" and current_sig is not None:
-        if baseline.verdict == "FAIL" and baseline_sig == current_sig:
-            category: ComparisonCategory = (
-                "changed_scenario" if fingerprint_changed else "unchanged_failure"
-            )
-            return category, False
-        if baseline.verdict == "FAIL" and baseline_sig and baseline_sig != current_sig:
+    if current.verdict == "FAIL":
+        if baseline is None or baseline.verdict != "FAIL":
+            return "new_regression", True
+        if current_sig is not None and baseline_sig is not None:
+            if baseline_sig == current_sig:
+                category: ComparisonCategory = (
+                    "changed_scenario" if fingerprint_changed else "unchanged_failure"
+                )
+                return category, False
             return "changed_failure", True
-        return "new_regression", True
-    if baseline.verdict == "FAIL" and current.verdict == "PASS":
+        return "uncertifiable_failure", False
+    if baseline is not None and baseline.verdict == "FAIL" and current.verdict == "PASS":
         return "resolved_failure", False
-    if current.verdict == "INCONCLUSIVE" or baseline.verdict == "INCONCLUSIVE":
-        if current.verdict != baseline.verdict:
+    if current.verdict == "INCONCLUSIVE" or (
+        baseline is not None and baseline.verdict == "INCONCLUSIVE"
+    ):
+        if baseline is None or current.verdict != baseline.verdict:
             return "inconclusive_change", False
+    if baseline is None:
+        return "new_scenario", False
     if fingerprint_changed:
         return "changed_scenario", False
     if current.verdict == baseline.verdict:

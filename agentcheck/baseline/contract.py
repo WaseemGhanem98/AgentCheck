@@ -24,6 +24,7 @@ COMPARISON_CONTRACT_VERSION: Literal["agentcheck.baseline_comparison.v1"] = (
 DEFAULT_BASELINE_FILENAME = "agentcheck-baseline.json"
 MAX_BASELINE_BYTES = 4 * 1024 * 1024
 BLOCKING_CATEGORIES = ("new_regression", "changed_failure")
+CERTIFICATION_FAILURE_CATEGORIES = ("infra_change", "uncertifiable_failure")
 ComparisonCategory = Literal[
     "unchanged_failure",
     "resolved_failure",
@@ -34,6 +35,7 @@ ComparisonCategory = Literal[
     "changed_scenario",
     "inconclusive_change",
     "infra_change",
+    "uncertifiable_failure",
     "unchanged",
 ]
 
@@ -55,7 +57,11 @@ class BaselineCase(ContractModel):
 
 
 class BaselineFinding(ContractModel):
-    """Automated finding identity. Human reviews are excluded."""
+    """Automated finding identity. Human reviews are excluded.
+
+    ``failure_signature`` copies ``Finding.failure_signature``, a lexical
+    grouping key from analysis. It is not ``agentcheck.failure_signature.v1``.
+    """
 
     finding_id: str = Field(min_length=1, max_length=200)
     finding_fingerprint: str = Field(min_length=1, max_length=200)
@@ -199,6 +205,7 @@ def _digest_equal(left: str, right: str) -> bool:
 __all__ = [
     "BASELINE_CONTRACT_VERSION",
     "BLOCKING_CATEGORIES",
+    "CERTIFICATION_FAILURE_CATEGORIES",
     "COMPARISON_CONTRACT_VERSION",
     "DEFAULT_BASELINE_FILENAME",
     "MAX_BASELINE_BYTES",

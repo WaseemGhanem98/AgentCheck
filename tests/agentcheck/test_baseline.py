@@ -486,6 +486,205 @@ def test_new_hard_failure_and_pass_to_fail(
     assert categories == {"new_regression"}
 
 
+def test_unsigned_schema_and_budget_fails_block(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _target(tmp_path)
+    _patch_execution_tripwires(monkeypatch)
+    schema_fail = _fail_evaluation(
+        SCENARIO_A.scenario_id, "new-schema", assertion_id="schema:attempt-0001"
+    )
+    budget_fail = _fail_evaluation(
+        SCENARIO_B.scenario_id, "new-budget", assertion_id="budget:attempt-0002"
+    )
+    _write_run(
+        root,
+        "run-old",
+        [
+            (SCENARIO_A, _pass_evaluation(SCENARIO_A.scenario_id, "old-a")),
+            (SCENARIO_C, _pass_evaluation(SCENARIO_C.scenario_id, "old-c")),
+        ],
+    )
+    _write_run(
+        root,
+        "run-new",
+        [
+            (SCENARIO_A, schema_fail),
+            (SCENARIO_B, budget_fail),
+            (SCENARIO_C, _pass_evaluation(SCENARIO_C.scenario_id, "new-c")),
+        ],
+    )
+    exit_code, comparison = _create_and_check(root, baseline_run="run-old", current_run="run-new")
+    assert exit_code == 1
+    by_id = {item.scenario_id: item for item in comparison.items}
+    assert by_id[SCENARIO_A.scenario_id].category == "new_regression"
+    assert by_id[SCENARIO_A.scenario_id].blocking is True
+    assert by_id[SCENARIO_A.scenario_id].baseline_verdict == "PASS"
+    assert by_id[SCENARIO_A.scenario_id].current_verdict == "FAIL"
+    assert by_id[SCENARIO_B.scenario_id].category == "new_regression"
+    assert by_id[SCENARIO_B.scenario_id].blocking is True
+    assert by_id[SCENARIO_B.scenario_id].baseline_verdict is None
+    assert comparison.new_regression_count == 2
+    assert all(item.category != "inconclusive_change" for item in comparison.items)
+    assert all(
+        item.category != "new_scenario"
+        for item in comparison.items
+        if item.current_verdict == "FAIL"
+    )
+
+    _write_run(
+        root,
+        "run-old-swapped",
+        [
+            (SCENARIO_A, _pass_evaluation(SCENARIO_A.scenario_id, "old-a2")),
+            (SCENARIO_C, _pass_evaluation(SCENARIO_C.scenario_id, "old-c2")),
+        ],
+    )
+    _write_run(
+        root,
+        "run-new-swapped",
+        [
+            (
+                SCENARIO_A,
+                _fail_evaluation(
+                    SCENARIO_A.scenario_id,
+                    "new-budget-from-pass",
+                    assertion_id="budget:attempt-0003",
+                ),
+            ),
+            (
+                SCENARIO_B,
+                _fail_evaluation(
+                    SCENARIO_B.scenario_id,
+                    "new-schema-absent",
+                    assertion_id="schema:attempt-0004",
+                ),
+            ),
+            (SCENARIO_C, _pass_evaluation(SCENARIO_C.scenario_id, "new-c2")),
+        ],
+    )
+    create_baseline(root, run_id="run-old-swapped", out="swapped.json")
+    swapped = check_baseline(root, baseline_path="swapped.json", run_id="run-new-swapped")
+    assert swapped.exit_code == 1
+    swapped_by_id = {item.scenario_id: item for item in swapped.comparison.items}
+    assert swapped_by_id[SCENARIO_A.scenario_id].category == "new_regression"
+    assert swapped_by_id[SCENARIO_A.scenario_id].blocking is True
+    assert swapped_by_id[SCENARIO_A.scenario_id].baseline_verdict == "PASS"
+    assert swapped_by_id[SCENARIO_B.scenario_id].category == "new_regression"
+    assert swapped_by_id[SCENARIO_B.scenario_id].baseline_verdict is None
+    assert swapped.comparison.new_regression_count == 2
+
+
+def test_signature_bearing_fail_behavior_is_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _target(tmp_path)
+    _patch_execution_tripwires(monkeypatch)
+    _write_run(
+        root,
+        "run-old",
+        [(SCENARIO_A, _fail_evaluation(SCENARIO_A.scenario_id, "old-a"))],
+    )
+    _write_run(
+        root,
+        "run-new",
+        [(SCENARIO_A, _fail_evaluation(SCENARIO_A.scenario_id, "new-a"))],
+    )
+    exit_code, comparison = _create_and_check(root, baseline_run="run-old", current_run="run-new")
+    assert exit_code == 0
+    assert comparison.unchanged_failure_count == 1
+    assert comparison.items[0].category == "unchanged_failure"
+    assert comparison.items[0].blocking is False
+
+
+def test_incomparable_fail_to_fail_cannot_certify(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _target(tmp_path)
+    _patch_execution_tripwires(monkeypatch)
+    signed = _fail_evaluation(SCENARIO_A.scenario_id, "old-a")
+    unsigned = _fail_evaluation(
+        SCENARIO_A.scenario_id, "new-a", assertion_id="schema:attempt-0001"
+    )
+    _write_run(root, "run-old", [(SCENARIO_A, signed)])
+    _write_run(root, "run-new", [(SCENARIO_A, unsigned)])
+    exit_code, comparison = _create_and_check(root, baseline_run="run-old", current_run="run-new")
+    assert exit_code == 2
+    assert comparison.items[0].category == "uncertifiable_failure"
+    assert comparison.items[0].blocking is False
+    assert comparison.new_regression_count == 0
+
+    _write_run(root, "run-both-unsigned-old", [(SCENARIO_A, unsigned)])
+    _write_run(
+        root,
+        "run-both-unsigned-new",
+        [
+            (
+                SCENARIO_A,
+                _fail_evaluation(
+                    SCENARIO_A.scenario_id,
+                    "newer-a",
+                    assertion_id="budget:attempt-0009",
+                ),
+            )
+        ],
+    )
+    create_baseline(root, run_id="run-both-unsigned-old", out="unsigned.json", force=True)
+    both = check_baseline(root, baseline_path="unsigned.json", run_id="run-both-unsigned-new")
+    assert both.exit_code == 2
+    assert both.comparison.items[0].category == "uncertifiable_failure"
+    summary = format_comparison(both.comparison)
+    assert "Uncertifiable failures:" in summary
+
+
+def test_fail_to_inconclusive_is_visible_and_non_blocking(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _target(tmp_path)
+    _patch_execution_tripwires(monkeypatch)
+    _write_run(
+        root,
+        "run-old",
+        [(SCENARIO_A, _fail_evaluation(SCENARIO_A.scenario_id, "old-a"))],
+    )
+    _write_run(
+        root,
+        "run-new",
+        [(SCENARIO_A, _inconclusive_evaluation(SCENARIO_A.scenario_id, "new-a"))],
+    )
+    exit_code, comparison = _create_and_check(root, baseline_run="run-old", current_run="run-new")
+    assert exit_code == 0
+    assert comparison.items[0].category == "inconclusive_change"
+    summary = format_comparison(comparison)
+    assert "FAIL -> INCONCLUSIVE:" in summary
+    assert "weak evidence is not a PASS" in summary
+
+
+def test_removed_known_failures_are_visible_in_summary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _target(tmp_path)
+    _patch_execution_tripwires(monkeypatch)
+    _write_run(
+        root,
+        "run-old",
+        [
+            (SCENARIO_A, _fail_evaluation(SCENARIO_A.scenario_id, "old-a")),
+            (SCENARIO_B, _pass_evaluation(SCENARIO_B.scenario_id, "old-b")),
+        ],
+    )
+    _write_run(
+        root,
+        "run-new",
+        [(SCENARIO_B, _pass_evaluation(SCENARIO_B.scenario_id, "new-b"))],
+    )
+    exit_code, comparison = _create_and_check(root, baseline_run="run-old", current_run="run-new")
+    assert exit_code == 0
+    summary = format_comparison(comparison)
+    assert "Removed known failures:" in summary
+    assert "not equivalent to a clean stable suite" in summary
+
+
 def test_new_low_confidence_failure_does_not_block(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
