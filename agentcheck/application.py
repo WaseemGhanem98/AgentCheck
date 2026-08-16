@@ -381,6 +381,8 @@ def execute_suite(
         evaluations=evaluations,
         findings=findings,
         include_instructions=config.include_instructions_in_report,
+        seed=effective_seed,
+        frozen_suite=frozen,
     )
     report_path = artifacts.write_text("report.html", report)
     execution = SuiteExecution(

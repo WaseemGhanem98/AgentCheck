@@ -27,6 +27,7 @@ from agentcheck.store import (
     StoredRun,
     apply_migrations,
     default_store_relative_path,
+    list_runs_readonly,
     open_evaluation_store,
     resolve_store_path,
 )
@@ -110,6 +111,19 @@ def test_store_path_rejects_unsafe_locations() -> None:
                 "unexpected": True,
             }
         )
+
+
+def test_list_runs_readonly_does_not_create_or_migrate(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.sqlite"
+    with pytest.raises(StoreError, match="does not exist"):
+        list_runs_readonly(missing)
+    assert not missing.exists()
+
+    path = tmp_path / DEFAULT_STORE_FILENAME
+    SqliteEvaluationStore(path).record_run(_sample_run())
+    listed = list_runs_readonly(path)
+    assert [item.run_id for item in listed] == ["run-1"]
+    assert listed[0].index_key() == _sample_run().index_key()
 
 
 def test_null_store_is_a_noop() -> None:

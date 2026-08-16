@@ -256,6 +256,53 @@ def open_evaluation_store(root: Path, config: AgentCheckConfig) -> SqliteEvaluat
     return SqliteEvaluationStore(resolve_store_path(root, config))
 
 
+def list_runs_readonly(path: Path) -> tuple[StoredRun, ...]:
+    """List indexed runs without creating, migrating, or chmod'ing the file.
+
+    Reporting is read-only: a missing or unreadable index is the caller's
+    problem, never a reason to write a new database.
+    """
+
+    if path.is_symlink():
+        raise StoreError("evaluation store path must not be a symlink")
+    if not path.is_file():
+        raise StoreError("evaluation store does not exist")
+    uri = path.resolve().as_uri() + "?mode=ro"
+    try:
+        connection = sqlite3.connect(uri, uri=True, timeout=5.0)
+    except sqlite3.Error as exc:
+        raise StoreError(f"evaluation store is unavailable: {exc}") from exc
+    connection.row_factory = sqlite3.Row
+    try:
+        try:
+            row = connection.execute("SELECT MAX(version) FROM schema_version").fetchone()
+        except sqlite3.Error as exc:
+            raise StoreError("evaluation store is corrupt") from exc
+        current = int(row[0] or 0) if row is not None else 0
+        if current == 0:
+            raise StoreError("evaluation store is corrupt")
+        if current > CURRENT_SCHEMA_VERSION:
+            raise StoreSchemaError(
+                f"evaluation store schema version {current} is newer than "
+                f"supported version {CURRENT_SCHEMA_VERSION}"
+            )
+        rows = connection.execute(
+            "SELECT run_id FROM runs ORDER BY recorded_at ASC, run_id ASC"
+        ).fetchall()
+        runs: list[StoredRun] = []
+        for item in rows:
+            loaded = _load_run(connection, str(item["run_id"]))
+            if loaded is not None:
+                runs.append(loaded)
+        return tuple(runs)
+    except StoreError:
+        raise
+    except sqlite3.Error as exc:
+        raise StoreError(f"evaluation store is unavailable: {exc}") from exc
+    finally:
+        connection.close()
+
+
 def stored_run_from_execution(execution: SuiteExecution) -> StoredRun:
     """Build an index row from a completed suite execution."""
 
@@ -454,6 +501,7 @@ __all__ = [
     "StoredRun",
     "apply_migrations",
     "default_store_relative_path",
+    "list_runs_readonly",
     "open_evaluation_store",
     "resolve_store_path",
     "stored_run_from_execution",

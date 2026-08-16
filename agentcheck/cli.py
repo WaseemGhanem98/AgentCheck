@@ -18,6 +18,7 @@ from agentcheck.generate.mutations import DEFAULT_MAX_MUTATIONS, MAX_MUTATIONS_P
 from agentcheck.initialize import DEFAULT_ADAPTER, SUPPORTED_ADAPTERS, write_initial_config
 from agentcheck.inspect.capabilities import ExtractedCapability, extract_capabilities
 from agentcheck.privacy import redact_artifact, redact_log_text
+from agentcheck.report import render_stored_run
 
 
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$")
@@ -172,6 +173,31 @@ def _parser() -> argparse.ArgumentParser:
         "--no-store",
         action="store_true",
         help="skip writing the local SQLite evaluation index",
+    )
+
+    report_parser = commands.add_parser(
+        "report",
+        help="render a stored run's HTML report without rerunning cases",
+        description=(
+            "Read stored evaluation artifacts and regenerate the offline HTML "
+            "report. This command never imports the target, never spawns a worker, "
+            "and never makes a network call."
+        ),
+    )
+    report_parser.add_argument("target", nargs="?", default=".")
+    report_parser.add_argument(
+        "--run-id",
+        type=_run_id,
+        help="render this stored run ID",
+    )
+    report_parser.add_argument(
+        "--latest",
+        action="store_true",
+        help="render the most recently indexed run (default when --run-id is omitted)",
+    )
+    report_parser.add_argument(
+        "--out",
+        help="relative path inside the target for the HTML report",
     )
     return parser
 
@@ -405,6 +431,22 @@ def _test_command(
     return 0
 
 
+def _report_command(
+    target: str,
+    *,
+    run_id: str | None,
+    latest: bool,
+    out: str | None,
+) -> int:
+    generated = render_stored_run(target, run_id=run_id, latest=latest, out=out)
+    print("Regenerating report from stored artifacts...")
+    print()
+    print(f"Run ID: {generated.run_id}")
+    print("Report:")
+    print(generated.report_path)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -433,6 +475,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 seed=args.seed,
                 run_id=args.run_id,
                 persist_store=not args.no_store,
+            )
+        if args.command == "report":
+            return _report_command(
+                args.target,
+                run_id=args.run_id,
+                latest=args.latest,
+                out=args.out,
             )
     except KeyboardInterrupt:
         print("AgentCheck interrupted.", file=sys.stderr)

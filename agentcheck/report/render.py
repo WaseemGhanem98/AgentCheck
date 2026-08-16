@@ -7,6 +7,7 @@ from collections import Counter
 from typing import Any, Iterable
 
 from agentcheck.domain import AgentSpec, CanonicalRun, CaseEvaluation, Finding, Scenario, Verdict
+from agentcheck.generate.suite import FrozenSuite
 from agentcheck.privacy import redact_artifact
 
 
@@ -56,6 +57,8 @@ def render_report(
     evaluations: tuple[CaseEvaluation, ...],
     findings: tuple[Finding, ...],
     include_instructions: bool = False,
+    seed: int | None = None,
+    frozen_suite: FrozenSuite | None = None,
 ) -> str:
     """Render a single escaped HTML file with no external resources or JavaScript."""
 
@@ -75,6 +78,19 @@ def render_report(
     for finding in findings:
         for scenario_id in finding.affected_scenario_ids:
             findings_by_scenario.setdefault(scenario_id, []).append(finding)
+    lineage_by_id = (
+        {case.scenario.scenario_id: case.lineage for case in frozen_suite.cases}
+        if frozen_suite is not None
+        else {}
+    )
+    origin_counts = Counter(
+        lineage.origin.value for lineage in lineage_by_id.values()
+    )
+    policy_ids = [item.value.policy_id for item in spec.policies.items]
+    if frozen_suite is not None:
+        for pack in frozen_suite.provenance.policy_packs:
+            if pack not in policy_ids:
+                policy_ids.append(pack)
 
     instruction_html = (
         f"<pre>{_escape(spec.instructions.system.value or '')}</pre>"
@@ -129,6 +145,19 @@ def render_report(
             suggested.summary for item in related for suggested in item.suggested_fixes
         ) or "No fix suggested."
         conversation = _json([turn.model_dump(mode="json") for turn in scenario.conversation_turns])
+        lineage = lineage_by_id.get(scenario.scenario_id)
+        lineage_html = ""
+        if lineage is not None:
+            extra = ""
+            if lineage.mutation_kind:
+                extra = (
+                    f" · Parent <span class=\"mono\">{_escape(lineage.parent_scenario_id)}</span>"
+                    f" · Mutation {_escape(lineage.mutation_kind)}"
+                )
+            lineage_html = (
+                f"<section><h4>Lineage</h4><p>Origin {_escape(lineage.origin.value)}"
+                f"{extra}</p></section>"
+            )
         cases.append(
             f"""
             <details class="case" {'open' if verdict != 'PASS' else ''}>
@@ -142,9 +171,39 @@ def render_report(
                 <section><h4>Observable trace</h4><pre>{trace}</pre></section>
                 <section><h4>Likely cause</h4><p>{_escape(cause)}</p><h4>Suggested fix</h4><p>{_escape(fix)}</p></section>
                 <section><h4>Reproducibility</h4><p>Seed {_escape(scenario.generation_seed)} · Fingerprint <span class="mono">{_escape(scenario.fingerprint)}</span></p></section>
+                {lineage_html}
               </div>
             </details>
             """
+        )
+
+    suite_id = frozen_suite.suite_id if frozen_suite is not None else None
+    identity_bits = [
+        f"Spec <span class=\"mono\">{_escape(spec.spec_id)}</span>",
+        f"Seed {_escape(seed if seed is not None else 'Unknown')}",
+        f"Suite <span class=\"mono\">{_escape(suite_id or 'not recorded in this run')}</span>",
+    ]
+    origin_html = ""
+    if origin_counts:
+        origin_html = (
+            "<p>Case origins: "
+            f"{origin_counts.get('built_in', 0)} built-in · "
+            f"{origin_counts.get('schema_boundary', 0)} schema-boundary · "
+            f"{origin_counts.get('workflow_mutation', 0)} workflow mutation</p>"
+        )
+    policy_html = (
+        f"<p>Declared policy packs: {_escape(', '.join(policy_ids))}</p>"
+        if policy_ids
+        else ""
+    )
+    coverage_extra = ""
+    if frozen_suite is not None:
+        coverage = frozen_suite.coverage
+        coverage_extra = (
+            f"<p>Covered tools: {_escape(', '.join(coverage.tools) or 'None recorded')}</p>"
+            f"<p>Boundary kinds: {_escape(', '.join(coverage.boundary_kinds) or 'None recorded')}</p>"
+            "<p>Unsupported schema features: "
+            f"{_escape(', '.join(coverage.unsupported_schema_features) or 'None recorded')}</p>"
         )
 
     return f"""<!doctype html>
@@ -170,7 +229,7 @@ def render_report(
   </style>
 </head>
 <body><main>
-  <header><p class="muted">AgentCheck deterministic Phase 1 report</p><h1>{_escape(spec.identity.name.value)}</h1><p>Target {_escape(target)} · Run <span class="mono">{_escape(run_id)}</span> · Git {_escape(git_revision or 'Unknown')}</p></header>
+  <header><p class="muted">AgentCheck deterministic evaluation report</p><h1>{_escape(spec.identity.name.value)}</h1><p>Target {_escape(target)} · Run <span class="mono">{_escape(run_id)}</span> · Git {_escape(git_revision or 'Unknown')}</p><p>{' · '.join(identity_bits)}</p></header>
   <section class="metrics">{_cards((
       ('Observed suite pass rate', _percent(passed, total)),
       ('Passed', str(passed)),
@@ -181,8 +240,8 @@ def render_report(
       ('Token usage', _reported_total(total_tokens_values, len(runs))),
       ('Known cost', _reported_total(cost_values, len(runs), ' USD')),
   ))}</section>
-  <section class="panel"><h2>Target and AgentSpec</h2><p>Framework: {_escape(spec.identity.framework.value)} {_escape(spec.identity.framework_version.value or '')} · Model: {_escape(spec.identity.model.value or 'Unknown')}</p><p>Tools ({len(tools)}): {_escape(', '.join(tool.name for tool in tools))}</p><p>Capabilities ({len(capabilities)}): {_escape(', '.join(item.name for item in capabilities) or 'None derived')}</p><p>Unknown properties: {len(spec.unknowns)}</p><h3>Instructions</h3>{instruction_html}</section>
-  <section class="panel"><h2>Coverage and reproducibility</h2><p>{len(scenarios)} valid scenarios · {len(dimensions)} distinct dimension tags</p><p>{_escape(', '.join(dimensions))}</p><p>Every case records its generation seed and structural fingerprint. Invalid scenarios are excluded from these counts.</p></section>
+  <section class="panel"><h2>Target and AgentSpec</h2><p>Framework: {_escape(spec.identity.framework.value)} {_escape(spec.identity.framework_version.value or '')} · Model: {_escape(spec.identity.model.value or 'Unknown')}</p><p>Tools ({len(tools)}): {_escape(', '.join(tool.name for tool in tools))}</p><p>Capabilities ({len(capabilities)}): {_escape(', '.join(item.name for item in capabilities) or 'None derived')}</p><p>Unknown properties: {len(spec.unknowns)}</p>{policy_html}<h3>Instructions</h3>{instruction_html}</section>
+  <section class="panel"><h2>Coverage and reproducibility</h2><p>{len(scenarios)} valid scenarios · {len(dimensions)} distinct dimension tags</p><p>{_escape(', '.join(dimensions))}</p>{origin_html}{coverage_extra}<p>Every case records its generation seed and structural fingerprint. Invalid scenarios are excluded from these counts.</p></section>
   <section><h2>Findings</h2>{finding_html}</section>
   <section><h2>Scenarios</h2>{''.join(cases)}</section>
 </main></body></html>"""
