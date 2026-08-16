@@ -13,7 +13,8 @@ from agentcheck import __version__
 from agentcheck.application import execute_suite, generate_suite, inspect_target
 from agentcheck.config import DEFAULT_ENTRYPOINT, entrypoint_location
 from agentcheck.domain import AgentSpec, Severity, Verdict
-from agentcheck.errors import ScenarioValidationError
+from agentcheck.errors import ConfigurationError, ScenarioValidationError
+from agentcheck.generate.mutations import DEFAULT_MAX_MUTATIONS, MAX_MUTATIONS_PER_SUITE
 from agentcheck.initialize import DEFAULT_ADAPTER, SUPPORTED_ADAPTERS, write_initial_config
 from agentcheck.inspect.capabilities import ExtractedCapability, extract_capabilities
 from agentcheck.privacy import redact_artifact, redact_log_text
@@ -28,6 +29,18 @@ def _run_id(value: str) -> str:
             "run ID must contain only letters, digits, underscores, or hyphens"
         )
     return value
+
+
+def _max_mutations(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("max-mutations must be an integer") from exc
+    if parsed < 1 or parsed > MAX_MUTATIONS_PER_SUITE:
+        raise argparse.ArgumentTypeError(
+            f"max-mutations must be between 1 and {MAX_MUTATIONS_PER_SUITE}"
+        )
+    return parsed
 
 
 def _seed(value: str) -> int:
@@ -97,9 +110,9 @@ def _parser() -> argparse.ArgumentParser:
         description=(
             "Import the configured trusted local agent in a child process "
             "(executing its module-level code), derive the supported built-in and "
-            "schema-boundary cases, lint them, and write a frozen suite. The "
-            "written file is inert data, not a replay manifest, and is not a "
-            "security sandbox."
+            "schema-boundary cases, lint them, and write a frozen suite. Workflow "
+            "mutations are off by default. The written file is inert data, not a "
+            "replay manifest, and is not a security sandbox."
         ),
     )
     generate_parser.add_argument("target", nargs="?", default=".")
@@ -119,6 +132,19 @@ def _parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="replace an existing frozen suite instead of refusing",
+    )
+    generate_parser.add_argument(
+        "--mutations",
+        action="store_true",
+        help="include bounded workflow mutations of lint-clean built-in cases",
+    )
+    generate_parser.add_argument(
+        "--max-mutations",
+        type=_max_mutations,
+        help=(
+            "maximum mutation-derived cases to freeze (requires --mutations; "
+            f"default {DEFAULT_MAX_MUTATIONS})"
+        ),
     )
 
     test_parser = commands.add_parser(
@@ -230,11 +256,26 @@ def _init_command(target: str, *, entrypoint: str, adapter: str, force: bool) ->
 
 
 def _generate_command(
-    target: str, *, seed: int | None, out: str | None, force: bool
+    target: str,
+    *,
+    seed: int | None,
+    out: str | None,
+    force: bool,
+    include_mutations: bool,
+    max_mutations: int | None,
 ) -> int:
+    if max_mutations is not None and not include_mutations:
+        raise ConfigurationError("--max-mutations requires --mutations")
     print("Inspecting agent...")
     print()
-    generation = generate_suite(target, seed=seed, out=out, force=force)
+    generation = generate_suite(
+        target,
+        seed=seed,
+        out=out,
+        force=force,
+        include_mutations=include_mutations,
+        max_mutations=max_mutations,
+    )
     _print_inspection(generation.spec)
     print()
     print("Frozen suite written.")
@@ -244,6 +285,13 @@ def _generate_command(
     print(f"Spec ID:      {generation.suite.spec_id}")
     print(f"Seed:         {generation.suite.seed}")
     print(f"Cases:        {len(generation.suite.cases)}")
+    mutation_cases = sum(
+        1
+        for case in generation.suite.cases
+        if case.lineage.origin.value == "workflow_mutation"
+    )
+    if include_mutations:
+        print(f"Mutations:    {mutation_cases}")
     print(f"Rejected:     {len(generation.suite.rejected)}")
     print(f"Fingerprint:  {generation.suite.fingerprint}")
     print()
@@ -344,6 +392,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 seed=args.seed,
                 out=args.out,
                 force=args.force,
+                include_mutations=args.mutations,
+                max_mutations=args.max_mutations,
             )
         if args.command == "test":
             return _test_command(args.target, seed=args.seed, run_id=args.run_id)

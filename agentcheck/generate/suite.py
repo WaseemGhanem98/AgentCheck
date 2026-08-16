@@ -20,19 +20,31 @@ import json
 import os
 from enum import Enum
 from pathlib import Path
-from typing import Literal, Sequence
+from typing import Any, Literal, Sequence
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from agentcheck import __version__
 from agentcheck.artifacts import create_private_file, replace_private_file
 from agentcheck.config import AgentCheckConfig, contained_path
-from agentcheck.domain import AgentSpec, ContractModel, Scenario, canonical_hash
+from agentcheck.domain import (
+    AgentSpec,
+    ContractModel,
+    JsonObject,
+    Scenario,
+    canonical_hash,
+)
 from agentcheck.errors import ConfigurationError, ScenarioValidationError
 from agentcheck.privacy import redact_log_text
 
 from .boundaries import build_boundary_cases, unsupported_boundary_reasons
-from .lint import ScenarioLintIssue, lint_suite
+from .lint import ScenarioLintIssue, lint_scenario, lint_suite
+from .mutations import (
+    DEFAULT_MAX_MUTATIONS,
+    MAX_MUTATIONS_PER_SUITE,
+    MutationKind,
+    build_workflow_mutations,
+)
 from .templates import build_account_support_suite
 
 
@@ -49,6 +61,16 @@ _MAX_SUITE_BYTES = 8 * 1024 * 1024
 class CaseOrigin(str, Enum):
     BUILT_IN = "built_in"
     SCHEMA_BOUNDARY = "schema_boundary"
+    WORKFLOW_MUTATION = "workflow_mutation"
+
+
+_MUTATION_LINEAGE_FIELDS = (
+    "parent_scenario_id",
+    "parent_fingerprint",
+    "mutation_kind",
+    "mutation_parameters",
+    "mutation_rationale",
+)
 
 
 class CaseLineage(ContractModel):
@@ -58,6 +80,54 @@ class CaseLineage(ContractModel):
     tool_name: str | None = Field(default=None, max_length=200)
     boundary_kind: str | None = Field(default=None, max_length=100)
     schema_pointer: str | None = Field(default=None, max_length=1_000)
+    parent_scenario_id: str | None = Field(default=None, max_length=200)
+    parent_fingerprint: str | None = Field(default=None, max_length=200)
+    mutation_kind: str | None = Field(default=None, max_length=100)
+    mutation_parameters: JsonObject = Field(default_factory=dict)
+    mutation_rationale: str | None = Field(default=None, max_length=2_000)
+
+    @model_validator(mode="after")
+    def validate_mutation_lineage(self) -> "CaseLineage":
+        if self.origin is CaseOrigin.WORKFLOW_MUTATION:
+            if not (
+                self.parent_scenario_id
+                and self.parent_fingerprint
+                and self.mutation_kind
+                and self.mutation_rationale
+            ):
+                raise ValueError(
+                    "workflow mutation lineage requires parent identity, kind, and rationale"
+                )
+            try:
+                MutationKind(self.mutation_kind)
+            except ValueError as exc:
+                raise ValueError(
+                    f"unsupported mutation kind {self.mutation_kind!r}"
+                ) from exc
+            return self
+        if (
+            self.parent_scenario_id
+            or self.parent_fingerprint
+            or self.mutation_kind
+            or self.mutation_rationale
+            or self.mutation_parameters
+        ):
+            raise ValueError(
+                "mutation lineage fields are only valid for workflow_mutation origin"
+            )
+        return self
+
+    @model_serializer(mode="wrap")
+    def drop_idle_mutation_fields(self, serializer: Any) -> dict[str, Any]:
+        data = serializer(self)
+        origin = data.get("origin")
+        if origin not in {
+            CaseOrigin.WORKFLOW_MUTATION,
+            CaseOrigin.WORKFLOW_MUTATION.value,
+        }:
+            for key in _MUTATION_LINEAGE_FIELDS:
+                data.pop(key, None)
+        return data
 
 
 class FrozenCase(ContractModel):
@@ -194,10 +264,54 @@ def _issue_records(issues: Sequence[ScenarioLintIssue]) -> tuple[LintIssueRecord
     )
 
 
+def _mutation_limit(max_mutations: int | None) -> int:
+    limit = DEFAULT_MAX_MUTATIONS if max_mutations is None else max_mutations
+    if limit < 1 or limit > MAX_MUTATIONS_PER_SUITE:
+        raise ValueError(
+            f"max_mutations must be between 1 and {MAX_MUTATIONS_PER_SUITE}"
+        )
+    return limit
+
+
+def _append_unique(
+    scenario: Scenario,
+    lineage: CaseLineage,
+    *,
+    seen: set[str],
+    unique: list[tuple[Scenario, CaseLineage]],
+    rejected: list[RejectedCase],
+) -> None:
+    if scenario.fingerprint in seen:
+        rejected.append(
+            RejectedCase(
+                scenario=scenario,
+                lineage=lineage,
+                issues=(
+                    LintIssueRecord(
+                        code="duplicate_scenario_fingerprint",
+                        message="a structurally identical case was already frozen",
+                        severity="error",
+                    ),
+                ),
+            )
+        )
+        return
+    seen.add(scenario.fingerprint)
+    unique.append((scenario, lineage))
+
+
 def build_frozen_suite(
-    spec: AgentSpec, config: AgentCheckConfig, *, seed: int
+    spec: AgentSpec,
+    config: AgentCheckConfig,
+    *,
+    seed: int,
+    include_mutations: bool = False,
+    max_mutations: int | None = None,
 ) -> FrozenSuite:
     """Derive, deduplicate, lint, and freeze every supported case for a target."""
+
+    if max_mutations is not None and not include_mutations:
+        raise ValueError("max_mutations requires include_mutations=True")
 
     candidates: list[tuple[Scenario, CaseLineage]] = [
         (scenario, CaseLineage(origin=CaseOrigin.BUILT_IN))
@@ -222,25 +336,9 @@ def build_frozen_suite(
     rejected: list[RejectedCase] = []
     seen: set[str] = set()
     for scenario, lineage in candidates:
-        if scenario.fingerprint in seen:
-            rejected.append(
-                RejectedCase(
-                    scenario=scenario,
-                    lineage=lineage,
-                    issues=(
-                        LintIssueRecord(
-                            code="duplicate_scenario_fingerprint",
-                            message=(
-                                "a structurally identical case was already frozen"
-                            ),
-                            severity="error",
-                        ),
-                    ),
-                )
-            )
-            continue
-        seen.add(scenario.fingerprint)
-        unique.append((scenario, lineage))
+        _append_unique(
+            scenario, lineage, seen=seen, unique=unique, rejected=rejected
+        )
 
     lineage_by_id = {scenario.scenario_id: lineage for scenario, lineage in unique}
     cases: list[FrozenCase] = []
@@ -255,6 +353,53 @@ def build_frozen_suite(
         else:
             cases.append(FrozenCase(scenario=scenario, lineage=lineage))
 
+    if include_mutations:
+        parents = tuple(
+            case.scenario
+            for case in cases
+            if case.lineage.origin is CaseOrigin.BUILT_IN
+        )
+        for generated in build_workflow_mutations(
+            parents, seed=seed, max_mutations=_mutation_limit(max_mutations)
+        ):
+            lineage = CaseLineage(
+                origin=CaseOrigin.WORKFLOW_MUTATION,
+                parent_scenario_id=generated.mutation.parent_scenario_id,
+                parent_fingerprint=generated.mutation.parent_fingerprint,
+                mutation_kind=generated.mutation.kind.value,
+                mutation_parameters=generated.mutation.parameters,
+                mutation_rationale=generated.mutation.rationale,
+            )
+            if generated.scenario.fingerprint in seen:
+                rejected.append(
+                    RejectedCase(
+                        scenario=generated.scenario,
+                        lineage=lineage,
+                        issues=(
+                            LintIssueRecord(
+                                code="duplicate_scenario_fingerprint",
+                                message=(
+                                    "a structurally identical case was already frozen"
+                                ),
+                                severity="error",
+                            ),
+                        ),
+                    )
+                )
+                continue
+            issues = lint_scenario(generated.scenario, spec)
+            if issues:
+                rejected.append(
+                    RejectedCase(
+                        scenario=generated.scenario,
+                        lineage=lineage,
+                        issues=_issue_records(issues),
+                    )
+                )
+                continue
+            seen.add(generated.scenario.fingerprint)
+            cases.append(FrozenCase(scenario=generated.scenario, lineage=lineage))
+
     if not cases:
         raise ScenarioValidationError(
             "No valid scenarios remain after linting; refusing to freeze a suite "
@@ -265,6 +410,9 @@ def build_frozen_suite(
     unsupported: list[str] = []
     for item in spec.tools.items:
         unsupported.extend(unsupported_boundary_reasons(item.value))
+    sources: tuple[str, ...] = ("built_in", "schema_boundary")
+    if include_mutations:
+        sources = (*sources, "workflow_mutation")
     coverage = SuiteCoverage(
         tools=tools,
         tools_without_boundary_cases=tuple(
@@ -289,7 +437,7 @@ def build_frozen_suite(
         provenance=GeneratorProvenance(
             generator=GENERATOR_NAME,
             generator_version=__version__,
-            sources=("built_in", "schema_boundary"),
+            sources=sources,
         ),
         coverage=coverage,
         cases=tuple(cases),

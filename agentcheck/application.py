@@ -134,6 +134,8 @@ def generate_suite(
     seed: int | None = None,
     out: str | None = None,
     force: bool = False,
+    include_mutations: bool = False,
+    max_mutations: int | None = None,
     timeout_seconds: float = 30.0,
 ) -> SuiteGeneration:
     """Inspect a target, freeze its deterministic suite, and persist a reviewable file."""
@@ -148,7 +150,13 @@ def generate_suite(
         )
     inspection = inspect_in_subprocess(root, config, timeout_seconds=timeout_seconds)
     spec = inspection.require_value()
-    suite = build_frozen_suite(spec, config, seed=actual_seed)
+    suite = build_frozen_suite(
+        spec,
+        config,
+        seed=actual_seed,
+        include_mutations=include_mutations,
+        max_mutations=max_mutations,
+    )
     write_frozen_suite(destination, suite, force=force)
     return SuiteGeneration(
         target_root=root,
