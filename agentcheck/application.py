@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import subprocess
 import sys
 from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
@@ -52,6 +51,14 @@ from agentcheck.policies import (
 )
 from agentcheck.privacy import redact_log_text
 from agentcheck.report import render_report
+from agentcheck.replay import (
+    build_replay_manifest,
+    entrypoint_digest,
+    git_revision,
+    load_replay_manifest,
+    verify_replay_bindings,
+    write_replay_manifest,
+)
 from agentcheck.store import open_evaluation_store, stored_run_from_execution
 from agentcheck.runner.orchestrator import (
     ProcessResult,
@@ -95,6 +102,7 @@ class SuiteExecution:
     artifact_directory: Path
     report_path: Path
     selection: SelectionPlan | None = None
+    replay_manifest_path: Path | None = None
 
     @property
     def counts(self) -> Counter[Verdict]:
@@ -137,18 +145,7 @@ def inspect_target(
 
 
 def _git_revision(root: Path) -> str | None:
-    try:
-        completed = subprocess.run(
-            ["git", "-C", str(root), "rev-parse", "HEAD"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    revision = completed.stdout.strip()
-    return revision if completed.returncode == 0 and revision else None
+    return git_revision(root)
 
 
 def _effective_seed(config: AgentCheckConfig, seed: int | None) -> int:
@@ -345,6 +342,105 @@ def execute_suite(
                 "no agent verdict was produced."
             )
 
+    return _execute_valid_scenarios(
+        root=root,
+        config=config,
+        spec=spec,
+        suite_run_id=suite_run_id,
+        effective_seed=effective_seed,
+        revision=revision,
+        valid=tuple(valid),
+        invalid=tuple(invalid),
+        frozen=frozen,
+        selection_plan=selection_plan,
+        progress=progress,
+        persist_store=persist_store,
+        policy_pack_ids=tuple(pack.pack_id for pack in packs),
+    )
+
+
+def replay_suite(
+    target: str | Path,
+    manifest_path: str,
+    *,
+    run_id: str | None = None,
+    persist_store: bool = True,
+    progress: ProgressCallback | None = None,
+) -> SuiteExecution:
+    """Re-execute a replay manifest through the existing isolated runtime."""
+
+    root, config = load_config(target)
+    # Untrusted manifest is parsed before the target is imported.
+    manifest = load_replay_manifest(root, manifest_path)
+    suite_run_id = run_id or new_run_id()
+    revision = _git_revision(root)
+    inspection = inspect_in_subprocess(root, config)
+    packs = resolve_policy_packs(root, config)
+    spec = attach_declared_policies(inspection.require_value(), packs)
+    pack_ids = tuple(pack.pack_id for pack in packs)
+    verify_replay_bindings(
+        manifest,
+        root=root,
+        config=config,
+        spec=spec,
+        policy_pack_ids=pack_ids,
+    )
+    valid: list[Scenario] = []
+    invalid: list[InvalidScenario] = []
+    for scenario, issues in lint_suite(manifest.cases, spec):
+        if issues:
+            invalid.append(
+                InvalidScenario(
+                    scenario=scenario,
+                    issues=tuple(
+                        {
+                            "code": issue.code,
+                            "message": issue.message,
+                            "severity": issue.severity,
+                        }
+                        for issue in issues
+                    ),
+                )
+            )
+        else:
+            valid.append(scenario)
+    if invalid or len(valid) != len(manifest.cases):
+        raise ConfigurationError(
+            "replay manifest contains scenarios that fail lint against this target"
+        )
+    return _execute_valid_scenarios(
+        root=root,
+        config=config,
+        spec=spec,
+        suite_run_id=suite_run_id,
+        effective_seed=manifest.seed,
+        revision=revision,
+        valid=tuple(valid),
+        invalid=(),
+        frozen=None,
+        selection_plan=None,
+        progress=progress,
+        persist_store=persist_store,
+        policy_pack_ids=pack_ids,
+    )
+
+
+def _execute_valid_scenarios(
+    *,
+    root: Path,
+    config: AgentCheckConfig,
+    spec: AgentSpec,
+    suite_run_id: str,
+    effective_seed: int,
+    revision: str | None,
+    valid: tuple[Scenario, ...],
+    invalid: tuple[InvalidScenario, ...],
+    frozen: FrozenSuite | None,
+    selection_plan: SelectionPlan | None,
+    progress: ProgressCallback | None,
+    persist_store: bool,
+    policy_pack_ids: tuple[str, ...],
+) -> SuiteExecution:
     indexed_results: dict[int, tuple[CanonicalRun | None, CaseEvaluation]] = {}
     with ThreadPoolExecutor(
         max_workers=min(config.max_concurrency, max(1, len(valid))),
@@ -458,6 +554,16 @@ def execute_suite(
         selection_plan=selection_plan,
     )
     report_path = artifacts.write_text("report.html", report)
+    replay_path = _emit_replay_manifest(
+        root=root,
+        config=config,
+        spec=spec,
+        run_id=suite_run_id,
+        seed=effective_seed,
+        scenarios=valid_scenarios,
+        revision=revision,
+        policy_pack_ids=policy_pack_ids,
+    )
     execution = SuiteExecution(
         target_root=root,
         config=config,
@@ -474,10 +580,62 @@ def execute_suite(
         artifact_directory=artifacts.root,
         report_path=report_path,
         selection=selection_plan,
+        replay_manifest_path=replay_path,
     )
     if persist_store:
         _persist_execution(execution)
     return execution
+
+
+def _emit_replay_manifest(
+    *,
+    root: Path,
+    config: AgentCheckConfig,
+    spec: AgentSpec,
+    run_id: str,
+    seed: int,
+    scenarios: tuple[Scenario, ...],
+    revision: str | None,
+    policy_pack_ids: tuple[str, ...],
+) -> Path | None:
+    """Write a pre-redaction replay manifest. Failures never change a verdict."""
+
+    try:
+        digest = entrypoint_digest(root, config.entrypoint)
+        manifest, omitted = build_replay_manifest(
+            run_id=run_id,
+            seed=seed,
+            spec=spec,
+            config=config,
+            scenarios=scenarios,
+            git_revision=revision,
+            entrypoint_digest=digest,
+            policy_pack_ids=policy_pack_ids,
+        )
+        if manifest is None:
+            print(
+                "AgentCheck warning: replay manifest omitted because every case "
+                "failed secret screening",
+                file=sys.stderr,
+            )
+            return None
+        path = write_replay_manifest(root, config, manifest)
+        if omitted:
+            print(
+                "AgentCheck warning: "
+                f"{len(omitted)} scenario(s) omitted from the replay manifest",
+                file=sys.stderr,
+            )
+        return path
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:
+        print(
+            "AgentCheck warning: replay manifest failed: "
+            + redact_log_text(str(exc)),
+            file=sys.stderr,
+        )
+        return None
 
 
 def _persist_execution(execution: SuiteExecution) -> None:
@@ -504,4 +662,5 @@ __all__ = [
     "execute_suite",
     "generate_suite",
     "inspect_target",
+    "replay_suite",
 ]

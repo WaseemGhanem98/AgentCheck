@@ -10,7 +10,7 @@ from collections import Counter
 from typing import Sequence
 
 from agentcheck import __version__
-from agentcheck.application import execute_suite, generate_suite, inspect_target
+from agentcheck.application import execute_suite, generate_suite, inspect_target, replay_suite
 from agentcheck.config import DEFAULT_ENTRYPOINT, entrypoint_location
 from agentcheck.domain import AgentSpec, Severity, Verdict
 from agentcheck.errors import ConfigurationError, ScenarioValidationError
@@ -236,6 +236,34 @@ def _parser() -> argparse.ArgumentParser:
     report_parser.add_argument(
         "--out",
         help="relative path inside the target for the HTML report",
+    )
+
+    replay_parser = commands.add_parser(
+        "replay",
+        help="re-execute a stored replay manifest without using disclosure artifacts",
+        description=(
+            "Load an agentcheck.replay_manifest.v1 document as untrusted input, "
+            "verify spec and source bindings, and re-run its scenarios through "
+            "the existing isolated ToolGateway. Frozen suites, suite.json, SQLite, "
+            "and HTML reports are not replay manifests. This command executes "
+            "trusted local agent code and is not a sandbox for hostile repositories."
+        ),
+    )
+    replay_parser.add_argument("target", nargs="?", default=".")
+    replay_parser.add_argument(
+        "--manifest",
+        required=True,
+        help="relative path inside the target to a replay manifest",
+    )
+    replay_parser.add_argument(
+        "--run-id",
+        type=_run_id,
+        help="set a safe artifact run ID for the new replay run",
+    )
+    replay_parser.add_argument(
+        "--no-store",
+        action="store_true",
+        help="skip writing the local SQLite evaluation index",
     )
     return parser
 
@@ -479,6 +507,9 @@ def _test_command(
     print()
     print("Report:")
     print(execution.report_path)
+    if execution.replay_manifest_path is not None:
+        print("Replay manifest:")
+        print(execution.replay_manifest_path)
 
     if counts[Verdict.INFRA_ERROR]:
         return 2
@@ -502,6 +533,62 @@ def _report_command(
     print(f"Run ID: {generated.run_id}")
     print("Report:")
     print(generated.report_path)
+    return 0
+
+
+def _replay_command(
+    target: str,
+    *,
+    manifest: str,
+    run_id: str | None,
+    persist_store: bool,
+) -> int:
+    print("Loading replay manifest...")
+    print()
+    execution = replay_suite(
+        target,
+        manifest,
+        run_id=run_id,
+        persist_store=persist_store,
+    )
+    _print_inspection(execution.spec)
+    print()
+    print("Replaying stored scenarios...")
+    print(f"Manifest seed: {execution.seed}")
+    print(f"Generated: {len(execution.scenarios)} valid scenarios")
+    print()
+    print(f"Running {len(execution.scenarios)} scenarios in isolated child processes...")
+    print()
+    evaluation_by_id = {item.scenario_id: item for item in execution.evaluations}
+    for scenario in execution.scenarios:
+        evaluation = evaluation_by_id[scenario.scenario_id]
+        print(f"{evaluation.verdict.value:<12} {scenario.title}")
+
+    counts: Counter[Verdict] = execution.counts
+    pass_rate = execution.observed_pass_rate
+    print()
+    print(
+        "Observed suite pass rate: "
+        f"{pass_rate * 100:.1f}%" if pass_rate is not None else "Observed suite pass rate: N/A"
+    )
+    print()
+    print(f"Passed:        {counts[Verdict.PASS]}")
+    print(f"Failed:        {counts[Verdict.FAIL]}")
+    print(f"Inconclusive:  {counts[Verdict.INCONCLUSIVE]}")
+    print(f"Infra errors:  {counts[Verdict.INFRA_ERROR]}")
+    print()
+    print("Report:")
+    print(execution.report_path)
+    if execution.replay_manifest_path is not None:
+        print("Replay manifest:")
+        print(execution.replay_manifest_path)
+
+    if counts[Verdict.INFRA_ERROR]:
+        return 2
+    if counts[Verdict.FAIL]:
+        return 1
+    if counts[Verdict.INCONCLUSIVE]:
+        return 3
     return 0
 
 
@@ -543,6 +630,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_id=args.run_id,
                 latest=args.latest,
                 out=args.out,
+            )
+        if args.command == "replay":
+            return _replay_command(
+                args.target,
+                manifest=args.manifest,
+                run_id=args.run_id,
+                persist_store=not args.no_store,
             )
     except KeyboardInterrupt:
         print("AgentCheck interrupted.", file=sys.stderr)

@@ -221,6 +221,12 @@ def test_offline_cli_runs_complete_phase1_flow_with_intercepted_tools(
     if os.name == "posix":
         assert stat.S_IMODE(store_path.stat().st_mode) == 0o600
 
+    replay_path = target / ".agentcheck" / "replay" / f"{RUN_ID}.json"
+    assert replay_path.is_file()
+    if os.name == "posix":
+        assert stat.S_IMODE(replay_path.stat().st_mode) == 0o600
+    assert replay_path.name not in {path.name for path in run_root.iterdir()}
+
     artifact_spec = AgentSpec.model_validate_json(
         (run_root / "agent-spec.json").read_text(encoding="utf-8")
     )
