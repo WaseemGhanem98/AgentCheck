@@ -1,10 +1,13 @@
 """Budgeted hierarchical 1-deletion over replayable scenarios.
 
 The search never weakens oracles, never executes invalid or secret-shaped
-candidates, and never claims global minimality. Completing every non-empty
-dimension within budget yields a 1-minimal (locally minimal) counterexample:
-no single remaining removable item in any searched dimension can be deleted
-while preserving the failure signature.
+candidates, and never claims global minimality. Dimensions are searched in
+``REDUCTION_ORDER`` and the pass repeats until a full sweep accepts no
+deletion or the candidate/round budget is exhausted. ``locally_minimal``
+means a complete unsuccessful sweep ran: no single remaining removable item
+in any searched dimension can be deleted while preserving the failure
+signature. That is 1-minimality within the searched dimensions, not a
+globally smallest scenario.
 """
 
 from __future__ import annotations
@@ -84,25 +87,33 @@ def shrink_scenario(
     current_complexity = measure_complexity(current)
     budget = _Budget(max_candidates=max_candidates, max_rounds=max_rounds)
 
-    for dimension in REDUCTION_ORDER:
-        if budget.exhausted:
+    while not budget.exhausted:
+        progress = False
+        for dimension in REDUCTION_ORDER:
+            if budget.exhausted:
+                break
+            removable = removable_indices(current, dimension, signature)
+            if len(removable) <= minimum_keep(dimension):
+                continue
+            if budget.rounds >= budget.max_rounds:
+                budget.exhausted = True
+                break
+            budget.rounds += 1
+            reduced, reduced_complexity = _reduce_dimension(
+                current,
+                dimension,
+                spec=spec,
+                signature=signature,
+                execute=execute,
+                budget=budget,
+                current_complexity=current_complexity,
+            )
+            if reduced.fingerprint != current.fingerprint:
+                progress = True
+                current = reduced
+                current_complexity = reduced_complexity
+        if not progress:
             break
-        removable = removable_indices(current, dimension, signature)
-        if len(removable) <= minimum_keep(dimension):
-            continue
-        if budget.rounds >= budget.max_rounds:
-            budget.exhausted = True
-            break
-        budget.rounds += 1
-        current, current_complexity = _reduce_dimension(
-            current,
-            dimension,
-            spec=spec,
-            signature=signature,
-            execute=execute,
-            budget=budget,
-            current_complexity=current_complexity,
-        )
 
     minimality: Literal["locally_minimal", "budget_exhausted"] = (
         "budget_exhausted" if budget.exhausted else "locally_minimal"

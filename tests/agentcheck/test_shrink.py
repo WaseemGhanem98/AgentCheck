@@ -47,6 +47,7 @@ from agentcheck.shrink import (
 from agentcheck.shrink.candidates import reconstruct_scenario
 from agentcheck.shrink.complexity import is_strictly_smaller
 from agentcheck.shrink.result import ShrinkBudget, encode_shrink_result
+from agentcheck.shrink.signature import FailedAssertion
 
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
@@ -238,11 +239,132 @@ def test_pass_inconclusive_and_infra_are_not_shrinkable() -> None:
         extract_failure_signature(_passing_evaluation())
 
 
-def test_unstable_schema_assertion_is_refused() -> None:
-    evaluation = _failing_evaluation("schema:run-1:attempt:0001")
-    assert "execution-scoped" in (unsupported_failure_reason(evaluation) or "")
-    with pytest.raises(ValueError, match="execution-scoped"):
-        extract_failure_signature(evaluation)
+def test_unstable_schema_budget_and_infra_assertions_are_refused() -> None:
+    scenario = _delete_scenario()
+    for assertion_id in (
+        "schema:run-1:attempt:0001",
+        "budget:run-1:attempt:0002",
+        "infra:run-1",
+    ):
+        evaluation = _failing_evaluation(assertion_id)
+        reason = unsupported_failure_reason(evaluation) or ""
+        assert "execution-scoped" in reason
+        with pytest.raises(ValueError, match="execution-scoped"):
+            extract_failure_signature(evaluation)
+    infra = infrastructure_evaluation(
+        scenario, code="worker_error", message="boom", phase="execution", run_id="r1"
+    )
+    assert unsupported_failure_reason(infra) is not None
+    with pytest.raises(ValueError):
+        extract_failure_signature(infra)
+
+
+def test_independently_constructed_signatures_do_not_match() -> None:
+    left = FailureSignature(
+        failed_assertions=(
+            FailedAssertion(assertion_id="a:state", oracle_ids=("oracle-a",)),
+        )
+    )
+    right = FailureSignature(
+        failed_assertions=(
+            FailedAssertion(assertion_id="a:other", oracle_ids=("oracle-a",)),
+        )
+    )
+    same_oracles_different_id = FailureSignature(
+        failed_assertions=(
+            FailedAssertion(assertion_id="a:state", oracle_ids=("oracle-b",)),
+        )
+    )
+    assert left.fingerprint != right.fingerprint
+    assert left.fingerprint != same_oracles_different_id.fingerprint
+    assert not signatures_match(left, right)
+    assert not signatures_match(left, same_oracles_different_id)
+    clone = FailureSignature(
+        failed_assertions=(
+            FailedAssertion(assertion_id="a:state", oracle_ids=("oracle-a",)),
+        )
+    )
+    assert signatures_match(left, clone)
+
+
+def test_search_does_not_accept_a_different_authoritative_fail() -> None:
+    original = _delete_scenario()
+    padded = _pad_scenario(original)
+    failing_ids = tuple(
+        item.criterion_id
+        for item in (
+            *original.forbidden_tool_behavior,
+            *original.trajectory_constraints,
+            *original.expected_postconditions,
+        )
+    )
+    original_evaluation = _failing_evaluation(*failing_ids, scenario_id=original.scenario_id)
+    spec = _account_spec()
+
+    def execute(scenario: Scenario) -> CaseEvaluation:
+        if scenario.fingerprint == padded.fingerprint:
+            return original_evaluation
+        return _failing_evaluation("unrelated:other", scenario_id=scenario.scenario_id)
+
+    outcome = shrink_scenario(
+        padded,
+        original_evaluation,
+        spec=spec,
+        execute=execute,
+        max_candidates=32,
+        max_rounds=12,
+    )
+    reasons = dict(outcome.rejected_by_reason)
+    assert reasons.get("signature_mismatch", 0) >= 1
+    assert outcome.accepted_reductions == 0
+    assert outcome.scenario.fingerprint == padded.fingerprint
+
+
+def test_later_dimension_reduction_can_unlock_earlier_deletions() -> None:
+    original = _delete_scenario()
+    padded = _pad_scenario(original)
+    failing_ids = tuple(
+        item.criterion_id
+        for item in (
+            *original.forbidden_tool_behavior,
+            *original.trajectory_constraints,
+            *original.expected_postconditions,
+        )
+    )
+    original_evaluation = _failing_evaluation(*failing_ids, scenario_id=original.scenario_id)
+    spec = _account_spec()
+    padded_turns = len(padded.conversation_turns)
+
+    def execute(scenario: Scenario) -> CaseEvaluation:
+        if not _core_intact(scenario, original):
+            return _passing_evaluation(scenario.scenario_id)
+        noise_present = "noise" in scenario.initial_world_state
+        if noise_present and len(scenario.conversation_turns) < padded_turns:
+            return _passing_evaluation(scenario.scenario_id)
+        return original_evaluation
+
+    blocked = shrink_scenario(
+        padded,
+        original_evaluation,
+        spec=spec,
+        execute=execute,
+        max_candidates=32,
+        max_rounds=1,
+    )
+    assert len(blocked.scenario.conversation_turns) == padded_turns
+
+    outcome = shrink_scenario(
+        padded,
+        original_evaluation,
+        spec=spec,
+        execute=execute,
+        max_candidates=32,
+        max_rounds=12,
+    )
+    assert "noise" not in outcome.scenario.initial_world_state
+    assert len(outcome.scenario.conversation_turns) < padded_turns
+    assert outcome.minimality == "locally_minimal"
+    assert _core_intact(outcome.scenario, original)
 
 
 def test_signature_uses_only_required_high_confidence_failures() -> None:
@@ -965,6 +1087,71 @@ def test_cli_test_replay_shrink_replay_chain(
     assert result.requires_human_review is True
     assert result.source_manifest_id
     assert result.minimized_scenario_fingerprint
+
+
+def test_verification_replay_rejects_a_different_failure_signature(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import agentcheck.application as application
+    from agentcheck.replay.bind import entrypoint_digest
+    from agentcheck.shrink.complexity import measure_complexity as measure
+    from agentcheck.shrink.search import ShrinkSearchOutcome
+    from agentcheck.shrink.signature import extract_failure_signature as real_extract
+
+    target = _copy_example(tmp_path)
+    loaded, source = load_target(target)
+    spec = OpenAIAgentsAdapter().inspect(loaded, source=source)
+    digest = entrypoint_digest(target, "agent.py:agent")
+    failing = _delete_scenario()
+    manifest = ReplayManifest(
+        created_from_run_id="unit-shrink-verify",
+        agentcheck_version="0.1.0",
+        seed=SEED,
+        spec_binding=SpecBinding(
+            spec_id=spec.spec_id,
+            adapter="openai_agents",
+            entrypoint="agent.py:agent",
+        ),
+        source_binding=SourceBinding(
+            git_revision=None,
+            entrypoint_digest=digest,
+            framework=spec.identity.framework.value,
+            framework_version=spec.identity.framework_version.value,
+        ),
+        cases=(failing,),
+    )
+    (target / "replay-unit.json").write_bytes(encode_replay_manifest(manifest))
+    other = FailureSignature(
+        failed_assertions=(
+            FailedAssertion(assertion_id="unrelated:other", oracle_ids=("oracle-a",)),
+        )
+    )
+
+    def wrapped(original: Scenario, original_evaluation: object, **kwargs: object) -> object:
+        signature = real_extract(original_evaluation)  # type: ignore[arg-type]
+        monkeypatch.setattr(application, "extract_failure_signature", lambda _ev: other)
+        return ShrinkSearchOutcome(
+            scenario=original,
+            complexity=measure(original),
+            signature=signature,
+            candidate_executions=0,
+            accepted_reductions=0,
+            rejected_candidates=0,
+            skipped_invalid=0,
+            rejected_by_reason=(),
+            budget_exhausted=False,
+            minimality="locally_minimal",
+            rounds_completed=0,
+        )
+
+    monkeypatch.setattr(application, "shrink_scenario", wrapped)
+    with pytest.raises(ConfigurationError, match="did not reproduce the original failure signature"):
+        shrink_suite(
+            target,
+            "replay-unit.json",
+            scenario_id="delete_without_confirmation",
+            persist_store=False,
+        )
 
 
 def test_shrink_help_states_not_root_cause(capsys: pytest.CaptureFixture[str]) -> None:
