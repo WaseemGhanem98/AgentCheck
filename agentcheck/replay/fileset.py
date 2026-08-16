@@ -135,22 +135,38 @@ class SourceFileSet(ContractModel):
 
 
 def collect_source_file_set(root: Path) -> SourceFileSet:
-    """Inventory relevant files under ``root`` without importing the target."""
+    """Inventory relevant files under ``root`` without importing the target.
+
+    Git mode hashes tracked relevant files and ignored-but-present relevant
+    files. Untracked non-ignored files stay out of the inventory; a bound git
+    revision still refuses a dirty worktree. A relevant-suffix file that cannot
+    be bound because of path-safety rules fails closed rather than silently
+    omitting executable source.
+    """
 
     resolved = root.resolve()
     if not resolved.is_dir():
         raise ConfigurationError(f"target is not a directory: {root}")
-    tracked = _git_tracked_paths(resolved)
-    git_relevant = (
-        [path for path in tracked if _is_relevant_source_path(path)]
-        if tracked is not None
-        else []
-    )
-    if git_relevant:
-        relevant = git_relevant
-        mode: Literal["git_tracked", "local_files"] = "git_tracked"
+    tracked = _git_z_paths(resolved, ["ls-files", "-z", "--", "."])
+    if tracked is not None:
+        ignored = _git_z_paths(
+            resolved,
+            ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", "."],
+        )
+        if ignored is None:
+            raise ConfigurationError(
+                "unable to inventory ignored source files for replay binding"
+            )
+        git_candidates = _unique_paths(tracked + ignored)
+        git_relevant = _select_relevant_paths(git_candidates)
+        if git_relevant:
+            relevant = git_relevant
+            mode: Literal["git_tracked", "local_files"] = "git_tracked"
+        else:
+            relevant = _select_relevant_paths(_local_paths(resolved))
+            mode = "local_files"
     else:
-        relevant = [path for path in _local_paths(resolved) if _is_relevant_source_path(path)]
+        relevant = _select_relevant_paths(_local_paths(resolved))
         mode = "local_files"
     if not relevant:
         raise ConfigurationError(
@@ -195,18 +211,58 @@ def describe_file_set_mismatch(bound: SourceFileSet, live: SourceFileSet) -> str
     return "source file-set fingerprint does not match the replay manifest"
 
 
-def _is_relevant_source_path(relative: str) -> bool:
-    if not _is_safe_relative_path(relative):
-        return False
+def _normalize_relative(relative: str) -> str:
+    normalized = relative.replace("\\", "/")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
+
+
+def _excluded_by_location(relative: str) -> bool:
     parts = relative.split("/")
     if any(part in _EXCLUDED_DIR_NAMES or part.endswith(".egg-info") for part in parts[:-1]):
-        return False
-    name = parts[-1]
+        return True
+    name = parts[-1] if parts else ""
     if name in _EXCLUDED_FILE_NAMES or name.startswith(".env"):
-        return False
-    if any(name.endswith(suffix) for suffix in _EXCLUDED_SUFFIXES):
-        return False
+        return True
+    return any(name.endswith(suffix) for suffix in _EXCLUDED_SUFFIXES)
+
+
+def _has_included_suffix(relative: str) -> bool:
+    name = relative.split("/")[-1]
     return any(name.endswith(suffix) for suffix in _INCLUDED_SUFFIXES)
+
+
+def _select_relevant_paths(paths: tuple[str, ...] | list[str]) -> list[str]:
+    selected: list[str] = []
+    seen: set[str] = set()
+    for raw in paths:
+        relative = _normalize_relative(raw)
+        if not relative or relative in seen:
+            continue
+        if _excluded_by_location(relative) or not _has_included_suffix(relative):
+            continue
+        if not _is_safe_relative_path(relative):
+            raise ConfigurationError(
+                "refusing incomplete source inventory; relevant file "
+                f"{relative!r} cannot be bound because its path is not a "
+                "safe relative path"
+            )
+        seen.add(relative)
+        selected.append(relative)
+    return selected
+
+
+def _unique_paths(paths: tuple[str, ...]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for raw in paths:
+        relative = _normalize_relative(raw)
+        if not relative or relative in seen:
+            continue
+        seen.add(relative)
+        ordered.append(relative)
+    return tuple(ordered)
 
 
 def _is_safe_relative_path(relative: str) -> bool:
@@ -220,7 +276,7 @@ def _is_safe_relative_path(relative: str) -> bool:
     return True
 
 
-def _git_tracked_paths(root: Path) -> tuple[str, ...] | None:
+def _git_z_paths(root: Path, extra_args: list[str]) -> tuple[str, ...] | None:
     try:
         inside = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
@@ -236,7 +292,7 @@ def _git_tracked_paths(root: Path) -> tuple[str, ...] | None:
         return None
     try:
         listed = subprocess.run(
-            ["git", "-C", str(root), "ls-files", "-z", "--", "."],
+            ["git", "-C", str(root), *extra_args],
             check=False,
             capture_output=True,
             timeout=5,
@@ -250,12 +306,15 @@ def _git_tracked_paths(root: Path) -> tuple[str, ...] | None:
     for raw in listed.stdout.split(b"\0"):
         if not raw:
             continue
-        relative = raw.decode("utf-8", errors="strict").replace("\\", "/")
-        if relative.startswith("./"):
-            relative = relative[2:]
-        if not _is_safe_relative_path(relative):
-            continue
-        paths.append(relative)
+        try:
+            relative = raw.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise ConfigurationError(
+                "source inventory contains a non-UTF-8 path; refusing an incomplete binding"
+            ) from exc
+        relative = _normalize_relative(relative)
+        if relative:
+            paths.append(relative)
     return tuple(paths)
 
 
@@ -294,8 +353,6 @@ def _local_paths(root: Path) -> tuple[str, ...]:
                 relative = name
             else:
                 relative = "/".join((*relative_dir.parts, name))
-            if not _is_safe_relative_path(relative):
-                continue
             collected.append(relative)
     return tuple(collected)
 

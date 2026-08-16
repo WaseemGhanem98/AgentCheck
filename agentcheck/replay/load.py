@@ -115,8 +115,16 @@ def load_replay_manifest(root: Path, relative: str) -> ReplayManifest:
 
 
 def load_replay_manifest_path(path: Path) -> ReplayManifest:
-    """Load an already-contained path. Used by tests that supply an absolute file."""
+    """Parse a path that the caller already contained.
 
+    Production commands must use ``load_replay_manifest`` so symlink and
+    path-containment checks run against the target root. This helper still
+    refuses symlinks and oversize files, but it does not prove the path stays
+    inside a target directory.
+    """
+
+    if path.is_symlink():
+        raise ConfigurationError(f"refusing to follow symlink at {path}")
     return _parse_replay_manifest(path)
 
 

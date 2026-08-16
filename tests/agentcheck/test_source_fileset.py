@@ -409,3 +409,85 @@ def test_legacy_source_binding_omits_file_set_from_fingerprint() -> None:
     )
     assert loaded.file_set is None
     assert loaded.model_dump(mode="json") == dumped
+
+
+def _git_init(target: Path) -> None:
+    subprocess.run(
+        ["git", "init"],
+        cwd=target,
+        check=True,
+        capture_output=True,
+        env=git_command_env(),
+    )
+
+
+def test_gitignored_relevant_helper_is_inventoried(tmp_path: Path) -> None:
+    target = tmp_path / "repo"
+    shutil.copytree(EXAMPLE, target, symlinks=False)
+    _git_init(target)
+    subprocess.run(
+        ["git", "add", "agent.py", "agentcheck.json"],
+        cwd=target,
+        check=True,
+        capture_output=True,
+        env=git_command_env(),
+    )
+    (target / ".gitignore").write_text("ignored_helper.py\n", encoding="utf-8")
+    helper = target / "ignored_helper.py"
+    helper.write_text("VALUE = 1\n", encoding="utf-8")
+    (target / "untracked.py").write_text("VALUE = 9\n", encoding="utf-8")
+    inventory = collect_source_file_set(target)
+    assert inventory.mode == "git_tracked"
+    paths = {item.path for item in inventory.files}
+    assert "ignored_helper.py" in paths
+    assert "untracked.py" not in paths
+    helper.write_text("VALUE = 2\n", encoding="utf-8")
+    changed = collect_source_file_set(target)
+    assert changed.fingerprint != inventory.fingerprint
+
+
+def test_gitignored_helper_change_blocks_replay_before_inspect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import agentcheck.application as application
+
+    target = tmp_path / "repo"
+    shutil.copytree(EXAMPLE, target, symlinks=False)
+    _git_init(target)
+    subprocess.run(
+        ["git", "add", "agent.py", "agentcheck.json"],
+        cwd=target,
+        check=True,
+        capture_output=True,
+        env=git_command_env(),
+    )
+    (target / ".gitignore").write_text("helpers/\n", encoding="utf-8")
+    helper = _write_helper(target, "VALUE = 1\n")
+    _write_fileset_manifest(target)
+
+    def explode(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("inspect must not run after a source file-set mismatch")
+
+    monkeypatch.setattr(application, "inspect_in_subprocess", explode)
+    monkeypatch.setattr(application, "run_scenario_in_subprocess", explode)
+    helper.write_text("VALUE = 2\n", encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="source file changed"):
+        replay_suite(target, ".agentcheck/replay/bound.json")
+
+
+def test_unsafe_relevant_filename_fails_closed(tmp_path: Path) -> None:
+    target = tmp_path / "local"
+    target.mkdir()
+    (target / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (target / "weird name.py").write_text("VALUE = 2\n", encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="not a safe relative path"):
+        collect_source_file_set(target)
+
+
+def test_hidden_relevant_python_file_fails_closed(tmp_path: Path) -> None:
+    target = tmp_path / "local"
+    target.mkdir()
+    (target / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (target / ".hidden.py").write_text("VALUE = 2\n", encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="not a safe relative path"):
+        collect_source_file_set(target)

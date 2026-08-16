@@ -28,7 +28,6 @@ from agentcheck.replay import (
     load_replay_manifest,
     secret_shaped_reason,
 )
-from agentcheck.replay.load import load_replay_manifest_path
 
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
@@ -501,7 +500,8 @@ def test_execute_suite_emits_replay_manifest_and_replay_reproduces(
         assert stat.S_IMODE(execution.replay_manifest_path.stat().st_mode) == 0o600
         assert stat.S_IMODE(execution.replay_manifest_path.parent.stat().st_mode) == 0o700
 
-    loaded = load_replay_manifest_path(execution.replay_manifest_path)
+    relative = execution.replay_manifest_path.relative_to(execution.target_root).as_posix()
+    loaded = load_replay_manifest(target, relative)
     assert loaded.schema_version == REPLAY_MANIFEST_CONTRACT_VERSION
     assert loaded.source_binding.file_set is not None
     assert loaded.source_binding.file_set.schema_version == "agentcheck.source_file_set.v1"
