@@ -191,6 +191,19 @@ def test_git_tracked_mode_inventories_tracked_python(tmp_path: Path) -> None:
     assert "untracked.py" not in paths
 
 
+def test_generated_evaluation_json_is_not_inventoried(tmp_path: Path) -> None:
+    target = _copy_example(tmp_path)
+    before = collect_source_file_set(target)
+    (target / "agentcheck-suite.json").write_text("{}\n", encoding="utf-8")
+    (target / "agentcheck-baseline.json").write_text("{}\n", encoding="utf-8")
+    after = collect_source_file_set(target)
+    assert before.fingerprint == after.fingerprint
+    paths = {item.path for item in after.files}
+    assert "agentcheck.json" in paths
+    assert "agentcheck-suite.json" not in paths
+    assert "agentcheck-baseline.json" not in paths
+
+
 def test_empty_git_inventory_falls_back_to_local_files(tmp_path: Path) -> None:
     target = tmp_path / "repo"
     shutil.copytree(EXAMPLE, target, symlinks=False)

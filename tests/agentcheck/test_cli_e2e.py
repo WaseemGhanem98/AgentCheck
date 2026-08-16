@@ -343,3 +343,118 @@ def test_offline_cli_runs_complete_phase1_flow_with_intercepted_tools(
     assert "<span>Infra errors</span><strong>0</strong>" in report
     assert "Raw system instructions are hidden by default." in report
     assert all(scenario.scenario_id in report for scenario in scenarios)
+
+
+def test_offline_cli_phase3_workflow(tmp_path: Path) -> None:
+    """init → inspect → generate → test → replay → shrink → review → report → gate."""
+
+    target = tmp_path / "account_agent"
+    shutil.copytree(
+        EXAMPLE,
+        target,
+        ignore=shutil.ignore_patterns(".agentcheck", "__pycache__"),
+    )
+    process_probe, original_tool_probe = _instrument_fixture(target)
+    run_id = "phase3-offline-e2e"
+
+    inspect = _run_cli("inspect", str(target), timeout=45)
+    assert inspect.returncode == 0, inspect.stderr
+
+    generate = _run_cli("generate", str(target), timeout=60)
+    assert generate.returncode == 0, generate.stderr
+    assert (target / "agentcheck-suite.json").is_file()
+
+    test = _run_cli("test", str(target), "--run-id", run_id, timeout=180)
+    assert test.returncode == 1, test.stderr
+    assert "Failed:        5" in test.stdout
+    assert "Infra errors:  0" in test.stdout
+    manifest = f".agentcheck/replay/{run_id}.json"
+    assert (target / manifest).is_file()
+
+    replay = _run_cli(
+        "replay",
+        str(target),
+        "--manifest",
+        manifest,
+        "--run-id",
+        f"{run_id}-replay",
+        "--no-store",
+        timeout=180,
+    )
+    assert replay.returncode == 1, replay.stderr
+    assert "Failed:        5" in replay.stdout
+
+    shrink = _run_cli(
+        "shrink",
+        str(target),
+        "--manifest",
+        manifest,
+        "--scenario-id",
+        "delete_without_confirmation",
+        "--run-id",
+        f"{run_id}-shrink",
+        "--no-store",
+        timeout=180,
+    )
+    assert shrink.returncode == 0, shrink.stderr
+    assert "Requires human review: true" in shrink.stdout
+    assert (target / ".agentcheck" / "shrink" / f"{run_id}-shrink.json").is_file()
+
+    review = _run_cli(
+        "review",
+        str(target),
+        "--run-id",
+        run_id,
+        "--finding-id",
+        "finding:duplicate_side_effect",
+        "--decision",
+        "accepted",
+        "--note",
+        "Confirmed regression",
+        timeout=45,
+    )
+    assert review.returncode == 0, review.stderr
+    assert "Automated verdict: FAIL" in review.stdout
+    assert "Human decision: accepted" in review.stdout
+
+    report = _run_cli("report", str(target), "--run-id", run_id, timeout=45)
+    assert report.returncode == 0, report.stderr
+    html = (target / ".agentcheck" / "runs" / run_id / "report.html").read_text(
+        encoding="utf-8"
+    )
+    assert "Automated verdict" in html
+    assert "accepted" in html
+    assert "default-src 'none'" in html
+    assert "<script" not in html.casefold()
+
+    create = _run_cli(
+        "baseline",
+        "create",
+        str(target),
+        "--run-id",
+        run_id,
+        timeout=45,
+    )
+    assert create.returncode == 0, create.stderr
+    assert (target / "agentcheck-baseline.json").is_file()
+
+    check = _run_cli(
+        "baseline",
+        "check",
+        str(target),
+        "--baseline",
+        "agentcheck-baseline.json",
+        "--run-id",
+        run_id,
+        timeout=45,
+    )
+    assert check.returncode == 0, check.stderr
+    assert "New regressions:" in check.stdout
+    assert "\n0\n" in check.stdout.split("New regressions:")[1]
+
+    assert not original_tool_probe.exists()
+    worker_pids = [
+        int(value) for value in process_probe.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(set(worker_pids)) == len(worker_pids)
+    assert len(worker_pids) >= 14

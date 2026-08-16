@@ -437,6 +437,30 @@ def test_failure_resolved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     assert comparison.new_regression_count == 0
 
 
+def test_removed_failure_does_not_block_ci(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = _target(tmp_path)
+    _patch_execution_tripwires(monkeypatch)
+    _write_run(
+        root,
+        "run-old",
+        [
+            (SCENARIO_A, _fail_evaluation(SCENARIO_A.scenario_id, "old-a")),
+            (SCENARIO_B, _pass_evaluation(SCENARIO_B.scenario_id, "old-b")),
+        ],
+    )
+    _write_run(
+        root,
+        "run-new",
+        [(SCENARIO_B, _pass_evaluation(SCENARIO_B.scenario_id, "new-b"))],
+    )
+    exit_code, comparison = _create_and_check(root, baseline_run="run-old", current_run="run-new")
+    assert exit_code == 0
+    assert any(item.category == "removed_scenario" for item in comparison.items)
+    assert comparison.new_regression_count == 0
+
+
 def test_new_hard_failure_and_pass_to_fail(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -151,6 +151,23 @@ def test_loader_refuses_frozen_suite(tmp_path: Path) -> None:
         load_replay_manifest(target, "agentcheck-suite.json")
 
 
+def test_loader_refuses_baseline_and_review_documents(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "agentcheck-baseline.json").write_text(
+        json.dumps({"schema_version": "agentcheck.baseline.v1"}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="evaluation baselines are not replay"):
+        load_replay_manifest(target, "agentcheck-baseline.json")
+    (target / "review.json").write_text(
+        json.dumps({"schema_version": "agentcheck.human_review.v1"}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigurationError, match="human reviews are not replay"):
+        load_replay_manifest(target, "review.json")
+
+
 def test_loader_refuses_disclosure_suite(tmp_path: Path) -> None:
     target = tmp_path / "target"
     target.mkdir()

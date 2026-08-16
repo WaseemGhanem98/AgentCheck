@@ -30,6 +30,12 @@ _REFUSED_CONTRACTS = {
     "agentcheck.invalid_scenarios.v1": (
         "invalid-scenario artifacts are not replay manifests"
     ),
+    "agentcheck.baseline.v1": "evaluation baselines are not replay manifests",
+    "agentcheck.baseline_comparison.v1": (
+        "baseline comparisons are not replay manifests"
+    ),
+    "agentcheck.human_review.v1": "human reviews are not replay manifests",
+    "agentcheck.shrink_result.v1": "shrink results are not replay manifests",
 }
 
 

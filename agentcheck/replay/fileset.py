@@ -3,6 +3,8 @@
 This inventory hashes bytes on disk. It never imports a target module, never
 executes target code, and never follows outbound symlinks. Git is used only as
 ``ls-files`` / ``rev-parse`` plumbing when the target is inside a repository.
+Generated ``agentcheck-suite.json`` and ``agentcheck-baseline.json`` are not
+source identity.
 """
 
 from __future__ import annotations
@@ -68,6 +70,8 @@ _EXCLUDED_FILE_NAMES = frozenset(
         ".env.development",
         ".env.production",
         ".env.test",
+        "agentcheck-suite.json",
+        "agentcheck-baseline.json",
     }
 )
 _EXCLUDED_SUFFIXES = (
