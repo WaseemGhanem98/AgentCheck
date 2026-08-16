@@ -106,6 +106,50 @@ with open(__file__ + ".agentcheck-worker-pids", "a", encoding="utf-8") as _pid_p
     )
 
 
+def test_offline_cli_initializes_a_target_before_inspecting_it(tmp_path: Path) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+
+    initialization = _run_cli("init", str(empty), timeout=45)
+
+    assert initialization.returncode == 0, initialization.stderr
+    assert initialization.stderr == ""
+    assert "AgentCheck configuration written." in initialization.stdout
+    assert [path.name for path in empty.iterdir()] == ["agentcheck.json"]
+
+    uninitialized = _run_cli("inspect", str(empty), timeout=45)
+
+    assert uninitialized.returncode == 2
+    assert "AgentCheck error: entrypoint source does not exist" in uninitialized.stderr
+    assert "Traceback" not in uninitialized.stderr
+
+    target = tmp_path / "account_agent"
+    shutil.copytree(
+        EXAMPLE,
+        target,
+        ignore=shutil.ignore_patterns(".agentcheck", "__pycache__"),
+    )
+    (target / "agentcheck.json").unlink()
+
+    regenerated = _run_cli("init", str(target), timeout=45)
+
+    assert regenerated.returncode == 0, regenerated.stderr
+    assert "does not exist yet" not in regenerated.stdout
+    assert json.loads((target / "agentcheck.json").read_text(encoding="utf-8")) == json.loads(
+        (EXAMPLE / "agentcheck.json").read_text(encoding="utf-8")
+    )
+
+    refused = _run_cli("init", str(target), timeout=45)
+
+    assert refused.returncode == 2
+    assert "already exists" in refused.stderr
+
+    inspection = _run_cli("inspect", str(target), timeout=45)
+
+    assert inspection.returncode == 0, inspection.stderr
+    assert "Agent: Account Support Agent" in inspection.stdout
+
+
 def test_offline_cli_runs_complete_phase1_flow_with_intercepted_tools(
     tmp_path: Path,
 ) -> None:

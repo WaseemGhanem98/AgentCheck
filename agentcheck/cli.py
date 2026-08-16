@@ -11,8 +11,10 @@ from typing import Sequence
 
 from agentcheck import __version__
 from agentcheck.application import execute_suite, inspect_target
+from agentcheck.config import DEFAULT_ENTRYPOINT, entrypoint_location
 from agentcheck.domain import AgentSpec, Severity, Verdict
 from agentcheck.errors import ScenarioValidationError
+from agentcheck.initialize import DEFAULT_ADAPTER, SUPPORTED_ADAPTERS, write_initial_config
 from agentcheck.privacy import redact_artifact, redact_log_text
 
 
@@ -44,6 +46,33 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     commands = parser.add_subparsers(dest="command", required=True)
+
+    init_parser = commands.add_parser(
+        "init",
+        help="write an explicit agentcheck.json for a target directory",
+        description=(
+            "Write an explicit local AgentCheck configuration. This command never "
+            "imports or executes the target, so it is safe to run against code that "
+            "has not been reviewed yet."
+        ),
+    )
+    init_parser.add_argument("target", nargs="?", default=".")
+    init_parser.add_argument(
+        "--entrypoint",
+        default=DEFAULT_ENTRYPOINT,
+        help="agent source and attribute inside the target, as 'relative/path.py:attribute'",
+    )
+    init_parser.add_argument(
+        "--adapter",
+        default=DEFAULT_ADAPTER,
+        choices=SUPPORTED_ADAPTERS,
+        help="framework adapter used to inspect and run the target",
+    )
+    init_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="replace an existing agentcheck.json instead of refusing",
+    )
 
     inspect_parser = commands.add_parser(
         "inspect",
@@ -112,6 +141,31 @@ def _print_inspection(spec: AgentSpec) -> None:
 def _json_spec(spec: AgentSpec) -> str:
     payload = redact_artifact(spec.model_dump(mode="json", exclude_none=False))
     return json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2, sort_keys=True)
+
+
+def _init_command(target: str, *, entrypoint: str, adapter: str, force: bool) -> int:
+    config_path = write_initial_config(
+        target,
+        adapter=adapter,
+        entrypoint=entrypoint,
+        force=force,
+    )
+    root = config_path.parent
+    print("AgentCheck configuration written.")
+    print()
+    print(f"Config:     {config_path}")
+    print(f"Adapter:    {adapter}")
+    print(f"Entrypoint: {entrypoint.strip()}")
+    source, _ = entrypoint_location(root, entrypoint.strip())
+    if not source.is_file():
+        print()
+        print(f"Note: the entrypoint source does not exist yet: {source}")
+        print("Create it, or re-run init with --entrypoint and --force.")
+    print()
+    print("Next steps:")
+    print(f"- agentcheck inspect {root}")
+    print(f"- agentcheck test {root}")
+    return 0
 
 
 def _inspect_command(target: str, *, as_json: bool) -> int:
@@ -186,6 +240,13 @@ def _test_command(target: str, *, seed: int | None, run_id: str | None) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if args.command == "init":
+            return _init_command(
+                args.target,
+                entrypoint=args.entrypoint,
+                adapter=args.adapter,
+                force=args.force,
+            )
         if args.command == "inspect":
             return _inspect_command(args.target, as_json=args.json)
         if args.command == "test":

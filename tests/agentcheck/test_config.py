@@ -5,7 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from agentcheck.config import AgentCheckConfig, child_environment, load_config, resolve_entrypoint
+from agentcheck.config import (
+    AgentCheckConfig,
+    child_environment,
+    entrypoint_location,
+    load_config,
+    resolve_entrypoint,
+)
 from agentcheck.errors import ConfigurationError
 
 
@@ -35,6 +41,24 @@ def test_entrypoint_cannot_escape_target(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigurationError, match="inside the target"):
         resolve_entrypoint(tmp_path, "../outside.py:agent")
+
+
+def test_entrypoint_location_contains_paths_without_requiring_the_source(
+    tmp_path: Path,
+) -> None:
+    source, attribute = entrypoint_location(tmp_path, "src/agent.py:agent")
+
+    assert source == tmp_path.resolve() / "src" / "agent.py"
+    assert attribute == "agent"
+    assert not source.exists()
+
+    with pytest.raises(ConfigurationError, match="inside the target"):
+        entrypoint_location(tmp_path, "../outside.py:agent")
+
+
+def test_resolve_entrypoint_still_requires_an_existing_source(tmp_path: Path) -> None:
+    with pytest.raises(ConfigurationError, match="does not exist"):
+        resolve_entrypoint(tmp_path, "agent.py:agent")
 
 
 def test_child_environment_omits_unapproved_secrets(monkeypatch: pytest.MonkeyPatch) -> None:

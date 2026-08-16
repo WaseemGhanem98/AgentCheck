@@ -89,18 +89,30 @@ def load_config(target: str | os.PathLike[str]) -> tuple[Path, AgentCheckConfig]
     return root, config
 
 
-def resolve_entrypoint(root: Path, entrypoint: str) -> tuple[Path, str]:
+def entrypoint_location(root: Path, entrypoint: str) -> tuple[Path, str]:
+    """Resolve a contained entrypoint without requiring the source to exist.
+
+    Configuration commands must describe a target they are not allowed to import
+    or even require on disk yet; existence is the caller's separate concern.
+    """
+
     match = _ENTRYPOINT_RE.fullmatch(entrypoint)
     if match is None:  # already validated; retained for direct callers
         raise ConfigurationError("entrypoint must use the form 'relative/path.py:attribute'")
-    source = (root / match.group("path")).resolve()
+    resolved_root = root.resolve()
+    source = (resolved_root / match.group("path")).resolve()
     try:
-        source.relative_to(root.resolve())
+        source.relative_to(resolved_root)
     except ValueError as exc:
         raise ConfigurationError("entrypoint must remain inside the target directory") from exc
+    return source, match.group("attribute")
+
+
+def resolve_entrypoint(root: Path, entrypoint: str) -> tuple[Path, str]:
+    source, attribute = entrypoint_location(root, entrypoint)
     if not source.is_file():
         raise ConfigurationError(f"entrypoint source does not exist: {source}")
-    return source, match.group("attribute")
+    return source, attribute
 
 
 def child_environment(config: AgentCheckConfig) -> dict[str, str]:
