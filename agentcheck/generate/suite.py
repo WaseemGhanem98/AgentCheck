@@ -46,6 +46,11 @@ from .mutations import (
     MutationKind,
     build_workflow_mutations,
 )
+from .selection import (
+    SelectionPlan,
+    lineage_coverage_tags,
+    select_scenarios,
+)
 from .templates import build_account_support_suite
 
 
@@ -184,7 +189,15 @@ class FrozenSuite(ContractModel):
     coverage: SuiteCoverage = Field(default_factory=SuiteCoverage)
     cases: tuple[FrozenCase, ...] = Field(min_length=1)
     rejected: tuple[RejectedCase, ...] = ()
+    selection: SelectionPlan | None = None
     fingerprint: str = ""
+
+    @model_serializer(mode="wrap")
+    def omit_idle_selection(self, serializer: Any) -> dict[str, Any]:
+        data = serializer(self)
+        if not data.get("selection"):
+            data.pop("selection", None)
+        return data
 
     @property
     def scenarios(self) -> tuple[Scenario, ...]:
@@ -282,6 +295,31 @@ def _mutation_limit(max_mutations: int | None) -> int:
     return limit
 
 
+def _select_frozen_cases(
+    cases: list[FrozenCase],
+    spec: AgentSpec,
+    *,
+    max_cases: int,
+) -> tuple[list[FrozenCase], SelectionPlan]:
+    extra_tags = {
+        case.scenario.scenario_id: lineage_coverage_tags(
+            origin=case.lineage.origin.value,
+            tool_name=case.lineage.tool_name,
+            boundary_kind=case.lineage.boundary_kind,
+            mutation_kind=case.lineage.mutation_kind,
+        )
+        for case in cases
+    }
+    selected, plan = select_scenarios(
+        [case.scenario for case in cases],
+        max_cases=max_cases,
+        spec=spec,
+        extra_tags_by_id=extra_tags,
+    )
+    by_id = {case.scenario.scenario_id: case for case in cases}
+    return [by_id[scenario.scenario_id] for scenario in selected], plan
+
+
 def _append_unique(
     scenario: Scenario,
     lineage: CaseLineage,
@@ -317,11 +355,13 @@ def build_frozen_suite(
     include_mutations: bool = False,
     max_mutations: int | None = None,
     policy_packs: Sequence[PolicyPack] = (),
+    max_cases: int | None = None,
 ) -> FrozenSuite:
     """Derive, deduplicate, lint, and freeze every supported case for a target."""
 
     if max_mutations is not None and not include_mutations:
         raise ValueError("max_mutations requires include_mutations=True")
+    budget = config.max_cases if max_cases is None else max_cases
 
     candidates: list[tuple[Scenario, CaseLineage]] = [
         (scenario, CaseLineage(origin=CaseOrigin.BUILT_IN))
@@ -455,6 +495,10 @@ def build_frozen_suite(
             "that cannot produce a verdict."
         )
 
+    selection: SelectionPlan | None = None
+    if budget is not None:
+        cases, selection = _select_frozen_cases(cases, spec, max_cases=budget)
+
     tools = tuple(item.value.name for item in spec.tools.items)
     unsupported: list[str] = []
     for item in spec.tools.items:
@@ -492,6 +536,7 @@ def build_frozen_suite(
         coverage=coverage,
         cases=tuple(cases),
         rejected=tuple(rejected),
+        selection=selection,
     )
     _assert_no_secret_shaped_values(suite.model_dump(mode="json"))
     return suite
@@ -615,6 +660,7 @@ __all__ = [
     "GeneratorProvenance",
     "LintIssueRecord",
     "RejectedCase",
+    "SelectionPlan",
     "SuiteCoverage",
     "build_frozen_suite",
     "built_in_suite",

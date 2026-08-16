@@ -34,6 +34,7 @@ class AgentCheckConfig(BaseModel):
     suite_path: str | None = None
     policy_packs: tuple[str, ...] | None = None
     store_path: str | None = None
+    max_cases: int | None = Field(default=None, ge=1, le=256)
 
     @field_validator("entrypoint")
     @classmethod

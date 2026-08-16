@@ -7,6 +7,7 @@ from collections import Counter
 from typing import Any, Iterable
 
 from agentcheck.domain import AgentSpec, CanonicalRun, CaseEvaluation, Finding, Scenario, Verdict
+from agentcheck.generate.selection import SelectionPlan
 from agentcheck.generate.suite import FrozenSuite
 from agentcheck.privacy import redact_artifact
 
@@ -59,6 +60,7 @@ def render_report(
     include_instructions: bool = False,
     seed: int | None = None,
     frozen_suite: FrozenSuite | None = None,
+    selection_plan: SelectionPlan | None = None,
 ) -> str:
     """Render a single escaped HTML file with no external resources or JavaScript."""
 
@@ -83,6 +85,9 @@ def render_report(
         if frozen_suite is not None
         else {}
     )
+    plan = selection_plan
+    if plan is None and frozen_suite is not None:
+        plan = frozen_suite.selection
     origin_counts = Counter(
         lineage.origin.value for lineage in lineage_by_id.values()
     )
@@ -205,6 +210,24 @@ def render_report(
             "<p>Unsupported schema features: "
             f"{_escape(', '.join(coverage.unsupported_schema_features) or 'None recorded')}</p>"
         )
+    selection_html = ""
+    if plan is not None:
+        excluded_lines = "".join(
+            f"<li><span class=\"mono\">{_escape(item.scenario_id)}</span> — "
+            f"{_escape(item.reason)}</li>"
+            for item in plan.decisions
+            if not item.selected
+        ) or "<li class=\"muted\">None</li>"
+        selection_html = (
+            f"<p>Selection algorithm {_escape(plan.algorithm)} · "
+            f"budget {_escape(plan.max_cases if plan.max_cases is not None else 'covering set')} · "
+            f"{len(plan.selected_ids)} selected · {len(plan.excluded_ids)} excluded</p>"
+            f"<p>Covered dimensions: {_escape(', '.join(plan.coverage.covered) or 'None')}</p>"
+            f"<p>Uncovered dimensions: {_escape(', '.join(plan.coverage.uncovered) or 'None')}</p>"
+            f"<p>Unsupported: {_escape(', '.join(plan.coverage.unsupported) or 'None')}</p>"
+            f"<p>Unknown: {_escape(', '.join(plan.coverage.unknown) or 'None')}</p>"
+            f"<p>Excluded by selection (not scored):</p><ul>{excluded_lines}</ul>"
+        )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -241,7 +264,7 @@ def render_report(
       ('Known cost', _reported_total(cost_values, len(runs), ' USD')),
   ))}</section>
   <section class="panel"><h2>Target and AgentSpec</h2><p>Framework: {_escape(spec.identity.framework.value)} {_escape(spec.identity.framework_version.value or '')} · Model: {_escape(spec.identity.model.value or 'Unknown')}</p><p>Tools ({len(tools)}): {_escape(', '.join(tool.name for tool in tools))}</p><p>Capabilities ({len(capabilities)}): {_escape(', '.join(item.name for item in capabilities) or 'None derived')}</p><p>Unknown properties: {len(spec.unknowns)}</p>{policy_html}<h3>Instructions</h3>{instruction_html}</section>
-  <section class="panel"><h2>Coverage and reproducibility</h2><p>{len(scenarios)} valid scenarios · {len(dimensions)} distinct dimension tags</p><p>{_escape(', '.join(dimensions))}</p>{origin_html}{coverage_extra}<p>Every case records its generation seed and structural fingerprint. Invalid scenarios are excluded from these counts.</p></section>
+  <section class="panel"><h2>Coverage and reproducibility</h2><p>{len(scenarios)} valid scenarios · {len(dimensions)} distinct dimension tags</p><p>{_escape(', '.join(dimensions))}</p>{origin_html}{coverage_extra}{selection_html}<p>Every case records its generation seed and structural fingerprint. Invalid scenarios are excluded from these counts. Cases excluded by coverage selection are listed above and are not scored as passing.</p></section>
   <section><h2>Findings</h2>{finding_html}</section>
   <section><h2>Scenarios</h2>{''.join(cases)}</section>
 </main></body></html>"""

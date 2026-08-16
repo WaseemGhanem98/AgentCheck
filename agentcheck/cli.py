@@ -15,6 +15,7 @@ from agentcheck.config import DEFAULT_ENTRYPOINT, entrypoint_location
 from agentcheck.domain import AgentSpec, Severity, Verdict
 from agentcheck.errors import ConfigurationError, ScenarioValidationError
 from agentcheck.generate.mutations import DEFAULT_MAX_MUTATIONS, MAX_MUTATIONS_PER_SUITE
+from agentcheck.generate.selection import MAX_CASES
 from agentcheck.initialize import DEFAULT_ADAPTER, SUPPORTED_ADAPTERS, write_initial_config
 from agentcheck.inspect.capabilities import ExtractedCapability, extract_capabilities
 from agentcheck.privacy import redact_artifact, redact_log_text
@@ -30,6 +31,18 @@ def _run_id(value: str) -> str:
             "run ID must contain only letters, digits, underscores, or hyphens"
         )
     return value
+
+
+def _max_cases(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("max-cases must be an integer") from exc
+    if parsed < 1 or parsed > MAX_CASES:
+        raise argparse.ArgumentTypeError(
+            f"max-cases must be between 1 and {MAX_CASES}"
+        )
+    return parsed
 
 
 def _max_mutations(value: str) -> int:
@@ -112,7 +125,8 @@ def _parser() -> argparse.ArgumentParser:
             "Import the configured trusted local agent in a child process "
             "(executing its module-level code), derive the supported built-in and "
             "schema-boundary cases, lint them, and write a frozen suite. Workflow "
-            "mutations are off by default. The written file is inert data, not a "
+            "mutations are off by default. Coverage selection is off unless "
+            "--max-cases is passed. The written file is inert data, not a "
             "replay manifest, and is not a security sandbox."
         ),
     )
@@ -157,6 +171,14 @@ def _parser() -> argparse.ArgumentParser:
             "(repeatable)"
         ),
     )
+    generate_parser.add_argument(
+        "--max-cases",
+        type=_max_cases,
+        help=(
+            "maximum lint-clean cases to freeze after deterministic coverage "
+            f"selection (default: keep every valid case; maximum {MAX_CASES})"
+        ),
+    )
 
     test_parser = commands.add_parser(
         "test",
@@ -173,6 +195,14 @@ def _parser() -> argparse.ArgumentParser:
         "--no-store",
         action="store_true",
         help="skip writing the local SQLite evaluation index",
+    )
+    test_parser.add_argument(
+        "--select",
+        choices=("coverage",),
+        help=(
+            "run a deterministic coverage-maximizing subset instead of every "
+            "valid case; excluded cases are recorded and never scored as passing"
+        ),
     )
 
     report_parser = commands.add_parser(
@@ -311,6 +341,7 @@ def _generate_command(
     include_mutations: bool,
     max_mutations: int | None,
     policy_packs: list[str] | None,
+    max_cases: int | None,
 ) -> int:
     if max_mutations is not None and not include_mutations:
         raise ConfigurationError("--max-mutations requires --mutations")
@@ -324,6 +355,7 @@ def _generate_command(
         include_mutations=include_mutations,
         max_mutations=max_mutations,
         policy_packs=policy_packs,
+        max_cases=max_cases,
     )
     _print_inspection(generation.spec)
     print()
@@ -342,6 +374,9 @@ def _generate_command(
     if include_mutations:
         print(f"Mutations:    {mutation_cases}")
     print(f"Rejected:     {len(generation.suite.rejected)}")
+    if generation.suite.selection is not None:
+        print(f"Selected:     {len(generation.suite.selection.selected_ids)}")
+        print(f"Unselected:   {len(generation.suite.selection.excluded_ids)}")
     print(f"Fingerprint:  {generation.suite.fingerprint}")
     print()
     print("Next steps:")
@@ -368,11 +403,16 @@ def _test_command(
     seed: int | None,
     run_id: str | None,
     persist_store: bool,
+    select: str | None,
 ) -> int:
     print("Inspecting agent...")
     print()
     execution = execute_suite(
-        target, seed=seed, run_id=run_id, persist_store=persist_store
+        target,
+        seed=seed,
+        run_id=run_id,
+        persist_store=persist_store,
+        select=select,
     )
     if not execution.scenarios:
         raise ScenarioValidationError(
@@ -391,6 +431,11 @@ def _test_command(
         print(
             f"Excluded: {len(execution.invalid_scenarios)} invalid scenario(s); "
             "these do not affect results"
+        )
+    if execution.selection is not None and execution.selection.excluded_ids:
+        print(
+            f"Excluded by selection: {len(execution.selection.excluded_ids)} "
+            "valid scenario(s); these are not scored"
         )
     print()
     print(f"Running {len(execution.scenarios)} scenarios in isolated child processes...")
@@ -468,6 +513,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 include_mutations=args.mutations,
                 max_mutations=args.max_mutations,
                 policy_packs=args.policy_packs,
+                max_cases=args.max_cases,
             )
         if args.command == "test":
             return _test_command(
@@ -475,6 +521,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 seed=args.seed,
                 run_id=args.run_id,
                 persist_store=not args.no_store,
+                select=args.select,
             )
         if args.command == "report":
             return _report_command(

@@ -34,6 +34,7 @@ from agentcheck.domain import (
 )
 from agentcheck.errors import ConfigurationError
 from agentcheck.generate.suite import FrozenSuite, configured_frozen_suite
+from agentcheck.generate.selection import SelectionPlan
 from agentcheck.store import (
     StoreError,
     default_store_relative_path,
@@ -76,6 +77,7 @@ class LoadedRun:
     seed: int
     git_revision: str | None
     frozen_suite: FrozenSuite | None
+    selection: SelectionPlan | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,7 +138,7 @@ def load_stored_run(
     directory = _run_directory(root, config, resolved_id, source=source)
     spec = _load_spec(directory / "agent-spec.json")
     seed, scenarios = _load_suite(directory / "suite.json", resolved_id)
-    git_revision = _load_summary(directory / "summary.json", resolved_id, seed)
+    git_revision, selection = _load_summary(directory / "summary.json", resolved_id, seed)
     evaluations = _load_jsonl(
         directory / "evaluations.jsonl",
         CaseEvaluation,
@@ -166,6 +168,7 @@ def load_stored_run(
         seed=seed,
         git_revision=git_revision,
         frozen_suite=frozen,
+        selection=selection,
     )
 
 
@@ -189,6 +192,7 @@ def render_stored_run(
         include_instructions=loaded.config.include_instructions_in_report,
         seed=loaded.seed,
         frozen_suite=loaded.frozen_suite,
+        selection_plan=loaded.selection,
     )
     destination = _report_destination(loaded, out)
     try:
@@ -353,7 +357,7 @@ def _load_suite(path: Path, run_id: str) -> tuple[int, tuple[Scenario, ...]]:
     return seed, tuple(scenarios)
 
 
-def _load_summary(path: Path, run_id: str, seed: int) -> str | None:
+def _load_summary(path: Path, run_id: str, seed: int) -> tuple[str | None, SelectionPlan | None]:
     document = _read_json_object(path, max_bytes=_MAX_JSON_BYTES)
     _require_contract(
         document, field="schema_version", expected=_SUMMARY_CONTRACT, filename=path.name
@@ -365,9 +369,19 @@ def _load_summary(path: Path, run_id: str, seed: int) -> str | None:
     if document.get("seed") != seed:
         raise ConfigurationError(f"{path.name} seed does not match suite.json")
     revision = document.get("git_revision")
+    selection = _optional_selection(document.get("selection"), filename=path.name)
     if revision is None:
+        return None, selection
+    return str(revision), selection
+
+
+def _optional_selection(value: object, *, filename: str) -> SelectionPlan | None:
+    if value is None:
         return None
-    return str(revision)
+    try:
+        return SelectionPlan.model_validate_json(json.dumps(value))
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(f"invalid {filename} selection plan: {exc}") from exc
 
 
 def _load_findings(path: Path) -> tuple[Finding, ...]:

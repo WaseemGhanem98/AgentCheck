@@ -25,6 +25,11 @@ from agentcheck.domain import (
 from agentcheck.evaluate import evaluate_run, infrastructure_evaluation
 from agentcheck.errors import ConfigurationError, ScenarioValidationError
 from agentcheck.generate import lint_suite
+from agentcheck.generate.selection import (
+    SelectionPlan,
+    lineage_coverage_tags,
+    select_scenarios,
+)
 from agentcheck.generate.suite import (
     FrozenSuite,
     build_frozen_suite,
@@ -82,6 +87,7 @@ class SuiteExecution:
     findings: tuple[Finding, ...]
     artifact_directory: Path
     report_path: Path
+    selection: SelectionPlan | None = None
 
     @property
     def counts(self) -> Counter[Verdict]:
@@ -158,6 +164,7 @@ def generate_suite(
     include_mutations: bool = False,
     max_mutations: int | None = None,
     policy_packs: Sequence[str] | None = None,
+    max_cases: int | None = None,
     timeout_seconds: float = 30.0,
 ) -> SuiteGeneration:
     """Inspect a target, freeze its deterministic suite, and persist a reviewable file."""
@@ -180,6 +187,7 @@ def generate_suite(
         include_mutations=include_mutations,
         max_mutations=max_mutations,
         policy_packs=packs,
+        max_cases=max_cases,
     )
     write_frozen_suite(destination, suite, force=force)
     return SuiteGeneration(
@@ -218,10 +226,15 @@ def execute_suite(
     run_id: str | None = None,
     progress: ProgressCallback | None = None,
     persist_store: bool = True,
+    select: str | None = None,
 ) -> SuiteExecution:
     """Execute the configured suite and persist an immutable report."""
 
     root, config = load_config(target)
+    if select not in (None, "coverage"):
+        raise ConfigurationError(
+            "select must be omitted or set to 'coverage'"
+        )
     # A frozen suite is untrusted input: parse and integrity-check it before the
     # target is imported, so a malformed file never reaches model or tool code.
     configured = configured_frozen_suite(root, config)
@@ -277,6 +290,33 @@ def execute_suite(
         raise ScenarioValidationError(
             "No valid scenarios remain after linting; no agent verdict was produced."
         )
+
+    selection_plan: SelectionPlan | None = None if frozen is None else frozen.selection
+    if select == "coverage":
+        extra_tags: dict[str, Sequence[str]] = {}
+        if frozen is not None:
+            extra_tags = {
+                case.scenario.scenario_id: lineage_coverage_tags(
+                    origin=case.lineage.origin.value,
+                    tool_name=case.lineage.tool_name,
+                    boundary_kind=case.lineage.boundary_kind,
+                    mutation_kind=case.lineage.mutation_kind,
+                )
+                for case in frozen.cases
+                if case.scenario.scenario_id in {item.scenario_id for item in valid}
+            }
+        valid_selected, selection_plan = select_scenarios(
+            valid,
+            max_cases=config.max_cases,
+            spec=spec,
+            extra_tags_by_id=extra_tags,
+        )
+        valid = list(valid_selected)
+        if not valid:
+            raise ScenarioValidationError(
+                "No valid scenarios remain after coverage selection; "
+                "no agent verdict was produced."
+            )
 
     indexed_results: dict[int, tuple[CanonicalRun | None, CaseEvaluation]] = {}
     with ThreadPoolExecutor(
@@ -356,20 +396,25 @@ def execute_suite(
 
     counts = Counter(item.verdict for item in evaluations)
     pass_rate = counts[Verdict.PASS] / len(evaluations) if evaluations else None
+    summary: dict[str, object] = {
+        "schema_version": "agentcheck.summary.v1",
+        "run_id": suite_run_id,
+        "target": str(root),
+        "git_revision": revision,
+        "suite_size": len(valid_scenarios),
+        "invalid_scenarios": len(invalid),
+        "observed_suite_pass_rate": pass_rate,
+        "counts": {verdict.value: counts[verdict] for verdict in Verdict},
+        "finding_count": len(findings),
+        "seed": effective_seed,
+    }
+    if selection_plan is not None:
+        summary["excluded_by_selection"] = len(selection_plan.excluded_ids)
+        summary["selection"] = selection_plan.model_dump(mode="json")
+        summary["coverage"] = selection_plan.coverage.model_dump(mode="json")
     artifacts.write_json(
         "summary.json",
-        {
-            "schema_version": "agentcheck.summary.v1",
-            "run_id": suite_run_id,
-            "target": str(root),
-            "git_revision": revision,
-            "suite_size": len(valid_scenarios),
-            "invalid_scenarios": len(invalid),
-            "observed_suite_pass_rate": pass_rate,
-            "counts": {verdict.value: counts[verdict] for verdict in Verdict},
-            "finding_count": len(findings),
-            "seed": effective_seed,
-        },
+        summary,
     )
     report = render_report(
         run_id=suite_run_id,
@@ -383,6 +428,7 @@ def execute_suite(
         include_instructions=config.include_instructions_in_report,
         seed=effective_seed,
         frozen_suite=frozen,
+        selection_plan=selection_plan,
     )
     report_path = artifacts.write_text("report.html", report)
     execution = SuiteExecution(
@@ -400,6 +446,7 @@ def execute_suite(
         findings=findings,
         artifact_directory=artifacts.root,
         report_path=report_path,
+        selection=selection_plan,
     )
     if persist_store:
         _persist_execution(execution)
