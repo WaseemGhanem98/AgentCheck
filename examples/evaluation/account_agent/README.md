@@ -22,6 +22,8 @@ agentcheck test examples/evaluation/account_agent
 agentcheck report examples/evaluation/account_agent --latest
 agentcheck replay examples/evaluation/account_agent \
   --manifest .agentcheck/replay/<run-id>.json
+agentcheck shrink examples/evaluation/account_agent \
+  --manifest .agentcheck/replay/<run-id>.json
 ```
 
 `generate` is optional. Without a frozen suite file, `test` still runs the

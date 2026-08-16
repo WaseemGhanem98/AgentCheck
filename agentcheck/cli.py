@@ -10,7 +10,13 @@ from collections import Counter
 from typing import Sequence
 
 from agentcheck import __version__
-from agentcheck.application import execute_suite, generate_suite, inspect_target, replay_suite
+from agentcheck.application import (
+    execute_suite,
+    generate_suite,
+    inspect_target,
+    replay_suite,
+    shrink_suite,
+)
 from agentcheck.config import DEFAULT_ENTRYPOINT, entrypoint_location
 from agentcheck.domain import AgentSpec, Severity, Verdict
 from agentcheck.errors import ConfigurationError, ScenarioValidationError
@@ -20,6 +26,12 @@ from agentcheck.initialize import DEFAULT_ADAPTER, SUPPORTED_ADAPTERS, write_ini
 from agentcheck.inspect.capabilities import ExtractedCapability, extract_capabilities
 from agentcheck.privacy import redact_artifact, redact_log_text
 from agentcheck.report import render_stored_run
+from agentcheck.shrink import (
+    DEFAULT_MAX_CANDIDATES,
+    DEFAULT_MAX_ROUNDS,
+    MAX_MAX_CANDIDATES,
+    MAX_MAX_ROUNDS,
+)
 
 
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$")
@@ -41,6 +53,30 @@ def _max_cases(value: str) -> int:
     if parsed < 1 or parsed > MAX_CASES:
         raise argparse.ArgumentTypeError(
             f"max-cases must be between 1 and {MAX_CASES}"
+        )
+    return parsed
+
+
+def _max_candidates(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("max-candidates must be an integer") from exc
+    if parsed < 1 or parsed > MAX_MAX_CANDIDATES:
+        raise argparse.ArgumentTypeError(
+            f"max-candidates must be between 1 and {MAX_MAX_CANDIDATES}"
+        )
+    return parsed
+
+
+def _max_rounds(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("max-rounds must be an integer") from exc
+    if parsed < 1 or parsed > MAX_MAX_ROUNDS:
+        raise argparse.ArgumentTypeError(
+            f"max-rounds must be between 1 and {MAX_MAX_ROUNDS}"
         )
     return parsed
 
@@ -264,6 +300,55 @@ def _parser() -> argparse.ArgumentParser:
         "--no-store",
         action="store_true",
         help="skip writing the local SQLite evaluation index",
+    )
+
+    shrink_parser = commands.add_parser(
+        "shrink",
+        help="minimize a failing replay case while preserving its failure signature",
+        description=(
+            "Load an agentcheck.replay_manifest.v1 document, verify replay bindings, "
+            "and search for a smaller scenario that reproduces the same deterministic "
+            "failure signature. The result is a smaller reproducer, not a claim about "
+            "the business root cause. Frozen suites, suite.json, SQLite, and HTML "
+            "reports are not shrink inputs. This command executes trusted local agent "
+            "code and is not a sandbox."
+        ),
+    )
+    shrink_parser.add_argument("target", nargs="?", default=".")
+    shrink_parser.add_argument(
+        "--manifest",
+        required=True,
+        help="relative path inside the target to a replay manifest",
+    )
+    shrink_parser.add_argument(
+        "--scenario-id",
+        help="shrink this scenario instead of scanning for the first shrinkable FAIL",
+    )
+    shrink_parser.add_argument(
+        "--max-candidates",
+        type=_max_candidates,
+        help=(
+            "maximum candidate executions during search "
+            f"(default {DEFAULT_MAX_CANDIDATES}, maximum {MAX_MAX_CANDIDATES})"
+        ),
+    )
+    shrink_parser.add_argument(
+        "--max-rounds",
+        type=_max_rounds,
+        help=(
+            "maximum reduction dimensions to search "
+            f"(default {DEFAULT_MAX_ROUNDS}, maximum {MAX_MAX_ROUNDS})"
+        ),
+    )
+    shrink_parser.add_argument(
+        "--run-id",
+        type=_run_id,
+        help="set a safe artifact run ID for the minimized manifest",
+    )
+    shrink_parser.add_argument(
+        "--no-store",
+        action="store_true",
+        help="skip writing the local SQLite evaluation index for verification",
     )
     return parser
 
@@ -592,6 +677,71 @@ def _replay_command(
     return 0
 
 
+def _shrink_command(
+    target: str,
+    *,
+    manifest: str,
+    scenario_id: str | None,
+    run_id: str | None,
+    max_candidates: int | None,
+    max_rounds: int | None,
+    persist_store: bool,
+) -> int:
+    print("Loading replay manifest...")
+    print()
+    execution = shrink_suite(
+        target,
+        manifest,
+        scenario_id=scenario_id,
+        run_id=run_id,
+        max_candidates=max_candidates or DEFAULT_MAX_CANDIDATES,
+        max_rounds=max_rounds or DEFAULT_MAX_ROUNDS,
+        persist_store=persist_store,
+    )
+    original = execution.result.original_complexity
+    minimized = execution.result.minimized_complexity
+    signature = execution.result.failure_signature
+    print(f"Source manifest: {execution.source_manifest_path}")
+    print(f"Scenario: {execution.original_scenario.scenario_id}")
+    print(
+        "Original complexity: "
+        f"turns={original.conversation_turns} "
+        f"fixtures={original.tool_fixtures} "
+        f"faults={original.injected_faults} "
+        f"world={original.world_state_entries} "
+        f"total={original.total()}"
+    )
+    print(
+        "Minimized complexity: "
+        f"turns={minimized.conversation_turns} "
+        f"fixtures={minimized.tool_fixtures} "
+        f"faults={minimized.injected_faults} "
+        f"world={minimized.world_state_entries} "
+        f"total={minimized.total()}"
+    )
+    print(
+        "Failure signature: "
+        f"{signature.fingerprint} "
+        f"({len(signature.failed_assertions)} failed assertion(s))"
+    )
+    print(f"Candidate executions: {execution.result.candidate_executions}")
+    print(f"Accepted reductions: {execution.result.accepted_reductions}")
+    print(f"Budget exhausted: {'yes' if execution.result.budget_exhausted else 'no'}")
+    print(f"Minimality: {execution.result.minimality}")
+    print("Requires human review: true")
+    print()
+    print(
+        "This smaller case reproduces the same deterministic failure signature. "
+        "It is not a claim about the business root cause."
+    )
+    print()
+    print("Minimized replay manifest:")
+    print(execution.minimized_manifest_path)
+    print("Shrink result:")
+    print(execution.result_path)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -636,6 +786,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.target,
                 manifest=args.manifest,
                 run_id=args.run_id,
+                persist_store=not args.no_store,
+            )
+        if args.command == "shrink":
+            return _shrink_command(
+                args.target,
+                manifest=args.manifest,
+                scenario_id=args.scenario_id,
+                run_id=args.run_id,
+                max_candidates=args.max_candidates,
+                max_rounds=args.max_rounds,
                 persist_store=not args.no_store,
             )
     except KeyboardInterrupt:

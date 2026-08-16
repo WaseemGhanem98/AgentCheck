@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from collections import Counter
@@ -12,7 +13,7 @@ from typing import Callable, Sequence
 
 from agentcheck.analyze import analyze_failures
 from agentcheck.artifacts import ArtifactStore, new_run_id
-from agentcheck.config import AgentCheckConfig, load_config
+from agentcheck.config import AgentCheckConfig, contained_path, load_config
 from agentcheck.domain import (
     AgentSpec,
     CanonicalRun,
@@ -22,9 +23,10 @@ from agentcheck.domain import (
     Scenario,
     Verdict,
 )
+from agentcheck import __version__
 from agentcheck.evaluate import evaluate_run, infrastructure_evaluation
 from agentcheck.errors import ConfigurationError, ScenarioValidationError
-from agentcheck.generate import lint_suite
+from agentcheck.generate import lint_scenario, lint_suite
 from agentcheck.generate.realization import (
     REALIZATION_CREDENTIAL_ENV,
     OpenAIChatRealizer,
@@ -52,13 +54,31 @@ from agentcheck.policies import (
 from agentcheck.privacy import redact_log_text
 from agentcheck.report import render_report
 from agentcheck.replay import (
+    ReplayManifest,
     build_replay_manifest,
     entrypoint_digest,
     git_revision,
     load_replay_manifest,
+    secret_shaped_reason,
     verify_replay_bindings,
     write_replay_manifest,
 )
+from agentcheck.replay.manifest import replay_manifest_relative_path
+from agentcheck.shrink import (
+    DEFAULT_MAX_CANDIDATES,
+    DEFAULT_MAX_ROUNDS,
+    MAX_MAX_CANDIDATES,
+    MAX_MAX_ROUNDS,
+    MAX_SOURCE_SCANS,
+    ShrinkResult,
+    extract_failure_signature,
+    signatures_match,
+    shrink_scenario,
+    unsupported_failure_reason,
+    write_shrink_result,
+)
+from agentcheck.shrink.complexity import measure_complexity
+from agentcheck.shrink.result import RejectedCount, ShrinkBudget
 from agentcheck.store import open_evaluation_store, stored_run_from_execution
 from agentcheck.runner.orchestrator import (
     ProcessResult,
@@ -83,6 +103,22 @@ class SuiteGeneration:
     spec: AgentSpec
     suite: FrozenSuite
     suite_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class ShrinkExecution:
+    target_root: Path
+    config: AgentCheckConfig
+    source_manifest: ReplayManifest
+    source_manifest_path: str
+    original_scenario: Scenario
+    minimized_scenario: Scenario
+    original_evaluation: CaseEvaluation
+    result: ShrinkResult
+    result_path: Path
+    minimized_manifest: ReplayManifest
+    minimized_manifest_path: Path
+    verification: SuiteExecution
 
 
 @dataclass(frozen=True, slots=True)
@@ -425,6 +461,244 @@ def replay_suite(
     )
 
 
+def shrink_suite(
+    target: str | Path,
+    manifest_path: str,
+    *,
+    scenario_id: str | None = None,
+    run_id: str | None = None,
+    max_candidates: int = DEFAULT_MAX_CANDIDATES,
+    max_rounds: int = DEFAULT_MAX_ROUNDS,
+    persist_store: bool = True,
+) -> ShrinkExecution:
+    """Minimize a failing replay case without weakening oracles or bindings."""
+
+    if max_candidates < 1 or max_candidates > MAX_MAX_CANDIDATES:
+        raise ConfigurationError(
+            f"max-candidates must be between 1 and {MAX_MAX_CANDIDATES}"
+        )
+    if max_rounds < 1 or max_rounds > MAX_MAX_ROUNDS:
+        raise ConfigurationError(
+            f"max-rounds must be between 1 and {MAX_MAX_ROUNDS}"
+        )
+
+    root, config = load_config(target)
+    source_manifest = load_replay_manifest(root, manifest_path)
+    source_resolved = contained_path(root, manifest_path)
+    suite_run_id = run_id or new_run_id()
+    destination_relative = replay_manifest_relative_path(config, suite_run_id)
+    destination = contained_path(root, destination_relative)
+    if destination == source_resolved:
+        raise ConfigurationError(
+            "refusing to overwrite the source replay manifest; pass a different --run-id"
+        )
+
+    inspection = inspect_in_subprocess(root, config)
+    packs = resolve_policy_packs(root, config)
+    spec = attach_declared_policies(inspection.require_value(), packs)
+    pack_ids = tuple(pack.pack_id for pack in packs)
+    verify_replay_bindings(
+        source_manifest,
+        root=root,
+        config=config,
+        spec=spec,
+        policy_pack_ids=pack_ids,
+    )
+
+    original, original_evaluation = _select_shrink_target(
+        source_manifest,
+        scenario_id=scenario_id,
+        root=root,
+        config=config,
+        spec=spec,
+        run_id=suite_run_id,
+    )
+    executions = {"count": 0}
+
+    def execute_candidate(scenario: Scenario) -> CaseEvaluation:
+        executions["count"] += 1
+        return _run_and_evaluate(
+            root,
+            config,
+            spec,
+            scenario,
+            f"{suite_run_id}-c{executions['count']:03d}",
+        )
+
+    outcome = shrink_scenario(
+        original,
+        original_evaluation,
+        spec=spec,
+        execute=execute_candidate,
+        max_candidates=max_candidates,
+        max_rounds=max_rounds,
+    )
+    minimized = _annotate_minimized(outcome.scenario, original)
+    if secret_shaped_reason(minimized) is not None:
+        raise ConfigurationError(
+            "minimized scenario cannot be serialized without a secret-shaped value"
+        )
+    minimized_manifest = ReplayManifest(
+        created_from_run_id=suite_run_id,
+        agentcheck_version=__version__,
+        seed=source_manifest.seed,
+        spec_binding=source_manifest.spec_binding,
+        source_binding=source_manifest.source_binding,
+        environment_requirements=source_manifest.environment_requirements,
+        cases=(minimized,),
+    )
+    minimized_path = write_replay_manifest(root, config, minimized_manifest)
+    verification = replay_suite(
+        root,
+        destination_relative,
+        run_id=f"{suite_run_id}-verify",
+        persist_store=persist_store,
+    )
+    if len(verification.evaluations) != 1:
+        raise ConfigurationError("minimized replay did not produce exactly one evaluation")
+    try:
+        verified_signature = extract_failure_signature(verification.evaluations[0])
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"minimized replay did not reproduce a shrinkable failure: {exc}"
+        ) from exc
+    if not signatures_match(outcome.signature, verified_signature):
+        raise ConfigurationError(
+            "minimized replay did not reproduce the original failure signature"
+        )
+
+    result = ShrinkResult(
+        source_manifest_id=source_manifest.manifest_id,
+        source_manifest_fingerprint=source_manifest.fingerprint,
+        source_scenario_id=original.scenario_id,
+        source_scenario_fingerprint=original.fingerprint,
+        failure_signature=outcome.signature,
+        original_complexity=measure_complexity(original),
+        minimized_complexity=outcome.complexity,
+        minimized_scenario_fingerprint=minimized.fingerprint,
+        minimized_manifest_id=minimized_manifest.manifest_id,
+        minimized_manifest_path=destination_relative,
+        candidate_executions=outcome.candidate_executions,
+        accepted_reductions=outcome.accepted_reductions,
+        rejected_candidates=outcome.rejected_candidates,
+        skipped_invalid=outcome.skipped_invalid,
+        rejected_by_reason=tuple(
+            RejectedCount(reason=reason, count=count)
+            for reason, count in outcome.rejected_by_reason
+        ),
+        budget=ShrinkBudget(max_candidates=max_candidates, max_rounds=max_rounds),
+        budget_exhausted=outcome.budget_exhausted,
+        minimality=outcome.minimality,
+        agentcheck_version=__version__,
+    )
+    result_path = write_shrink_result(root, config, result, suite_run_id)
+    return ShrinkExecution(
+        target_root=root,
+        config=config,
+        source_manifest=source_manifest,
+        source_manifest_path=manifest_path,
+        original_scenario=original,
+        minimized_scenario=minimized,
+        original_evaluation=original_evaluation,
+        result=result,
+        result_path=result_path,
+        minimized_manifest=minimized_manifest,
+        minimized_manifest_path=minimized_path,
+        verification=verification,
+    )
+
+
+def _select_shrink_target(
+    manifest: ReplayManifest,
+    *,
+    scenario_id: str | None,
+    root: Path,
+    config: AgentCheckConfig,
+    spec: AgentSpec,
+    run_id: str,
+) -> tuple[Scenario, CaseEvaluation]:
+    if scenario_id is not None:
+        selected = [case for case in manifest.cases if case.scenario_id == scenario_id]
+        if not selected:
+            raise ConfigurationError(
+                f"replay manifest has no scenario {scenario_id!r}"
+            )
+        scenario = selected[0]
+        _require_lint_clean(scenario, spec)
+        evaluation = _run_and_evaluate(
+            root, config, spec, scenario, f"{run_id}-original"
+        )
+        reason = unsupported_failure_reason(evaluation)
+        if reason is not None:
+            raise ConfigurationError(
+                f"scenario {scenario.scenario_id} is not a shrinkable counterexample: {reason}"
+            )
+        return scenario, evaluation
+
+    last_reason = "replay manifest contains no shrinkable FAIL case"
+    scanned = 0
+    for index, scenario in enumerate(manifest.cases, start=1):
+        if scanned >= MAX_SOURCE_SCANS:
+            raise ConfigurationError(
+                "replay manifest exceeded the shrink source scan bound of "
+                f"{MAX_SOURCE_SCANS} cases without a shrinkable FAIL; "
+                "pass --scenario-id to select a case"
+            )
+        scanned += 1
+        _require_lint_clean(scenario, spec)
+        evaluation = _run_and_evaluate(
+            root, config, spec, scenario, f"{run_id}-scan-{index:03d}"
+        )
+        reason = unsupported_failure_reason(evaluation)
+        if reason is None:
+            return scenario, evaluation
+        last_reason = reason
+    raise ConfigurationError(last_reason)
+
+
+def _require_lint_clean(scenario: Scenario, spec: AgentSpec) -> None:
+    issues = lint_scenario(scenario, spec)
+    if issues:
+        raise ConfigurationError(
+            "replay manifest contains scenarios that fail lint against this target"
+        )
+
+
+def _annotate_minimized(scenario: Scenario, original: Scenario) -> Scenario:
+    payload = json.loads(scenario.model_dump_json())
+    payload["title"] = (
+        original.title
+        if original.title.startswith("Minimized:")
+        else f"Minimized: {original.title}"
+    )
+    payload["description"] = (
+        "Smaller replayable counterexample that preserves the original "
+        "deterministic failure signature. This is not a claim about the "
+        "business root cause."
+    )
+    payload["fingerprint"] = ""
+    return Scenario.model_validate_json(json.dumps(payload, ensure_ascii=False))
+
+
+def _run_and_evaluate(
+    root: Path,
+    config: AgentCheckConfig,
+    spec: AgentSpec,
+    scenario: Scenario,
+    case_run_id: str,
+) -> CaseEvaluation:
+    result = run_scenario_in_subprocess(
+        root,
+        config,
+        scenario,
+        case_run_id,
+        expected_target_id=spec.spec_id,
+    )
+    if result.value is None:
+        return _process_failure_evaluation(scenario, result, case_run_id)
+    return evaluate_run(scenario, result.value)
+
+
 def _execute_valid_scenarios(
     *,
     root: Path,
@@ -657,10 +931,12 @@ def _persist_execution(execution: SuiteExecution) -> None:
 __all__ = [
     "InvalidScenario",
     "ProgressCallback",
+    "ShrinkExecution",
     "SuiteExecution",
     "SuiteGeneration",
     "execute_suite",
     "generate_suite",
     "inspect_target",
     "replay_suite",
+    "shrink_suite",
 ]
