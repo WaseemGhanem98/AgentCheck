@@ -1,4 +1,4 @@
-"""Command-line interface for the deterministic AgentCheck Phase 1 workflow."""
+"""Command-line interface for the deterministic AgentCheck workflow."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from collections import Counter
 from typing import Sequence
 
 from agentcheck import __version__
-from agentcheck.application import execute_suite, inspect_target
+from agentcheck.application import execute_suite, generate_suite, inspect_target
 from agentcheck.config import DEFAULT_ENTRYPOINT, entrypoint_location
 from agentcheck.domain import AgentSpec, Severity, Verdict
 from agentcheck.errors import ScenarioValidationError
@@ -89,6 +89,36 @@ def _parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="emit the versioned AgentSpec as JSON",
+    )
+
+    generate_parser = commands.add_parser(
+        "generate",
+        help="derive, lint, and freeze a deterministic suite for a trusted local agent",
+        description=(
+            "Import the configured trusted local agent in a child process "
+            "(executing its module-level code), derive the supported built-in and "
+            "schema-boundary cases, lint them, and write a frozen suite. The "
+            "written file is inert data, not a replay manifest, and is not a "
+            "security sandbox."
+        ),
+    )
+    generate_parser.add_argument("target", nargs="?", default=".")
+    generate_parser.add_argument(
+        "--seed",
+        type=_seed,
+        help="override the configured suite seed recorded into the frozen suite",
+    )
+    generate_parser.add_argument(
+        "--out",
+        help=(
+            "relative path inside the target for the frozen suite "
+            "(defaults to suite_path or agentcheck-suite.json)"
+        ),
+    )
+    generate_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="replace an existing frozen suite instead of refusing",
     )
 
     test_parser = commands.add_parser(
@@ -194,7 +224,31 @@ def _init_command(target: str, *, entrypoint: str, adapter: str, force: bool) ->
     print()
     print("Next steps:")
     print(f"- agentcheck inspect {root}")
+    print(f"- agentcheck generate {root}")
     print(f"- agentcheck test {root}")
+    return 0
+
+
+def _generate_command(
+    target: str, *, seed: int | None, out: str | None, force: bool
+) -> int:
+    print("Inspecting agent...")
+    print()
+    generation = generate_suite(target, seed=seed, out=out, force=force)
+    _print_inspection(generation.spec)
+    print()
+    print("Frozen suite written.")
+    print()
+    print(f"Suite:        {generation.suite_path}")
+    print(f"Suite ID:     {generation.suite.suite_id}")
+    print(f"Spec ID:      {generation.suite.spec_id}")
+    print(f"Seed:         {generation.suite.seed}")
+    print(f"Cases:        {len(generation.suite.cases)}")
+    print(f"Rejected:     {len(generation.suite.rejected)}")
+    print(f"Fingerprint:  {generation.suite.fingerprint}")
+    print()
+    print("Next steps:")
+    print(f"- agentcheck test {generation.target_root}")
     return 0
 
 
@@ -221,7 +275,12 @@ def _test_command(target: str, *, seed: int | None, run_id: str | None) -> int:
         )
     _print_inspection(execution.spec)
     print()
-    print("Building deterministic test suite...")
+    if execution.frozen_suite is not None:
+        print("Using frozen suite...")
+        print(f"Suite ID: {execution.frozen_suite.suite_id}")
+        print(f"Seed:     {execution.frozen_suite.seed}")
+    else:
+        print("Building deterministic test suite...")
     print(f"Generated: {len(execution.scenarios)} valid scenarios")
     if execution.invalid_scenarios:
         print(
@@ -279,6 +338,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         if args.command == "inspect":
             return _inspect_command(args.target, as_json=args.json)
+        if args.command == "generate":
+            return _generate_command(
+                args.target,
+                seed=args.seed,
+                out=args.out,
+                force=args.force,
+            )
         if args.command == "test":
             return _test_command(args.target, seed=args.seed, run_id=args.run_id)
     except KeyboardInterrupt:

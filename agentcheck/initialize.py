@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import json
 import os
-import secrets
 from pathlib import Path
 from typing import Any, get_args
 
+from .artifacts import create_private_file, replace_private_file
 from .config import (
     CONFIG_FILENAME,
     DEFAULT_ENTRYPOINT,
@@ -56,7 +56,7 @@ def _validated_config(adapter: str, entrypoint: str) -> AgentCheckConfig:
 
 
 def _encoded_config(config: AgentCheckConfig) -> bytes:
-    payload = config.model_dump(mode="json")
+    payload = config.model_dump(mode="json", exclude_none=True)
     text = json.dumps(
         payload,
         ensure_ascii=False,
@@ -67,52 +67,18 @@ def _encoded_config(config: AgentCheckConfig) -> bytes:
     return (text + "\n").encode("utf-8")
 
 
-def _create_new_file(path: Path, payload: bytes) -> None:
-    """Create ``path`` with mode ``0600``, failing if anything already exists there."""
-
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(descriptor, "wb") as handle:
-            descriptor = -1
-            handle.write(payload)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(path, 0o600)
-    except BaseException:
-        if descriptor >= 0:
-            os.close(descriptor)
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
-        raise
-
-
 def _write_config_file(destination: Path, payload: bytes, *, force: bool) -> None:
-    if not force:
-        try:
-            _create_new_file(destination, payload)
-        except FileExistsError as exc:
-            raise ConfigurationError(
-                f"{destination.name} already exists at {destination}; "
-                "re-run with --force to replace it"
-            ) from exc
-        except OSError as exc:
-            raise ConfigurationError(f"unable to write {destination}: {exc}") from exc
-        return
-
-    temporary = destination.with_name(f".{destination.name}.{secrets.token_hex(6)}.tmp")
     try:
-        _create_new_file(temporary, payload)
-        # Replacing the path itself never follows a symlink, so a hostile link at
-        # the destination cannot redirect the write outside the target.
-        os.replace(temporary, destination)
-        os.chmod(destination, 0o600)
+        if force:
+            replace_private_file(destination, payload)
+        else:
+            create_private_file(destination, payload)
+    except FileExistsError as exc:
+        raise ConfigurationError(
+            f"{destination.name} already exists at {destination}; "
+            "re-run with --force to replace it"
+        ) from exc
     except OSError as exc:
-        try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
         raise ConfigurationError(f"unable to write {destination}: {exc}") from exc
 
 

@@ -31,6 +31,7 @@ class AgentCheckConfig(BaseModel):
     environment_allowlist: tuple[str, ...] = ()
     include_instructions_in_report: bool = False
     artifacts_directory: str = ".agentcheck"
+    suite_path: str | None = None
 
     @field_validator("entrypoint")
     @classmethod
@@ -60,6 +61,18 @@ class AgentCheckConfig(BaseModel):
             raise ValueError("artifacts_directory must be a safe relative path")
         return path.as_posix()
 
+    @field_validator("suite_path")
+    @classmethod
+    def validate_suite_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        path = Path(value)
+        if not value.strip():
+            raise ValueError("suite_path must not be empty")
+        if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+            raise ValueError("suite_path must be a safe relative path")
+        return path.as_posix()
+
 
 def normalize_target(target: str | os.PathLike[str]) -> Path:
     path = Path(target).expanduser().resolve()
@@ -87,6 +100,29 @@ def load_config(target: str | os.PathLike[str]) -> tuple[Path, AgentCheckConfig]
         config = AgentCheckConfig()
     resolve_entrypoint(root, config.entrypoint)
     return root, config
+
+
+def contained_path(root: Path, relative: str) -> Path:
+    """Resolve a relative path that must stay inside the target directory.
+
+    Symlinks are resolved before the containment check, so a link pointing out
+    of the target is refused for reads and writes alike.
+    """
+
+    if not relative.strip():
+        raise ConfigurationError("path must not be empty")
+    candidate = Path(relative)
+    if candidate.is_absolute():
+        raise ConfigurationError("path must be relative to the target directory")
+    if any(part in {"", ".", ".."} for part in candidate.parts):
+        raise ConfigurationError("path must be a safe relative path")
+    resolved_root = root.resolve()
+    resolved = (resolved_root / candidate).resolve()
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ConfigurationError("path must remain inside the target directory") from exc
+    return resolved
 
 
 def entrypoint_location(root: Path, entrypoint: str) -> tuple[Path, str]:

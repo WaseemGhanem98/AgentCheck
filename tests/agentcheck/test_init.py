@@ -286,6 +286,7 @@ def test_cli_reports_the_written_configuration(tmp_path: Path, capsys: pytest.Ca
     assert "Adapter:    openai_agents" in output.out
     assert "Entrypoint: agent.py:agent" in output.out
     assert f"- agentcheck inspect {root}" in output.out
+    assert f"- agentcheck generate {root}" in output.out
     assert f"- agentcheck test {root}" in output.out
     assert "does not exist yet" not in output.out
 
@@ -362,4 +363,5 @@ def test_existing_commands_remain_available(capsys: pytest.CaptureFixture[str]) 
     help_text = capsys.readouterr().out
     assert "init" in help_text
     assert "inspect" in help_text
+    assert "generate" in help_text
     assert "test" in help_text

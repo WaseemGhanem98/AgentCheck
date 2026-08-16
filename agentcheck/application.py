@@ -22,8 +22,16 @@ from agentcheck.domain import (
     Verdict,
 )
 from agentcheck.evaluate import evaluate_run, infrastructure_evaluation
-from agentcheck.errors import ScenarioValidationError
-from agentcheck.generate import build_account_support_suite, lint_suite
+from agentcheck.errors import ConfigurationError, ScenarioValidationError
+from agentcheck.generate import lint_suite
+from agentcheck.generate.suite import (
+    FrozenSuite,
+    build_frozen_suite,
+    built_in_suite,
+    configured_frozen_suite,
+    resolve_suite_destination,
+    write_frozen_suite,
+)
 from agentcheck.report import render_report
 from agentcheck.runner.orchestrator import (
     ProcessResult,
@@ -42,12 +50,22 @@ class InvalidScenario:
 
 
 @dataclass(frozen=True, slots=True)
+class SuiteGeneration:
+    target_root: Path
+    config: AgentCheckConfig
+    spec: AgentSpec
+    suite: FrozenSuite
+    suite_path: Path
+
+
+@dataclass(frozen=True, slots=True)
 class SuiteExecution:
     target_root: Path
     config: AgentCheckConfig
     run_id: str
     git_revision: str | None
     spec: AgentSpec
+    frozen_suite: FrozenSuite | None
     scenarios: tuple[Scenario, ...]
     invalid_scenarios: tuple[InvalidScenario, ...]
     runs: tuple[CanonicalRun, ...]
@@ -99,13 +117,46 @@ def _git_revision(root: Path) -> str | None:
     return revision if completed.returncode == 0 and revision else None
 
 
-def _suite(config: AgentCheckConfig, seed: int | None) -> tuple[Scenario, ...]:
+def _effective_seed(config: AgentCheckConfig, seed: int | None) -> int:
     actual_seed = config.seed if seed is None else seed
     if actual_seed < 0 or actual_seed > 2**63 - 1:
         raise ValueError("seed must be between 0 and 2^63 - 1")
-    if config.suite == "account_support_v1":
-        return build_account_support_suite(seed=actual_seed)
-    raise ValueError(f"unsupported Phase 1 suite: {config.suite}")
+    return actual_seed
+
+
+def _suite(config: AgentCheckConfig, seed: int | None) -> tuple[Scenario, ...]:
+    return built_in_suite(config, _effective_seed(config, seed))
+
+
+def generate_suite(
+    target: str | Path,
+    *,
+    seed: int | None = None,
+    out: str | None = None,
+    force: bool = False,
+    timeout_seconds: float = 30.0,
+) -> SuiteGeneration:
+    """Inspect a target, freeze its deterministic suite, and persist a reviewable file."""
+
+    root, config = load_config(target)
+    actual_seed = _effective_seed(config, seed)
+    destination = resolve_suite_destination(root, config, out)
+    if not force and (destination.exists() or destination.is_symlink()):
+        raise ConfigurationError(
+            f"{destination.name} already exists at {destination}; "
+            "re-run with --force to replace it"
+        )
+    inspection = inspect_in_subprocess(root, config, timeout_seconds=timeout_seconds)
+    spec = inspection.require_value()
+    suite = build_frozen_suite(spec, config, seed=actual_seed)
+    write_frozen_suite(destination, suite, force=force)
+    return SuiteGeneration(
+        target_root=root,
+        config=config,
+        spec=spec,
+        suite=suite,
+        suite_path=destination,
+    )
 
 
 def _process_failure_evaluation(
@@ -135,16 +186,37 @@ def execute_suite(
     run_id: str | None = None,
     progress: ProgressCallback | None = None,
 ) -> SuiteExecution:
-    """Execute the deterministic Phase 1 suite and persist an immutable report."""
+    """Execute the configured suite and persist an immutable report."""
 
     root, config = load_config(target)
+    # A frozen suite is untrusted input: parse and integrity-check it before the
+    # target is imported, so a malformed file never reaches model or tool code.
+    configured = configured_frozen_suite(root, config)
     suite_run_id = run_id or new_run_id()
     # Freeze repository identity before importing or executing target code.
     revision = _git_revision(root)
     inspection = inspect_in_subprocess(root, config)
     spec = inspection.require_value()
 
-    candidates = _suite(config, seed)
+    frozen: FrozenSuite | None = None
+    if configured is None:
+        effective_seed = _effective_seed(config, seed)
+        candidates = _suite(config, seed)
+    else:
+        suite_path, frozen = configured
+        if frozen.spec_id != spec.spec_id:
+            raise ConfigurationError(
+                f"frozen suite {suite_path.name} was generated for target "
+                f"{frozen.spec_id}, but this target inspects as {spec.spec_id}; "
+                "re-run agentcheck generate"
+            )
+        if seed is not None and seed != frozen.seed:
+            raise ConfigurationError(
+                f"frozen suite {suite_path.name} was generated with seed "
+                f"{frozen.seed}; re-run agentcheck generate to change it"
+            )
+        effective_seed = frozen.seed
+        candidates = frozen.scenarios
     valid: list[Scenario] = []
     invalid: list[InvalidScenario] = []
     for scenario, issues in lint_suite(candidates, spec):
@@ -229,7 +301,7 @@ def execute_suite(
         {
             "schema_version": "agentcheck.suite.v1",
             "run_id": suite_run_id,
-            "seed": config.seed if seed is None else seed,
+            "seed": effective_seed,
             "scenarios": valid_scenarios,
         },
     )
@@ -260,7 +332,7 @@ def execute_suite(
             "observed_suite_pass_rate": pass_rate,
             "counts": {verdict.value: counts[verdict] for verdict in Verdict},
             "finding_count": len(findings),
-            "seed": config.seed if seed is None else seed,
+            "seed": effective_seed,
         },
     )
     report = render_report(
@@ -281,6 +353,7 @@ def execute_suite(
         run_id=suite_run_id,
         git_revision=revision,
         spec=spec,
+        frozen_suite=frozen,
         scenarios=valid_scenarios,
         invalid_scenarios=tuple(invalid),
         runs=runs,
@@ -295,6 +368,8 @@ __all__ = [
     "InvalidScenario",
     "ProgressCallback",
     "SuiteExecution",
+    "SuiteGeneration",
     "execute_suite",
+    "generate_suite",
     "inspect_target",
 ]

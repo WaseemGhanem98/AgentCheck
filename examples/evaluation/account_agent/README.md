@@ -17,5 +17,10 @@ Run it from the repository root:
 
 ```bash
 agentcheck inspect examples/evaluation/account_agent
+agentcheck generate examples/evaluation/account_agent
 agentcheck test examples/evaluation/account_agent
 ```
+
+`generate` is optional. Without a frozen suite file, `test` still runs the
+Phase 1 built-in cases. The frozen file is a reviewable suite, not a replay
+manifest.

@@ -22,6 +22,51 @@ def new_run_id(*, now: datetime | None = None) -> str:
     return f"{timestamp:%Y%m%dT%H%M%SZ}-{secrets.token_hex(4)}"
 
 
+def create_private_file(destination: Path, payload: bytes) -> None:
+    """Create ``destination`` with mode 0600, failing if anything exists there.
+
+    ``O_EXCL`` also refuses an existing symlink, so a planted link cannot
+    redirect the write, and the check is atomic rather than time-of-check.
+    """
+
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = -1
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(destination, 0o600)
+    except BaseException:
+        if descriptor >= 0:
+            os.close(descriptor)
+        try:
+            os.unlink(destination)
+        except OSError:
+            pass
+        raise
+
+
+def replace_private_file(destination: Path, payload: bytes) -> None:
+    """Atomically replace ``destination`` with mode 0600 through a temporary file.
+
+    ``os.replace`` acts on the path itself, so a symlink at the destination is
+    replaced rather than written through.
+    """
+
+    temporary = destination.with_name(f".{destination.name}.{secrets.token_hex(6)}.tmp")
+    try:
+        create_private_file(temporary, payload)
+        os.replace(temporary, destination)
+        os.chmod(destination, 0o600)
+    except BaseException:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def _json_value(value: Any) -> Any:
     if isinstance(value, BaseModel):
         value = value.model_dump(mode="json", exclude_none=False)
@@ -95,23 +140,8 @@ class ArtifactStore:
 
     def write_bytes(self, filename: str, payload: bytes) -> Path:
         destination = self.path(filename)
-        temporary = destination.with_name(f".{destination.name}.{secrets.token_hex(6)}.tmp")
-        descriptor: int | None = None
         try:
-            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            with os.fdopen(descriptor, "wb") as handle:
-                descriptor = None
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, destination)
-            os.chmod(destination, 0o600)
+            replace_private_file(destination, payload)
         except OSError as exc:
-            if descriptor is not None:
-                os.close(descriptor)
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
             raise InfrastructureError(f"unable to write artifact {filename}: {exc}") from exc
         return destination
