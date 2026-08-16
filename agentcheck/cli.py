@@ -172,6 +172,14 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     generate_parser.add_argument(
+        "--realize",
+        action="store_true",
+        help=(
+            "opt in to consent-gated LLM rewriting of display text only; "
+            "requires llm_realization.enabled and an allowlisted provider credential"
+        ),
+    )
+    generate_parser.add_argument(
         "--max-cases",
         type=_max_cases,
         help=(
@@ -342,6 +350,7 @@ def _generate_command(
     max_mutations: int | None,
     policy_packs: list[str] | None,
     max_cases: int | None,
+    realize: bool,
 ) -> int:
     if max_mutations is not None and not include_mutations:
         raise ConfigurationError("--max-mutations requires --mutations")
@@ -356,6 +365,7 @@ def _generate_command(
         max_mutations=max_mutations,
         policy_packs=policy_packs,
         max_cases=max_cases,
+        realize=realize,
     )
     _print_inspection(generation.spec)
     print()
@@ -377,6 +387,9 @@ def _generate_command(
     if generation.suite.selection is not None:
         print(f"Selected:     {len(generation.suite.selection.selected_ids)}")
         print(f"Unselected:   {len(generation.suite.selection.excluded_ids)}")
+    realized = sum(1 for case in generation.suite.cases if case.realization is not None)
+    if realized:
+        print(f"Realized:     {realized} display overlay(s)")
     print(f"Fingerprint:  {generation.suite.fingerprint}")
     print()
     print("Next steps:")
@@ -514,6 +527,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_mutations=args.max_mutations,
                 policy_packs=args.policy_packs,
                 max_cases=args.max_cases,
+                realize=args.realize,
             )
         if args.command == "test":
             return _test_command(

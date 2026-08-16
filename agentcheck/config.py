@@ -15,6 +15,20 @@ CONFIG_FILENAME = "agentcheck.json"
 DEFAULT_ENTRYPOINT = "agent.py:agent"
 _ENTRYPOINT_RE = re.compile(r"^(?P<path>[^:]+\.py):(?P<attribute>[A-Za-z_][A-Za-z0-9_]*)$")
 _SAFE_ENVIRONMENT = ("LANG", "LC_ALL", "TZ", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR")
+_MAX_REALIZATION_CALLS = 32
+_MAX_REALIZATION_RETRIES = 2
+
+
+class LlmRealizationConfig(BaseModel):
+    """Optional nested block. Disabled unless enabled is true and CLI consents."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
+
+    enabled: bool = False
+    provider: Literal["openai"] = "openai"
+    model: str = Field(default="gpt-4o-mini", min_length=1, max_length=200)
+    max_calls: int = Field(default=8, ge=1, le=_MAX_REALIZATION_CALLS)
+    max_retries: int = Field(default=1, ge=0, le=_MAX_REALIZATION_RETRIES)
 
 
 class AgentCheckConfig(BaseModel):
@@ -35,6 +49,7 @@ class AgentCheckConfig(BaseModel):
     policy_packs: tuple[str, ...] | None = None
     store_path: str | None = None
     max_cases: int | None = Field(default=None, ge=1, le=256)
+    llm_realization: LlmRealizationConfig | None = None
 
     @field_validator("entrypoint")
     @classmethod

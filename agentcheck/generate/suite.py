@@ -46,6 +46,11 @@ from .mutations import (
     MutationKind,
     build_workflow_mutations,
 )
+from .realization import (
+    RealizationRecord,
+    realize_scenarios,
+    realization_settings,
+)
 from .selection import (
     SelectionPlan,
     lineage_coverage_tags,
@@ -139,6 +144,14 @@ class CaseLineage(ContractModel):
 class FrozenCase(ContractModel):
     scenario: Scenario
     lineage: CaseLineage
+    realization: RealizationRecord | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_idle_realization(self, serializer: Any) -> dict[str, Any]:
+        data = serializer(self)
+        if not data.get("realization"):
+            data.pop("realization", None)
+        return data
 
 
 class LintIssueRecord(ContractModel):
@@ -320,6 +333,27 @@ def _select_frozen_cases(
     return [by_id[scenario.scenario_id] for scenario in selected], plan
 
 
+def _realize_frozen_cases(
+    cases: list[FrozenCase],
+    config: AgentCheckConfig,
+    realizer: Any,
+) -> list[FrozenCase]:
+    model, max_calls, _max_retries = realization_settings(config)
+    realized = realize_scenarios(
+        [case.scenario for case in cases],
+        realizer,
+        provider="openai",
+        model=model,
+        max_calls=max_calls,
+    )
+    updated: list[FrozenCase] = []
+    for case, (scenario, record) in zip(cases, realized, strict=True):
+        updated.append(
+            FrozenCase(scenario=scenario, lineage=case.lineage, realization=record)
+        )
+    return updated
+
+
 def _append_unique(
     scenario: Scenario,
     lineage: CaseLineage,
@@ -356,6 +390,7 @@ def build_frozen_suite(
     max_mutations: int | None = None,
     policy_packs: Sequence[PolicyPack] = (),
     max_cases: int | None = None,
+    realizer: Any | None = None,
 ) -> FrozenSuite:
     """Derive, deduplicate, lint, and freeze every supported case for a target."""
 
@@ -499,6 +534,9 @@ def build_frozen_suite(
     if budget is not None:
         cases, selection = _select_frozen_cases(cases, spec, max_cases=budget)
 
+    if realizer is not None:
+        cases = _realize_frozen_cases(cases, config, realizer)
+
     tools = tuple(item.value.name for item in spec.tools.items)
     unsupported: list[str] = []
     for item in spec.tools.items:
@@ -506,6 +544,8 @@ def build_frozen_suite(
     sources: tuple[str, ...] = ("built_in", "schema_boundary")
     if include_mutations:
         sources = (*sources, "workflow_mutation")
+    if realizer is not None and any(case.realization is not None for case in cases):
+        sources = (*sources, "llm_realization")
     coverage = SuiteCoverage(
         tools=tools,
         tools_without_boundary_cases=tuple(

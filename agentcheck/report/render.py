@@ -85,6 +85,15 @@ def render_report(
         if frozen_suite is not None
         else {}
     )
+    realization_by_id = (
+        {
+            case.scenario.scenario_id: case.realization
+            for case in frozen_suite.cases
+            if case.realization is not None
+        }
+        if frozen_suite is not None
+        else {}
+    )
     plan = selection_plan
     if plan is None and frozen_suite is not None:
         plan = frozen_suite.selection
@@ -163,6 +172,17 @@ def render_report(
                 f"<section><h4>Lineage</h4><p>Origin {_escape(lineage.origin.value)}"
                 f"{extra}</p></section>"
             )
+        realization = realization_by_id.get(scenario.scenario_id)
+        realization_html = ""
+        if realization is not None:
+            overlay = _json(list(realization.turns)) if realization.turns else "None recorded"
+            realization_html = (
+                "<section><h4>Realized wording (non-authoritative)</h4>"
+                f"<p>Source {_escape(realization.source_kind)} · inferred · not authoritative · "
+                f"provider {_escape(realization.provider)}</p>"
+                f"<p>{_escape(realization.title)}</p>"
+                f"<pre>{overlay}</pre></section>"
+            )
         cases.append(
             f"""
             <details class="case" {'open' if verdict != 'PASS' else ''}>
@@ -177,6 +197,7 @@ def render_report(
                 <section><h4>Likely cause</h4><p>{_escape(cause)}</p><h4>Suggested fix</h4><p>{_escape(fix)}</p></section>
                 <section><h4>Reproducibility</h4><p>Seed {_escape(scenario.generation_seed)} · Fingerprint <span class="mono">{_escape(scenario.fingerprint)}</span></p></section>
                 {lineage_html}
+                {realization_html}
               </div>
             </details>
             """

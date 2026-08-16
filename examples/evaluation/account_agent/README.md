@@ -1,6 +1,6 @@
 # Deliberately flawed account-support agent
 
-This OpenAI Agents SDK target is the deterministic fixture for AgentCheck Phase 1.
+This OpenAI Agents SDK target is the deterministic fixture for AgentCheck.
 Its model is local and scripted, so inspection and tests make no provider calls and
 need no API key. The four original function handlers are raising tripwires; every
 evaluation invocation must be handled by AgentCheck's controlled `ToolGateway`.
@@ -19,6 +19,7 @@ Run it from the repository root:
 agentcheck inspect examples/evaluation/account_agent
 agentcheck generate examples/evaluation/account_agent
 agentcheck test examples/evaluation/account_agent
+agentcheck report examples/evaluation/account_agent --latest
 ```
 
 `generate` is optional. Without a frozen suite file, `test` still runs the

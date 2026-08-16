@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from collections import Counter
@@ -25,6 +26,12 @@ from agentcheck.domain import (
 from agentcheck.evaluate import evaluate_run, infrastructure_evaluation
 from agentcheck.errors import ConfigurationError, ScenarioValidationError
 from agentcheck.generate import lint_suite
+from agentcheck.generate.realization import (
+    REALIZATION_CREDENTIAL_ENV,
+    OpenAIChatRealizer,
+    realization_settings,
+    require_realization_consent,
+)
 from agentcheck.generate.selection import (
     SelectionPlan,
     lineage_coverage_tags,
@@ -165,6 +172,8 @@ def generate_suite(
     max_mutations: int | None = None,
     policy_packs: Sequence[str] | None = None,
     max_cases: int | None = None,
+    realize: bool = False,
+    realizer: object | None = None,
     timeout_seconds: float = 30.0,
 ) -> SuiteGeneration:
     """Inspect a target, freeze its deterministic suite, and persist a reviewable file."""
@@ -180,6 +189,23 @@ def generate_suite(
     inspection = inspect_in_subprocess(root, config, timeout_seconds=timeout_seconds)
     packs = resolve_policy_packs(root, config, policy_packs)
     spec = attach_declared_policies(inspection.require_value(), packs)
+    active_realizer: object | None = None
+    if realize:
+        require_realization_consent(config, realize=True)
+        print(
+            "AgentCheck warning: LLM realization will make paid provider calls. "
+            "Display text only; fingerprints and verdicts stay deterministic.",
+            file=sys.stderr,
+        )
+        if realizer is None:
+            model, _max_calls, max_retries = realization_settings(config)
+            active_realizer = OpenAIChatRealizer(
+                api_key=os.environ[REALIZATION_CREDENTIAL_ENV],
+                model=model,
+                max_retries=max_retries,
+            )
+        else:
+            active_realizer = realizer
     suite = build_frozen_suite(
         spec,
         config,
@@ -188,6 +214,7 @@ def generate_suite(
         max_mutations=max_mutations,
         policy_packs=packs,
         max_cases=max_cases,
+        realizer=active_realizer,
     )
     write_frozen_suite(destination, suite, force=force)
     return SuiteGeneration(

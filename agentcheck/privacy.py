@@ -119,3 +119,11 @@ def redact_log_text(value: str) -> str:
     """Redact free-form worker diagnostics before they enter artifacts or console output."""
 
     return redact_text(value)
+
+
+def redact_model_text(value: str, *, max_chars: int = 4_000) -> str:
+    """Bound and redact untrusted model output before it is stored or displayed."""
+
+    if max_chars < 1:
+        return ""
+    return redact_log_text(value)[:max_chars]
