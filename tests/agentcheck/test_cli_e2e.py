@@ -216,6 +216,11 @@ def test_offline_cli_runs_complete_phase1_flow_with_intercepted_tools(
             stat.S_IMODE(path.stat().st_mode) == 0o600 for path in run_root.iterdir()
         )
 
+    store_path = target / ".agentcheck" / "agentcheck.sqlite"
+    assert store_path.is_file()
+    if os.name == "posix":
+        assert stat.S_IMODE(store_path.stat().st_mode) == 0o600
+
     artifact_spec = AgentSpec.model_validate_json(
         (run_root / "agent-spec.json").read_text(encoding="utf-8")
     )

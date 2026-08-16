@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -37,7 +38,9 @@ from agentcheck.policies import (
     attach_declared_policies,
     resolve_policy_packs,
 )
+from agentcheck.privacy import redact_log_text
 from agentcheck.report import render_report
+from agentcheck.store import open_evaluation_store, stored_run_from_execution
 from agentcheck.runner.orchestrator import (
     ProcessResult,
     inspect_in_subprocess,
@@ -68,6 +71,7 @@ class SuiteExecution:
     target_root: Path
     config: AgentCheckConfig
     run_id: str
+    seed: int
     git_revision: str | None
     spec: AgentSpec
     frozen_suite: FrozenSuite | None
@@ -213,6 +217,7 @@ def execute_suite(
     seed: int | None = None,
     run_id: str | None = None,
     progress: ProgressCallback | None = None,
+    persist_store: bool = True,
 ) -> SuiteExecution:
     """Execute the configured suite and persist an immutable report."""
 
@@ -378,10 +383,11 @@ def execute_suite(
         include_instructions=config.include_instructions_in_report,
     )
     report_path = artifacts.write_text("report.html", report)
-    return SuiteExecution(
+    execution = SuiteExecution(
         target_root=root,
         config=config,
         run_id=suite_run_id,
+        seed=effective_seed,
         git_revision=revision,
         spec=spec,
         frozen_suite=frozen,
@@ -393,6 +399,25 @@ def execute_suite(
         artifact_directory=artifacts.root,
         report_path=report_path,
     )
+    if persist_store:
+        _persist_execution(execution)
+    return execution
+
+
+def _persist_execution(execution: SuiteExecution) -> None:
+    """Index a completed run. Storage bugs must not become agent verdicts."""
+
+    try:
+        store = open_evaluation_store(execution.target_root, execution.config)
+        store.record_run(stored_run_from_execution(execution))
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except Exception as exc:
+        print(
+            "AgentCheck warning: evaluation store failed: "
+            + redact_log_text(str(exc)),
+            file=sys.stderr,
+        )
 
 
 __all__ = [

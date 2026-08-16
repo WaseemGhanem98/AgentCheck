@@ -168,6 +168,11 @@ def _parser() -> argparse.ArgumentParser:
         type=_run_id,
         help="set a safe artifact run ID (normally generated automatically)",
     )
+    test_parser.add_argument(
+        "--no-store",
+        action="store_true",
+        help="skip writing the local SQLite evaluation index",
+    )
     return parser
 
 
@@ -331,10 +336,18 @@ def _inspect_command(target: str, *, as_json: bool) -> int:
     return 0
 
 
-def _test_command(target: str, *, seed: int | None, run_id: str | None) -> int:
+def _test_command(
+    target: str,
+    *,
+    seed: int | None,
+    run_id: str | None,
+    persist_store: bool,
+) -> int:
     print("Inspecting agent...")
     print()
-    execution = execute_suite(target, seed=seed, run_id=run_id)
+    execution = execute_suite(
+        target, seed=seed, run_id=run_id, persist_store=persist_store
+    )
     if not execution.scenarios:
         raise ScenarioValidationError(
             "No valid scenarios remain after linting; no agent verdict was produced."
@@ -415,7 +428,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 policy_packs=args.policy_packs,
             )
         if args.command == "test":
-            return _test_command(args.target, seed=args.seed, run_id=args.run_id)
+            return _test_command(
+                args.target,
+                seed=args.seed,
+                run_id=args.run_id,
+                persist_store=not args.no_store,
+            )
     except KeyboardInterrupt:
         print("AgentCheck interrupted.", file=sys.stderr)
         return 130

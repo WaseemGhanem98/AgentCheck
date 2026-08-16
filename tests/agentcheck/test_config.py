@@ -116,6 +116,15 @@ def test_suite_path_rejects_unsafe_locations() -> None:
         )
 
 
+def test_store_path_rejects_unsafe_locations() -> None:
+    with pytest.raises(ValueError, match="safe relative path"):
+        AgentCheckConfig(store_path="../escape.sqlite")
+    with pytest.raises(ValueError, match="safe relative path"):
+        AgentCheckConfig(store_path="/tmp/agentcheck.sqlite")
+    with pytest.raises(ValueError, match="must not be empty"):
+        AgentCheckConfig(store_path="   ")
+
+
 def test_contained_path_refuses_traversal_and_outbound_symlinks(tmp_path: Path) -> None:
     root = tmp_path / "target"
     root.mkdir()

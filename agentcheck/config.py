@@ -33,6 +33,7 @@ class AgentCheckConfig(BaseModel):
     artifacts_directory: str = ".agentcheck"
     suite_path: str | None = None
     policy_packs: tuple[str, ...] | None = None
+    store_path: str | None = None
 
     @field_validator("entrypoint")
     @classmethod
@@ -93,6 +94,18 @@ class AgentCheckConfig(BaseModel):
             if normalized not in result:
                 result.append(normalized)
         return tuple(result)
+
+    @field_validator("store_path")
+    @classmethod
+    def validate_store_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        path = Path(value)
+        if not value.strip():
+            raise ValueError("store_path must not be empty")
+        if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
+            raise ValueError("store_path must be a safe relative path")
+        return path.as_posix()
 
 
 def normalize_target(target: str | os.PathLike[str]) -> Path:
