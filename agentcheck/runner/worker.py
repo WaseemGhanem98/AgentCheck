@@ -150,9 +150,8 @@ def _load_agent(root: Path, config: AgentCheckConfig) -> tuple[Any, str]:
     ):  # pragma: no cover - config currently narrows this
         raise ValueError(f"unsupported adapter {config.adapter!r}")
     resolve_entrypoint(root, config.entrypoint)
-    # The parent starts this module from AgentCheck's package root, so target
-    # code cannot shadow the worker during Python startup. Add only the
-    # configured target root after AgentCheck imports are complete.
+    # AgentCheck is already imported via the parent bootstrap. Add only the
+    # configured target root after those imports are complete.
     enable_contained_target_imports(root)
     return load_target(root)
 

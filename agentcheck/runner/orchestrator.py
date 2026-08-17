@@ -198,6 +198,27 @@ def _probe_worker_python(executable: Path) -> None:
         )
 
 
+def _worker_bootstrap(package_root: Path) -> str:
+    """Import AgentCheck from its package root even when cwd is the target.
+
+    Starting the worker in the target lets cwd-relative lookups observe that
+    tree instead of the AgentCheck checkout. ``python -m`` would then put the
+    target first on ``sys.path``, so a target named ``agentcheck`` could
+    shadow the worker. This bootstrap strips cwd from ``sys.path`` and inserts
+    the package root as a literal, not an environment variable the target
+    could read for its own lookups.
+    """
+
+    encoded_root = json.dumps(str(package_root), ensure_ascii=False)
+    return (
+        "import sys\n"
+        "sys.path = [p for p in sys.path if p not in ('', '.')]\n"
+        f"sys.path.insert(0, {encoded_root})\n"
+        "from agentcheck.runner.worker import main\n"
+        "raise SystemExit(main())\n"
+    )
+
+
 def _worker_command(root: Path, config: AgentCheckConfig) -> list[str]:
     executable = resolve_python_executable(root, config)
     # Compare the invoked wrapper paths, not symlink targets. Two venvs may
@@ -206,8 +227,8 @@ def _worker_command(root: Path, config: AgentCheckConfig) -> list[str]:
         _probe_worker_python(executable)
     return [
         str(executable),
-        "-m",
-        "agentcheck.runner.worker",
+        "-c",
+        _worker_bootstrap(_PACKAGE_ROOT),
     ]
 
 
@@ -344,10 +365,12 @@ def _execute_worker(
                     str(request_path),
                     str(response_path),
                 ],
-                # Load AgentCheck from its own package root before trusted
-                # target code can influence module resolution. The worker
-                # changes cwd after all AgentCheck imports are complete.
-                cwd=_PACKAGE_ROOT,
+                # Target cwd so implicit filesystem lookups observe the
+                # application tree, not the AgentCheck checkout. AgentCheck
+                # itself is imported from PYTHONPATH plus the bootstrap
+                # sys.path insert; cwd is stripped so a target named
+                # agentcheck cannot shadow the worker at startup.
+                cwd=root,
                 env=_worker_environment(config),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,

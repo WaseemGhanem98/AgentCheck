@@ -54,6 +54,7 @@ from agentcheck.generate import (
     build_frozen_suite,
     configured_frozen_suite,
     encode_frozen_suite,
+    lint_scenario,
     load_frozen_suite,
     write_frozen_suite,
 )
@@ -195,6 +196,16 @@ def test_frozen_suite_round_trips_and_keeps_stable_identity() -> None:
     assert len(builtin_ids) == 12
     assert all(case.scenario.fingerprint == case.scenario.expected_fingerprint() for case in first.cases)
     assert first.rejected == ()
+    assert first.provenance.sources == ("built_in", "schema_boundary")
+    assert all(
+        case.lineage.origin is not CaseOrigin.ZERO_INPUT_INVOCATION
+        for case in first.cases
+    )
+    assert all(
+        case.scenario.scenario_id.startswith("boundary-")
+        for case in first.cases
+        if case.lineage.origin is CaseOrigin.SCHEMA_BOUNDARY
+    )
 
 
 def test_same_seed_same_suite_and_different_seed_changes_identity() -> None:
@@ -660,3 +671,124 @@ def test_permissive_fixture_keeps_invented_valid_calls_from_becoming_infra() -> 
     assert run.tool_outcomes[0].status == ToolOutcomeStatus.SUCCESS
     assert evaluation.verdict == Verdict.PASS
     assert evaluation.infrastructure_error is None
+
+
+def test_zero_argument_function_tool_generates_an_empty_invocation() -> None:
+    tripwire: list[str] = []
+
+    @function_tool
+    def ping() -> str:
+        tripwire.append("ping")
+        raise RuntimeError("UNSAFE: original handler ran")
+
+    model = ScriptedModel([[_message("placeholder")]])
+    agent = Agent(
+        name="Ping Agent",
+        instructions="Call ping with no arguments when asked.",
+        tools=[ping],
+        model=model,
+    )
+    adapter = OpenAIAgentsAdapter()
+    spec = adapter.inspect(agent)
+    report = adapter.preflight(agent)
+    assert report.supported is True
+    tool = spec.tools.items[0].value
+    assert tool.name == "ping"
+    schema = tool.input_schema
+    assert schema.get("type") == "object"
+    assert schema.get("properties", {}) == {}
+    assert list(schema.get("required") or []) == []
+
+    suite = build_frozen_suite(spec, AgentCheckConfig(), seed=SEED)
+    assert len(suite.cases) == 1
+    case = suite.cases[0]
+    assert case.lineage.origin is CaseOrigin.ZERO_INPUT_INVOCATION
+    assert case.lineage.tool_name == "ping"
+    scenario = case.scenario
+    assert scenario.scenario_id == "zero-input-ping"
+    assert scenario.tool_fixtures[0].arguments_match == {}
+    assert scenario.required_tool_behavior[0].arguments_match == {}
+    assert "source:zero_input_invocation" in scenario.dimension_tags
+    assert lint_scenario(scenario, spec) == ()
+    assert suite.provenance.sources == (
+        "built_in",
+        "schema_boundary",
+        "zero_input_invocation",
+    )
+    assert suite.coverage.tools == ("ping",)
+    assert suite.coverage.tools_without_boundary_cases == ()
+
+    model.outputs = [
+        [_tool_call("ping", {}, "call-empty")],
+        [_message("pong")],
+    ]
+    model.calls = 0
+    gateway = ToolGateway(
+        spec.tools.items,
+        scenario.tool_fixtures,
+        world=scenario.initial_world_state,
+        budgets=scenario.resource_budgets,
+        run_id="zero-input-ping",
+    )
+    prepared = adapter.prepare(agent, gateway, world_state=gateway.world)
+    run = asyncio.run(
+        adapter.run(
+            prepared,
+            scenario.conversation_turns,
+            run_id="zero-input-ping",
+            scenario_id=scenario.scenario_id,
+            max_turns=scenario.resource_budgets.max_model_turns,
+        )
+    )
+    evaluation = evaluate_run(scenario, run)
+
+    assert tripwire == []
+    assert run.termination == RunTermination.COMPLETED
+    assert run.tool_outcomes[0].status == ToolOutcomeStatus.SUCCESS
+    assert run.tool_attempts[0].arguments == {}
+    assert evaluation.verdict == Verdict.PASS
+    assert evaluation.infrastructure_error is None
+
+
+def test_generate_cli_freezes_a_zero_argument_function_tool(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from agentcheck.initialize import write_initial_config
+
+    target = tmp_path / "ping_agent"
+    target.mkdir()
+    write_initial_config(target)
+    (target / "agent.py").write_text(
+        """
+from pathlib import Path
+from agents import Agent, function_tool
+
+HANDLER = Path(__file__).with_name("HANDLER_RAN")
+
+
+@function_tool
+def ping() -> str:
+    HANDLER.write_text("original-handler", encoding="utf-8")
+    return "pong"
+
+
+agent = Agent(
+    name="Ping Agent",
+    instructions="Call ping with no arguments when asked.",
+    tools=[ping],
+    model="gpt-4.1-mini",
+)
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    assert main(["generate", str(target)]) == 0
+    output = capsys.readouterr().out
+    assert "Frozen suite written." in output
+    assert not (target / "HANDLER_RAN").exists()
+    suite = load_frozen_suite(target / DEFAULT_SUITE_FILENAME)
+    assert len(suite.cases) == 1
+    case = suite.cases[0]
+    assert case.lineage.origin is CaseOrigin.ZERO_INPUT_INVOCATION
+    assert case.scenario.tool_fixtures[0].arguments_match == {}
+    assert case.scenario.required_tool_behavior[0].arguments_match == {}

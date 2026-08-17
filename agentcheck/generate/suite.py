@@ -38,7 +38,11 @@ from agentcheck.errors import ConfigurationError, ScenarioValidationError
 from agentcheck.policies import PolicyPack, apply_policy_packs
 from agentcheck.privacy import redact_log_text
 
-from .boundaries import build_boundary_cases, unsupported_boundary_reasons
+from .boundaries import (
+    build_boundary_cases,
+    build_zero_input_cases,
+    unsupported_boundary_reasons,
+)
 from .lint import ScenarioLintIssue, lint_scenario, lint_suite
 from .mutations import (
     DEFAULT_MAX_MUTATIONS,
@@ -78,6 +82,7 @@ class CaseOrigin(str, Enum):
     BUILT_IN = "built_in"
     SCHEMA_BOUNDARY = "schema_boundary"
     WORKFLOW_MUTATION = "workflow_mutation"
+    ZERO_INPUT_INVOCATION = "zero_input_invocation"
 
 
 _MUTATION_LINEAGE_FIELDS = (
@@ -131,6 +136,8 @@ class CaseLineage(ContractModel):
             raise ValueError(
                 "mutation lineage fields are only valid for workflow_mutation origin"
             )
+        if self.origin is CaseOrigin.ZERO_INPUT_INVOCATION and not self.tool_name:
+            raise ValueError("zero_input_invocation lineage requires tool_name")
         return self
 
     @model_serializer(mode="wrap")
@@ -423,6 +430,18 @@ def build_frozen_suite(
                 ),
             )
         )
+    zero_input_tools: set[str] = set()
+    for tool_name, scenario in build_zero_input_cases(spec, seed=seed):
+        zero_input_tools.add(tool_name)
+        candidates.append(
+            (
+                scenario,
+                CaseLineage(
+                    origin=CaseOrigin.ZERO_INPUT_INVOCATION,
+                    tool_name=tool_name,
+                ),
+            )
+        )
 
     unique: list[tuple[Scenario, CaseLineage]] = []
     rejected: list[RejectedCase] = []
@@ -553,6 +572,10 @@ def build_frozen_suite(
     for item in spec.tools.items:
         unsupported.extend(unsupported_boundary_reasons(item.value))
     sources: tuple[str, ...] = ("built_in", "schema_boundary")
+    if any(
+        case.lineage.origin is CaseOrigin.ZERO_INPUT_INVOCATION for case in cases
+    ):
+        sources = (*sources, "zero_input_invocation")
     if include_mutations:
         sources = (*sources, "workflow_mutation")
     if realizer is not None and any(case.realization is not None for case in cases):
@@ -560,7 +583,9 @@ def build_frozen_suite(
     coverage = SuiteCoverage(
         tools=tools,
         tools_without_boundary_cases=tuple(
-            name for name in tools if name not in boundary_tools
+            name
+            for name in tools
+            if name not in boundary_tools and name not in zero_input_tools
         ),
         boundary_kinds=tuple(
             sorted(

@@ -41,6 +41,7 @@ from agentcheck.generate.boundaries import (
     BoundaryKind,
     SchemaBoundary,
     build_boundary_scenarios,
+    build_zero_input_cases,
     derive_boundaries,
     unsupported_boundary_reasons,
 )
@@ -321,6 +322,51 @@ def test_schema_without_properties_produces_no_cases() -> None:
     assert "the declared schema exposes no parameters" in unsupported_boundary_reasons(
         tool
     )
+
+
+def test_empty_object_schema_yields_a_zero_input_invocation() -> None:
+    tool = _object_tool(
+        {}, required=[], additional=False, name="fetch_random_xkcd"
+    )
+    spec = _spec(tool)
+
+    assert derive_boundaries(tool) == ()
+    cases = build_zero_input_cases(spec, seed=SEED)
+    assert len(cases) == 1
+    tool_name, scenario = cases[0]
+    assert tool_name == "fetch_random_xkcd"
+    assert scenario.scenario_id == "zero-input-fetch-random-xkcd"
+    assert scenario.tool_fixtures[0].arguments_match == {}
+    assert scenario.required_tool_behavior[0].arguments_match == {}
+    assert scenario.required_tool_behavior[0].min_calls == 1
+    assert scenario.forbidden_tool_behavior == ()
+    assert "source:zero_input_invocation" in scenario.dimension_tags
+    assert scenario.oracle_provenance[0].strength is OracleStrength.TOOL_CONTRACT
+    assert scenario.oracle_provenance[0].supports_hard_failure is True
+    assert lint_scenario(scenario, spec) == ()
+    assert scenario.fingerprint == scenario.expected_fingerprint()
+
+
+def test_empty_schema_that_rejects_empty_object_is_not_zero_input() -> None:
+    tool = _tool(
+        "act", type="object", properties={}, minProperties=1, additionalProperties=False
+    )
+
+    assert derive_boundaries(tool) == ()
+    assert build_zero_input_cases(_spec(tool), seed=SEED) == ()
+
+
+def test_parameterized_tools_do_not_gain_zero_input_cases() -> None:
+    tool = _object_tool({"ticket_id": {"type": "string"}}, required=["ticket_id"])
+    boundaries = derive_boundaries(tool)
+
+    assert boundaries
+    assert build_zero_input_cases(_spec(tool), seed=SEED) == ()
+    assert {item.kind for item in boundaries} == {
+        BoundaryKind.MISSING_REQUIRED_PROPERTY,
+        BoundaryKind.WRONG_TYPE,
+        BoundaryKind.ADDITIONAL_PROPERTY,
+    }
 
 
 def test_unconstructable_required_parameter_yields_no_cases() -> None:

@@ -5,6 +5,7 @@ from .boundaries import (
     SchemaBoundary,
     build_boundary_cases,
     build_boundary_scenarios,
+    build_zero_input_cases,
     derive_boundaries,
     unsupported_boundary_reasons,
 )
@@ -102,6 +103,7 @@ __all__ = [
     "build_boundary_cases",
     "build_boundary_scenarios",
     "build_frozen_suite",
+    "build_zero_input_cases",
     "build_workflow_mutations",
     "built_in_suite",
     "complete_chat",

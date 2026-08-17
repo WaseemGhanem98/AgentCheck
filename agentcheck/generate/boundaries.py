@@ -623,6 +623,126 @@ def build_boundary_scenarios(spec: AgentSpec, *, seed: int) -> tuple[Scenario, .
     return tuple(scenario for _, scenario in build_boundary_cases(spec, seed=seed))
 
 
+def _zero_input_extracted(tool: ToolDefinition) -> ExtractedCapability | None:
+    """Return the capability when the schema is a legitimate empty-object call.
+
+    Schema-boundary generation stays invalid-argument-only. A tool that accepts
+    ``{}`` and declares no parameters is still a callable surface; it is not an
+    argument-boundary inversion and must not be given invented properties.
+    """
+
+    validator = offline_validator(tool.input_schema)
+    (extracted,) = extract_capabilities([tool])
+    surface = extracted.arguments
+    if not surface.schema_known or surface.parameters:
+        return None
+    if not validator.is_valid({}):
+        return None
+    return extracted
+
+
+def _zero_input_scenario_id(tool_name: str) -> str:
+    candidate = f"zero-input-{_slug(tool_name)}"
+    if len(candidate) <= _MAX_SCENARIO_ID:
+        return candidate
+    digest = canonical_hash(candidate).split(":", 1)[1][:16]
+    return f"{candidate[: _MAX_SCENARIO_ID - 17]}-{digest}"
+
+
+def _zero_input_scenario(
+    tool: ToolDefinition, extracted: ExtractedCapability, *, seed: int
+) -> Scenario:
+    scenario_id = _zero_input_scenario_id(tool.name)
+    oracle_id = f"{scenario_id}:oracle"
+    empty_arguments: JsonObject = {}
+    rendered = json.dumps(
+        empty_arguments, ensure_ascii=False, allow_nan=False, sort_keys=True
+    )
+    return Scenario(
+        scenario_id=scenario_id,
+        title=f"{tool.name} may be invoked with no arguments"[:500],
+        description=(
+            f"The declared input schema of {tool.name} accepts an empty object "
+            "and exposes no parameters. This case exercises that in-contract "
+            "zero-input invocation; it is not an invalid-argument boundary."
+        ),
+        conversation_turns=(
+            ConversationTurn(
+                turn_id="turn-1",
+                role=ConversationRole.USER,
+                content=(
+                    f"Use the {tool.name} tool with no arguments: {rendered}"
+                ),
+            ),
+        ),
+        tool_fixtures=(
+            ToolFixture(
+                fixture_id=f"{scenario_id}:fixture",
+                tool_name=tool.name,
+                arguments_match=empty_arguments,
+                outcome=SimulatedToolOutcome(
+                    status=SimulatedToolStatus.SUCCESS,
+                    result={"acknowledged": True},
+                ),
+            ),
+        ),
+        required_tool_behavior=(
+            ToolBehaviorConstraint(
+                criterion_id=f"{scenario_id}:required",
+                tool_name=tool.name,
+                arguments_match=empty_arguments,
+                min_calls=1,
+                oracle_ids=(oracle_id,),
+            ),
+        ),
+        dimension_tags=(
+            f"tool:{tool.name}",
+            "source:zero_input_invocation",
+        ),
+        oracle_provenance=(
+            OracleProvenance(
+                oracle_id=oracle_id,
+                strength=OracleStrength.TOOL_CONTRACT,
+                source=(
+                    f"declared input schema of {tool.name} accepts no parameters"
+                ),
+                confidence=1.0,
+                evidence_ids=_evidence_ids(
+                    _evidence_lookup(extracted), tool.name, None
+                ),
+                supports_hard_failure=True,
+            ),
+        ),
+        resource_budgets=ResourceBudgets(max_model_turns=4, max_tool_calls=4),
+        generation_seed=seed,
+    )
+
+
+def build_zero_input_cases(
+    spec: AgentSpec, *, seed: int
+) -> tuple[tuple[str, Scenario], ...]:
+    """Build one in-contract empty-object invocation per qualifying tool.
+
+    The seed is recorded on every scenario rather than used to sample.
+    """
+
+    if seed < 0 or seed > 2**63 - 1:
+        raise ValueError("seed must be between 0 and 2^63 - 1")
+    cases: list[tuple[str, Scenario]] = []
+    seen: set[str] = set()
+    for item in spec.tools.items:
+        tool = item.value
+        extracted = _zero_input_extracted(tool)
+        if extracted is None:
+            continue
+        scenario = _zero_input_scenario(tool, extracted, seed=seed)
+        if scenario.fingerprint in seen:
+            continue
+        seen.add(scenario.fingerprint)
+        cases.append((tool.name, scenario))
+    return tuple(cases)
+
+
 __all__ = [
     "BOUNDARY_CONTRACT_VERSION",
     "MAX_BOUNDARIES_PER_PARAMETER",
@@ -632,6 +752,7 @@ __all__ = [
     "SchemaBoundary",
     "build_boundary_cases",
     "build_boundary_scenarios",
+    "build_zero_input_cases",
     "derive_boundaries",
     "unsupported_boundary_reasons",
 ]

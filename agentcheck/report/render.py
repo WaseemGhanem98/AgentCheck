@@ -253,12 +253,15 @@ def render_report(
     ]
     origin_html = ""
     if origin_counts:
-        origin_html = (
-            "<p>Case origins: "
-            f"{origin_counts.get('built_in', 0)} built-in · "
-            f"{origin_counts.get('schema_boundary', 0)} schema-boundary · "
-            f"{origin_counts.get('workflow_mutation', 0)} workflow mutation</p>"
-        )
+        origin_parts = [
+            f"{origin_counts.get('built_in', 0)} built-in",
+            f"{origin_counts.get('schema_boundary', 0)} schema-boundary",
+            f"{origin_counts.get('workflow_mutation', 0)} workflow mutation",
+        ]
+        zero_input = origin_counts.get("zero_input_invocation", 0)
+        if zero_input:
+            origin_parts.append(f"{zero_input} zero-input invocation")
+        origin_html = "<p>Case origins: " + " · ".join(origin_parts) + "</p>"
     policy_html = (
         f"<p>Declared policy packs: {_escape(', '.join(policy_ids))}</p>"
         if policy_ids

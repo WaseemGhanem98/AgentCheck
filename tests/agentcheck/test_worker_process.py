@@ -19,6 +19,7 @@ from agentcheck.domain import (
     utc_now,
 )
 from agentcheck.generate import build_account_support_suite
+from agentcheck.initialize import write_initial_config
 from agentcheck.runner import inspect_in_subprocess, run_scenario_in_subprocess
 from agentcheck.runner.orchestrator import (
     WORKER_REQUEST_VERSION,
@@ -625,7 +626,14 @@ def test_mismatched_canonical_run_identity_is_rejected(
 
     def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
         assert "-P" not in command
-        assert kwargs["cwd"] == Path(orchestrator.__file__).resolve().parents[2]
+        assert command[1] == "-c"
+        assert "sys.path" in command[2]
+        assert kwargs["cwd"] == root
+        environment = kwargs["env"]
+        assert isinstance(environment, dict)
+        package_root = str(Path(orchestrator.__file__).resolve().parents[2])
+        assert environment.get("PYTHONPATH") == package_root
+        assert "AGENTCHECK_PACKAGE_ROOT" not in environment
         response_path = Path(command[-1])
         response_path.write_text(
             json.dumps(
@@ -703,3 +711,86 @@ agent = Agent(name="safe-worker", instructions="Inspect only.", model="gpt-4.1-m
 
     assert result.require_value().identity.name.value == "safe-worker"
     assert not marker.exists()
+
+
+def test_in_process_execute_request_restores_cwd(tmp_path: Path) -> None:
+    root, config = load_config(EXAMPLE)
+    previous = Path.cwd()
+    request_path = tmp_path / "request.json"
+    response_path = tmp_path / "response.json"
+    _write_private_json(
+        request_path,
+        {
+            "contract_version": WORKER_REQUEST_VERSION,
+            "operation": "inspect",
+            "root": str(root),
+            "config": config.model_dump(mode="json"),
+        },
+    )
+
+    assert execute_request(request_path, response_path) == 0
+    assert Path.cwd() == previous
+
+
+def test_worker_import_does_not_observe_host_cwd_dotenv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = tmp_path / "host"
+    host.mkdir()
+    (host / ".env").write_text(
+        "AGENTCHECK_CWD_SENTINEL=leaked-from-host\n", encoding="utf-8"
+    )
+    monkeypatch.chdir(host)
+
+    target = tmp_path / "target"
+    target.mkdir()
+    write_initial_config(target, entrypoint="agent.py:create_agent()")
+    (target / "agent.py").write_text(
+        """
+from pathlib import Path
+import json
+from agents import Agent
+
+OBSERVED = Path(__file__).with_name("observed.json")
+
+
+def _observe(stage: str) -> None:
+    cwd = Path.cwd()
+    dotenv = Path(".env")
+    existing = json.loads(OBSERVED.read_text(encoding="utf-8")) if OBSERVED.is_file() else []
+    existing.append(
+        {
+            "stage": stage,
+            "cwd": str(cwd),
+            "dotenv_exists": dotenv.is_file(),
+            "dotenv_text": dotenv.read_text(encoding="utf-8") if dotenv.is_file() else "",
+        }
+    )
+    OBSERVED.write_text(json.dumps(existing), encoding="utf-8")
+
+
+_observe("import")
+
+
+def create_agent():
+    _observe("factory")
+    return Agent(
+        name="cwd-probe",
+        instructions="Inspect only.",
+        model="gpt-4.1-mini",
+    )
+""".lstrip(),
+        encoding="utf-8",
+    )
+    _, config = load_config(target)
+
+    result = inspect_in_subprocess(target, config)
+
+    assert result.require_value().identity.name.value == "cwd-probe"
+    assert Path.cwd() == host.resolve()
+    observed = json.loads((target / "observed.json").read_text(encoding="utf-8"))
+    assert [item["stage"] for item in observed] == ["import", "factory"]
+    for item in observed:
+        assert item["cwd"] == str(target.resolve())
+        assert item["dotenv_exists"] is False
+        assert "leaked-from-host" not in item["dotenv_text"]
