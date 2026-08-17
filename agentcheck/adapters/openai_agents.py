@@ -421,7 +421,12 @@ class _Capture:
         return outcome
 
 
-class _CapturingHooks(RunHooksBase[Any, Any]):
+# Class bases are evaluated immediately. Without the SDK extra, RunHooksBase is
+# `object`, and `object[Any, Any]` raises TypeError on import.
+_CapturingHooksBase: Any = RunHooksBase if _SDK_IMPORT_ERROR is None else object
+
+
+class _CapturingHooks(_CapturingHooksBase):
     def __init__(self, capture: _Capture, budget_tracker: Any = None):
         self.capture = capture
         self.budget_tracker = budget_tracker
