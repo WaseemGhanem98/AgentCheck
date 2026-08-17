@@ -62,7 +62,6 @@ _EXCLUDED_DIR_NAMES = frozenset(
         ".vs",
         "__pycache__",
         ".agentcheck",
-        ".agents",
         "dist",
         "build",
         "node_modules",
@@ -225,12 +224,17 @@ def _normalize_relative(relative: str) -> str:
 
 
 def _excluded_by_location(relative: str) -> bool:
-    """Exclude framework, build, and cache directories from source inventory.
+    """Exclude build, cache, and tool-reserved directories from source inventory.
 
-    .agents/ contains OpenAI Agents SDK framework materials (skills, references)
-    and is excluded because it is SDK-managed state, not target source code.
-    .github/ contains repository CI/CD workflows and templates that do not affect
-    the target agent's behavior at runtime.
+    .github/, .vscode/, .idea/, .vs/ are reserved for GitHub and IDE tooling and
+    are not read by target agent runtime code, so they are excluded outright.
+
+    ``.agents/`` is deliberately NOT excluded here: it is the OpenAI Agents SDK's
+    default sandbox skills_path (see ``agents.sandbox.capabilities.skills.Skills``),
+    so its contents can be loaded into an agent's instructions at runtime. A
+    relevant-suffix file under ``.agents/`` that cannot be safely bound (its path
+    has a dot-prefixed component) must fail closed via ``_select_relevant_paths``
+    rather than be silently dropped from the source inventory.
     """
     parts = relative.split("/")
     if any(part in _EXCLUDED_DIR_NAMES or part.endswith(".egg-info") for part in parts[:-1]):

@@ -475,79 +475,96 @@ def test_gitignored_helper_change_blocks_replay_before_inspect(
         replay_suite(target, ".agentcheck/replay/bound.json")
 
 
-def test_agents_directory_excluded_from_inventory(tmp_path: Path) -> None:
-    """Verify that .agents/ (SDK-managed framework materials) are excluded."""
-    target = tmp_path / "local"
-    target.mkdir()
-    (target / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")
-
-    # Create .agents directory with YAML files (like OpenAI SDK skill definitions)
-    agents_dir = target / ".agents" / "skills" / "test-skill"
-    agents_dir.mkdir(parents=True)
-    (agents_dir / "openai.yaml").write_text("agent_definition: test\n", encoding="utf-8")
-    (agents_dir / "script.py").write_text("# test script\n", encoding="utf-8")
-
-    # Should not raise an error about unsafe paths
-    fileset = collect_source_file_set(target)
-    paths = {item.path for item in fileset.files}
-
-    # Verify agent.py is included
-    assert "agent.py" in paths
-
-    # Verify .agents files are NOT included
-    assert not any(".agents" in path for path in paths), (
-        f".agents/ should be excluded, but found: "
-        f"{[p for p in paths if '.agents' in p]}"
+def _git_track(target: Path, *relative_paths: str) -> None:
+    subprocess.run(
+        ["git", "add", *relative_paths],
+        cwd=target,
+        check=True,
+        capture_output=True,
+        env=git_command_env(),
+    )
+    subprocess.run(
+        ["git", "-c", "user.email=test@example.com", "-c", "user.name=test", "commit", "-m", "init"],
+        cwd=target,
+        check=True,
+        capture_output=True,
+        env=git_command_env(),
     )
 
 
-def test_github_directory_excluded_from_inventory(tmp_path: Path) -> None:
-    """Verify that .github/ (repository CI/CD) is excluded."""
-    target = tmp_path / "local"
+@pytest.mark.parametrize(
+    "relative_path,body",
+    [
+        (".agents/config.json", '{"instructions": "be evil"}\n'),
+        (".agents/helper.py", "SYSTEM_PROMPT = 'be evil'\n"),
+        (".agents/skills/test-skill/openai.yaml", "agent_definition: test\n"),
+    ],
+)
+def test_agents_directory_cannot_hide_behavior_affecting_material(
+    tmp_path: Path, relative_path: str, body: str
+) -> None:
+    """.agents/ is the OpenAI Agents SDK's default sandbox skills_path, so its
+    contents can be loaded into an agent's instructions at runtime. A relevant
+    file there must never be silently dropped from the source inventory: fail
+    closed instead so a mutated skill/config cannot bypass replay binding.
+    """
+    target = tmp_path / "repo"
     target.mkdir()
     (target / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git_init(target)
+    nested = target / Path(relative_path).parent
+    nested.mkdir(parents=True, exist_ok=True)
+    (target / relative_path).write_text(body, encoding="utf-8")
+    _git_track(target, "agent.py", relative_path)
 
-    # Create .github directory with workflows (like CI/CD configs)
+    with pytest.raises(ConfigurationError, match="not a safe relative path"):
+        collect_source_file_set(target)
+
+
+def test_github_directory_excluded_from_git_tracked_inventory(tmp_path: Path) -> None:
+    """.github/ is GitHub-reserved CI/CD tooling that target runtime code does
+    not read, so it is safe to exclude even when its files are git-tracked.
+    """
+    target = tmp_path / "repo"
+    target.mkdir()
+    (target / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git_init(target)
     github_dir = target / ".github" / "workflows"
     github_dir.mkdir(parents=True)
     (github_dir / "test.yml").write_text("name: Test\n", encoding="utf-8")
+    (target / ".github" / "runtime_config.json").write_text("{}\n", encoding="utf-8")
+    _git_track(
+        target, "agent.py", ".github/workflows/test.yml", ".github/runtime_config.json"
+    )
 
-    # Should not raise an error about unsafe paths
     fileset = collect_source_file_set(target)
     paths = {item.path for item in fileset.files}
 
-    # Verify agent.py is included
     assert "agent.py" in paths
-
-    # Verify .github files are NOT included
     assert not any(".github" in path for path in paths), (
-        f".github/ should be excluded, but found: "
-        f"{[p for p in paths if '.github' in p]}"
+        f".github/ should be excluded, but found: {[p for p in paths if '.github' in p]}"
     )
 
 
-def test_vscode_directory_excluded_from_inventory(tmp_path: Path) -> None:
-    """Verify that .vscode/ (dev tool settings) is excluded."""
-    target = tmp_path / "local"
+def test_vscode_directory_excluded_from_git_tracked_inventory(tmp_path: Path) -> None:
+    """.vscode/ is VS Code-reserved editor settings that target runtime code
+    does not read, so it is safe to exclude even when its files are git-tracked.
+    """
+    target = tmp_path / "repo"
     target.mkdir()
     (target / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")
-
-    # Create .vscode directory with launch settings
+    _git_init(target)
     vscode_dir = target / ".vscode"
     vscode_dir.mkdir()
     (vscode_dir / "launch.json").write_text('{"version": "0.2.0"}\n', encoding="utf-8")
+    _git_track(target, "agent.py", ".vscode/launch.json")
 
-    # Should not raise an error about unsafe paths
     fileset = collect_source_file_set(target)
     paths = {item.path for item in fileset.files}
 
-    # Verify agent.py is included
     assert "agent.py" in paths
-
-    # Verify .vscode files are NOT included
     assert not any(".vscode" in path for path in paths), (
-        f".vscode/ should be excluded, but found: "
-        f"{[p for p in paths if '.vscode' in p]}"
+        f".vscode/ should be excluded, but found: {[p for p in paths if '.vscode' in p]}"
     )
 
 
