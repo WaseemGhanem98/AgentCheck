@@ -1,0 +1,11 @@
+{
+  "schema_version": "agentcheck.config.v1",
+  "adapter": "openai_agents",
+  "entrypoint": "agent.py:triage_agent",
+  "suite": "account_support_v1",
+  "seed": 1729,
+  "max_concurrency": 2,
+  "environment_allowlist": [],
+  "include_instructions_in_report": false,
+  "artifacts_directory": ".agentcheck"
+}

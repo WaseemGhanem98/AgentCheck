@@ -63,6 +63,7 @@ def _response(
     result: Any = None,
     error: InfrastructureError | None = None,
     preflight: Any | None = None,
+    topology: Any | None = None,
 ) -> dict[str, Any]:
     value: dict[str, Any] = {
         "contract_version": WORKER_RESPONSE_VERSION,
@@ -78,6 +79,8 @@ def _response(
         value["error"] = error.model_dump(mode="json")
     if preflight is not None:
         value["preflight"] = preflight
+    if topology is not None:
+        value["topology"] = topology
     return value
 
 
@@ -174,11 +177,15 @@ def _controlled_fixtures(scenario: Scenario) -> tuple[ToolFixture, ...]:
     return (*baseline, *faults)
 
 
-def _inspect(root: Path, config: AgentCheckConfig) -> tuple[Any, dict[str, Any]]:
+def _inspect(
+    root: Path, config: AgentCheckConfig
+) -> tuple[Any, dict[str, Any], dict[str, Any] | None]:
     target, source = _load_agent(root, config)
     adapter = OpenAIAgentsAdapter()
     spec = adapter.inspect(target, source=source)
-    return spec, encode_preflight_report(adapter.preflight(target))
+    preflight = encode_preflight_report(adapter.preflight(target))
+    topology = adapter.describe_topology(target, source=source)
+    return spec, preflight, topology
 
 
 def _run(root: Path, config: AgentCheckConfig, scenario: Scenario, run_id: str) -> Any:
@@ -230,47 +237,54 @@ def execute_request(request_path: Path, response_path: Path) -> int:
         if not root.is_dir():
             raise ValueError("worker target root must be an existing directory")
         config = AgentCheckConfig.model_validate(request.get("config"))
+        previous_cwd = Path.cwd()
         os.chdir(root)
-
-        phase = "load"
-        _write_private_json(
-            response_path,
-            _response(status="running", phase=phase, operation=operation),
-        )
-        preflight: Any | None = None
-        if operation == "inspect":
-            result, preflight = _inspect(root, config)
-        else:
-            phase = "scenario"
-            scenario = Scenario.model_validate_json(
-                json.dumps(
-                    request.get("scenario"),
-                    ensure_ascii=False,
-                    allow_nan=False,
-                    sort_keys=True,
-                )
-            )
-            run_id = request.get("run_id")
-            if not isinstance(run_id, str) or not run_id or len(run_id) > 200:
-                raise ValueError("run operation requires a valid run_id")
-            phase = "run"
+        # Restore cwd so an in-process execute_request call cannot leak the
+        # target root into later parent-process path resolution.
+        try:
+            phase = "load"
             _write_private_json(
                 response_path,
                 _response(status="running", phase=phase, operation=operation),
             )
-            result = _run(root, config, scenario, run_id)
+            preflight: Any | None = None
+            topology: Any | None = None
+            if operation == "inspect":
+                result, preflight, topology = _inspect(root, config)
+            else:
+                phase = "scenario"
+                scenario = Scenario.model_validate_json(
+                    json.dumps(
+                        request.get("scenario"),
+                        ensure_ascii=False,
+                        allow_nan=False,
+                        sort_keys=True,
+                    )
+                )
+                run_id = request.get("run_id")
+                if not isinstance(run_id, str) or not run_id or len(run_id) > 200:
+                    raise ValueError("run operation requires a valid run_id")
+                phase = "run"
+                _write_private_json(
+                    response_path,
+                    _response(status="running", phase=phase, operation=operation),
+                )
+                result = _run(root, config, scenario, run_id)
 
-        _write_private_json(
-            response_path,
-            _response(
-                status="ok",
-                phase="complete",
-                operation=operation,
-                result=result.model_dump(mode="json"),
-                preflight=preflight,
-            ),
-        )
-        return 0
+            _write_private_json(
+                response_path,
+                _response(
+                    status="ok",
+                    phase="complete",
+                    operation=operation,
+                    result=result.model_dump(mode="json"),
+                    preflight=preflight,
+                    topology=topology,
+                ),
+            )
+            return 0
+        finally:
+            os.chdir(previous_cwd)
     except BaseException as exc:
         # KeyboardInterrupt/SystemExit from target code are worker failures too;
         # they never become agent FAIL verdicts in the parent process.

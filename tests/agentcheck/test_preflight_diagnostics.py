@@ -94,6 +94,21 @@ agent = Agent(
 )
 """
 
+CALLBACK_HANDOFF_AGENT = """
+from agents import Agent, handoff
+
+async def on_seat_booking_handoff(context):
+    del context
+
+faq = Agent(name="FAQ", instructions="Answer FAQ questions.", model="gpt-4.1-mini")
+agent = Agent(
+    name="Triage",
+    instructions="Route the request.",
+    handoffs=[handoff(faq, on_handoff=on_seat_booking_handoff)],
+    model="gpt-4.1-mini",
+)
+"""
+
 UNSUPPORTED_TOOL_TYPE = """
 from agents import Agent, WebSearchTool
 
@@ -154,7 +169,15 @@ def test_inspect_lists_structured_output_handoffs_and_unsupported_tool_type(
     handoffs = _write_target(tmp_path, HANDOFF_AGENT, name="handoffs")
     assert main(["inspect", str(handoffs)]) == 0
     handoff_out = capsys.readouterr().out
-    assert "- handoffs (agent.handoffs):" in handoff_out
+    assert "Handoff topology (2 reachable agents):" in handoff_out
+    assert "Preflight: supported" in handoff_out
+    assert "- handoffs (agent.handoffs):" not in handoff_out
+
+    callback = _write_target(tmp_path, CALLBACK_HANDOFF_AGENT, name="callback-handoffs")
+    assert main(["inspect", str(callback)]) == 0
+    callback_out = capsys.readouterr().out
+    assert "Handoff topology (2 reachable agents):" in callback_out
+    assert "- handoff_callback (agent.handoffs[0].on_handoff):" in callback_out
 
     hosted = _write_target(tmp_path, UNSUPPORTED_TOOL_TYPE, name="hosted")
     assert main(["inspect", str(hosted)]) == 0
@@ -259,3 +282,26 @@ def test_supported_target_with_no_matching_suite_keeps_empty_generate_error(
 
     assert main(["inspect", str(target)]) == 0
     assert "Preflight: supported" in capsys.readouterr().out
+
+
+def test_generate_and_test_surface_handoff_callback_not_empty_suite(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = _write_target(tmp_path, CALLBACK_HANDOFF_AGENT)
+
+    with pytest.raises(UnsupportedTargetError, match="handoff_callback"):
+        application.generate_suite(target)
+    with pytest.raises(UnsupportedTargetError, match="handoff_callback"):
+        application.execute_suite(target, persist_store=False)
+
+    assert main(["generate", str(target)]) == 2
+    generate_err = capsys.readouterr().err
+    assert "handoff_callback" in generate_err
+    assert "No valid scenarios remain after linting" not in generate_err
+    assert "handoffs (" not in generate_err
+
+    assert main(["test", str(target), "--no-store"]) == 2
+    test_err = capsys.readouterr().err
+    assert "handoff_callback" in test_err
+    assert "No valid scenarios remain after linting" not in test_err
+    assert "No compatible built-in suite" not in test_err

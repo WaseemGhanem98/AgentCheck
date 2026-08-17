@@ -160,6 +160,14 @@ class TrajectoryConstraintKind(str, Enum):
     NO_RETRY_AFTER_AMBIGUOUS_TIMEOUT = "no_retry_after_ambiguous_timeout"
     MAX_MODEL_TURNS = "max_model_turns"
     MAX_TOOL_CALLS = "max_tool_calls"
+    # Handoff kinds evaluate recorded HANDOFF canonical events.  New enum
+    # members leave every existing scenario dump, and therefore every existing
+    # fingerprint, byte-identical.
+    REQUIRED_HANDOFF = "required_handoff"
+    FORBIDDEN_HANDOFF = "forbidden_handoff"
+    MAX_HANDOFFS = "max_handoffs"
+    NO_HANDOFF_LOOP = "no_handoff_loop"
+    HANDOFF_BEFORE_TOOL = "handoff_before_tool"
     OTHER = "other"
 
 

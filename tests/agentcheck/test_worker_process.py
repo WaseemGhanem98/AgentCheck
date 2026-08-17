@@ -202,6 +202,7 @@ def test_inspect_worker_response_includes_preflight_report(tmp_path: Path) -> No
     response = json.loads(response_path.read_text(encoding="utf-8"))
     assert response["status"] == "ok"
     assert response["preflight"] == {"framework": "openai_agents", "issues": []}
+    assert "topology" not in response
     assert response["result"]["identity"]["name"]["value"] == "Account Support Agent"
 
 
@@ -243,6 +244,62 @@ def test_malformed_inspect_preflight_is_infrastructure_error(
                     "worker_pid": FakeProcess.pid,
                     "result": spec.model_dump(mode="json"),
                     "preflight": {"framework": "openai_agents", "issues": "nope"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        return FakeProcess()
+
+    monkeypatch.setattr(orchestrator.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(
+        orchestrator, "_kill_remaining_process_group", lambda process: None
+    )
+
+    result = inspect_in_subprocess(root, config)
+    assert result.ok is False
+    assert result.infrastructure_error is not None
+    assert result.infrastructure_error.code == "invalid_worker_result"
+
+
+def test_malformed_inspect_topology_is_infrastructure_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentcheck.adapters import OpenAIAgentsAdapter
+    from agentcheck.inspect import load_target
+
+    root, config = load_config(EXAMPLE)
+    target, source = load_target(EXAMPLE)
+    spec = OpenAIAgentsAdapter().inspect(target, source=source)
+
+    class FakeProcess:
+        pid = 4747
+        stdout = io.BytesIO()
+        stderr = io.BytesIO()
+        returncode = 0
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            return 0
+
+        def poll(self) -> int:
+            return 0
+
+        def kill(self) -> None:
+            return None
+
+    def fake_popen(command: list[str], **kwargs: object) -> FakeProcess:
+        del kwargs
+        Path(command[-1]).write_text(
+            json.dumps(
+                {
+                    "contract_version": WORKER_RESPONSE_VERSION,
+                    "status": "ok",
+                    "phase": "complete",
+                    "operation": "inspect",
+                    "worker_pid": FakeProcess.pid,
+                    "result": spec.model_dump(mode="json"),
+                    "preflight": {"framework": "openai_agents", "issues": []},
+                    "topology": {"framework": "openai_agents", "agents": [{"name": "x"}]},
                 }
             ),
             encoding="utf-8",

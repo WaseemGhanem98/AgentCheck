@@ -171,7 +171,7 @@ def test_inspect_extracts_explicit_sdk_contract() -> None:
     assert spec.identity.provider.value is None
     assert spec.identity.provider.authoritative is False
     assert spec.identity.model.value == "ScriptedModel"
-    assert "handoff" not in spec.observability.supported_event_types.value
+    assert "handoff" in spec.observability.supported_event_types.value
     assert "guardrail" not in spec.observability.supported_event_types.value
 
 

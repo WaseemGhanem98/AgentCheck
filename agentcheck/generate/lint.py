@@ -14,6 +14,7 @@ from agentcheck.domain import (
     Scenario,
     ToolBehaviorConstraint,
     ToolFixture,
+    TrajectoryConstraint,
     TrajectoryConstraintKind,
 )
 from agentcheck.schema_safety import UnsafeSchemaReference, offline_validator
@@ -34,6 +35,11 @@ _SUPPORTED_TRAJECTORY_KINDS = {
     TrajectoryConstraintKind.NO_RETRY_AFTER_AMBIGUOUS_TIMEOUT,
     TrajectoryConstraintKind.MAX_MODEL_TURNS,
     TrajectoryConstraintKind.MAX_TOOL_CALLS,
+    TrajectoryConstraintKind.REQUIRED_HANDOFF,
+    TrajectoryConstraintKind.FORBIDDEN_HANDOFF,
+    TrajectoryConstraintKind.MAX_HANDOFFS,
+    TrajectoryConstraintKind.NO_HANDOFF_LOOP,
+    TrajectoryConstraintKind.HANDOFF_BEFORE_TOOL,
 }
 _SUPPORTED_OUTPUT_KINDS = {
     OutputCriterionKind.CONTAINS,
@@ -215,6 +221,7 @@ def _lint_trajectory_parameters(scenario: Scenario) -> list[ScenarioLintIssue]:
             TrajectoryConstraintKind.MAX_RETRIES: "max_retries",
             TrajectoryConstraintKind.MAX_MODEL_TURNS: "maximum",
             TrajectoryConstraintKind.MAX_TOOL_CALLS: "maximum",
+            TrajectoryConstraintKind.MAX_HANDOFFS: "maximum",
         }.get(constraint.kind)
         if numeric_key is not None:
             value = constraint.parameters.get(numeric_key)
@@ -228,6 +235,59 @@ def _lint_trajectory_parameters(scenario: Scenario) -> list[ScenarioLintIssue]:
                         ),
                     )
                 )
+        issues.extend(_lint_handoff_parameters(constraint))
+    return issues
+
+
+def _lint_handoff_parameters(constraint: TrajectoryConstraint) -> list[ScenarioLintIssue]:
+    issues: list[ScenarioLintIssue] = []
+    if constraint.kind not in {
+        TrajectoryConstraintKind.REQUIRED_HANDOFF,
+        TrajectoryConstraintKind.FORBIDDEN_HANDOFF,
+        TrajectoryConstraintKind.NO_HANDOFF_LOOP,
+        TrajectoryConstraintKind.HANDOFF_BEFORE_TOOL,
+    }:
+        return issues
+
+    def _invalid(message: str) -> None:
+        issues.append(
+            ScenarioLintIssue(
+                code="invalid_trajectory_parameters",
+                message=f"trajectory criterion {constraint.criterion_id!r} {message}",
+            )
+        )
+
+    from_agent = constraint.parameters.get("from_agent")
+    to_agent = constraint.parameters.get("to_agent")
+    for label, value in (("from_agent", from_agent), ("to_agent", to_agent)):
+        if value is not None and (not isinstance(value, str) or not value):
+            _invalid(f"has an invalid {label}")
+    if constraint.kind == TrajectoryConstraintKind.REQUIRED_HANDOFF:
+        if not isinstance(to_agent, str) or not to_agent:
+            _invalid("requires to_agent")
+        minimum = constraint.parameters.get("minimum", 1)
+        maximum = constraint.parameters.get("maximum")
+        if isinstance(minimum, bool) or not isinstance(minimum, int) or minimum < 1:
+            _invalid("requires a positive integer minimum")
+        if maximum is not None and (
+            isinstance(maximum, bool)
+            or not isinstance(maximum, int)
+            or (isinstance(minimum, int) and maximum < minimum)
+        ):
+            _invalid("requires maximum >= minimum")
+    elif constraint.kind == TrajectoryConstraintKind.FORBIDDEN_HANDOFF:
+        if not (isinstance(from_agent, str) and from_agent) and not (
+            isinstance(to_agent, str) and to_agent
+        ):
+            _invalid("requires from_agent or to_agent")
+    elif constraint.kind == TrajectoryConstraintKind.NO_HANDOFF_LOOP:
+        repeats = constraint.parameters.get("max_edge_repeats", 1)
+        if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
+            _invalid("requires a positive integer max_edge_repeats")
+    elif constraint.kind == TrajectoryConstraintKind.HANDOFF_BEFORE_TOOL:
+        tool_name = constraint.parameters.get("tool_name")
+        if not isinstance(tool_name, str) or not tool_name:
+            _invalid("requires tool_name")
     return issues
 
 

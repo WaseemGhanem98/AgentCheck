@@ -409,7 +409,124 @@ def _evaluate_postcondition(builder: _EvaluationBuilder, condition: StatePostcon
     )
 
 
+_HANDOFF_TRAJECTORY_KINDS = {
+    TrajectoryConstraintKind.REQUIRED_HANDOFF,
+    TrajectoryConstraintKind.FORBIDDEN_HANDOFF,
+    TrajectoryConstraintKind.MAX_HANDOFFS,
+    TrajectoryConstraintKind.NO_HANDOFF_LOOP,
+    TrajectoryConstraintKind.HANDOFF_BEFORE_TOOL,
+}
+
+
+def _evaluate_handoff_trajectory(
+    builder: _EvaluationBuilder, constraint: TrajectoryConstraint
+) -> None:
+    """Deterministic checks over adapter-recorded HANDOFF canonical events."""
+
+    run = builder.run
+    executed = [
+        event
+        for event in run.events
+        if event.event_type == CanonicalEventType.HANDOFF
+        and event.payload.get("ignored") is not True
+    ]
+    params = constraint.parameters
+    from_agent = params.get("from_agent")
+    to_agent = params.get("to_agent")
+
+    def _matches(event: Any) -> bool:
+        if from_agent is not None and event.payload.get("from_agent") != from_agent:
+            return False
+        if to_agent is not None and event.payload.get("to_agent") != to_agent:
+            return False
+        return True
+
+    data: dict[str, Any] = {
+        "handoffs_observed": len(executed),
+        "from_agent": from_agent,
+        "to_agent": to_agent,
+    }
+    source_ids: list[str] = [event.event_id for event in executed] or [run.run_id]
+    if constraint.kind == TrajectoryConstraintKind.REQUIRED_HANDOFF:
+        minimum = int(params.get("minimum", 1))
+        maximum = params.get("maximum")
+        count = sum(1 for event in executed if _matches(event))
+        passed = count >= minimum and (maximum is None or count <= int(maximum))
+        data.update({"matching": count, "minimum": minimum, "maximum": maximum})
+    elif constraint.kind == TrajectoryConstraintKind.FORBIDDEN_HANDOFF:
+        matching = [event.event_id for event in executed if _matches(event)]
+        passed = not matching
+        data["matching_event_ids"] = matching
+    elif constraint.kind == TrajectoryConstraintKind.MAX_HANDOFFS:
+        maximum = int(params.get("maximum", 0))
+        passed = len(executed) <= maximum
+        data["maximum"] = maximum
+    elif constraint.kind == TrajectoryConstraintKind.NO_HANDOFF_LOOP:
+        max_edge_repeats = int(params.get("max_edge_repeats", 1))
+        edge_counts: dict[tuple[Any, Any], int] = {}
+        for event in executed:
+            key = (event.payload.get("from_agent"), event.payload.get("to_agent"))
+            edge_counts[key] = edge_counts.get(key, 0) + 1
+        repeated = sorted(
+            f"{source}->{target}"
+            for (source, target), count in edge_counts.items()
+            if count > max_edge_repeats
+        )
+        passed = not repeated
+        data.update({"max_edge_repeats": max_edge_repeats, "repeated_edges": repeated})
+    else:  # HANDOFF_BEFORE_TOOL
+        tool_name = params.get("tool_name")
+        sequence_by_event = {event.event_id: event.sequence for event in run.events}
+        attempts = [
+            attempt
+            for attempt in run.tool_attempts
+            if attempt.tool_name == tool_name
+        ]
+        handoff_sequences = [event.sequence for event in executed if _matches(event)]
+        first_handoff = min(handoff_sequences, default=None)
+        early = [
+            attempt.attempt_id
+            for attempt in attempts
+            if first_handoff is None
+            or sequence_by_event.get(attempt.event_id, -1) < first_handoff
+        ]
+        passed = not early
+        data.update(
+            {
+                "tool_name": tool_name,
+                "early_attempt_ids": early,
+                "first_handoff_sequence": first_handoff,
+            }
+        )
+        if attempts:
+            source_ids = [attempt.attempt_id for attempt in attempts]
+
+    evidence_id = builder.add_evidence(
+        constraint.criterion_id,
+        EvidenceKind.EVENT,
+        constraint.description,
+        source_ids,
+        data,
+    )
+    builder.add_assertion(
+        constraint.criterion_id,
+        constraint.description,
+        Verdict.PASS if passed else Verdict.FAIL,
+        constraint.oracle_ids,
+        (
+            "The observed handoff trajectory satisfies the constraint."
+            if passed
+            else "The observed handoff trajectory violates the constraint."
+        ),
+        (evidence_id,),
+        required=constraint.required,
+    )
+
+
 def _evaluate_trajectory(builder: _EvaluationBuilder, constraint: TrajectoryConstraint) -> None:
+    if constraint.kind in _HANDOFF_TRAJECTORY_KINDS:
+        _evaluate_handoff_trajectory(builder, constraint)
+        return
     tool_name = constraint.parameters.get("tool_name")
     attempts = [
         attempt

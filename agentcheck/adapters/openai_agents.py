@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import dataclasses
+import functools
 import hashlib
 import inspect
 import json
@@ -64,6 +65,7 @@ from agentcheck.runner.budgets import BudgetExceeded
 
 from .base import (
     AdapterDependencyError,
+    AdapterRuntimeError,
     EventSinkProtocol,
     FrameworkAdapter,
     PreflightReport,
@@ -77,6 +79,7 @@ try:
     from agents import Agent, FunctionTool, Runner
     from agents.agent_output import AgentOutputSchemaBase
     from agents.exceptions import AgentsException, MaxTurnsExceeded, ModelBehaviorError
+    from agents.handoffs import Handoff
     from agents.items import ItemHelpers, ModelResponse
     from agents.lifecycle import RunHooksBase
     from agents.model_settings import ModelSettings
@@ -92,6 +95,7 @@ except ImportError as exc:  # pragma: no cover - exercised in minimal installs
     Agent = cast(Any, None)  # type: ignore[misc]
     FunctionTool = cast(Any, None)  # type: ignore[misc]
     Runner = cast(Any, None)  # type: ignore[misc]
+    Handoff = cast(Any, None)  # type: ignore[misc]
     AgentOutputSchemaBase = cast(Any, None)  # type: ignore[misc]
     AgentsException = cast(Any, Exception)  # type: ignore[misc]
     MaxTurnsExceeded = cast(Any, Exception)  # type: ignore[misc]
@@ -136,6 +140,349 @@ def _supported_sdk_version(version: str | None) -> bool:
         return tuple(int(part) for part in numeric[:2]) == SUPPORTED_SDK_MINOR
     except ValueError:
         return False
+
+
+_MAX_REACHABLE_AGENTS = 16
+_HANDOFF_FACTORY_MODULE = "agents.handoffs"
+_HANDOFF_FACTORY_WRAPPER = "_invoke_handoff_with_redaction"
+_HANDOFF_FACTORY_INNER = "handoff.<locals>._invoke_handoff_impl"
+_HANDOFF_CLOSURE_KEYS = frozenset({"agent", "input_type", "on_handoff", "type_adapter"})
+
+
+def _empty_handoff_payload_schema() -> dict[str, Any]:
+    """The strict payload schema the SDK factory derives for payload-free handoffs."""
+
+    return {
+        "additionalProperties": False,
+        "type": "object",
+        "properties": {},
+        "required": [],
+    }
+
+
+@dataclass(frozen=True)
+class _HandoffEdge:
+    """One statically analyzed handoff entry on a reachable agent."""
+
+    location: str
+    from_agent: Any
+    destination: Any | None
+    tool_name: str | None
+    tool_description: str | None
+    input_json_schema: dict[str, Any] | None
+    strict_json_schema: bool
+    issues: tuple[SupportIssue, ...]
+
+
+@dataclass(frozen=True)
+class _AgentGraph:
+    """Reachable agents in deterministic BFS order plus analyzed handoff edges."""
+
+    agents: tuple[Any, ...]
+    locations: tuple[str, ...]
+    edges: tuple[_HandoffEdge, ...]
+    issues: tuple[SupportIssue, ...]
+
+    @property
+    def has_handoffs(self) -> bool:
+        return bool(self.edges)
+
+
+def _unrecognized_handoff(location: str, reason: str) -> SupportIssue:
+    return SupportIssue(
+        code="unrecognized_handoff",
+        message=(
+            f"{reason} Only plain agents.Agent entries and unmodified openai-agents "
+            "0.20 handoff() factory products can be proven safe."
+        ),
+        location=location,
+    )
+
+
+def _resolve_factory_destination(
+    entry: Any, location: str
+) -> tuple[Any | None, list[SupportIssue]]:
+    """Prove a factory-built handoff's static destination without executing it.
+
+    The closure is introspected, never called: ``inspect.getclosurevars`` reads
+    cell contents only, and the ``_agent_ref`` weakref dereference runs no target
+    code.  Any shape mismatch fails closed as ``unrecognized_handoff``.
+    """
+
+    invoker = entry.on_invoke_handoff
+    if (
+        not isinstance(invoker, functools.partial)
+        or invoker.keywords
+        or len(invoker.args) != 1
+    ):
+        return None, [
+            _unrecognized_handoff(
+                location, "The handoff invocation closure is not the SDK factory shape."
+            )
+        ]
+    wrapper = invoker.func
+    if (
+        getattr(wrapper, "__module__", None) != _HANDOFF_FACTORY_MODULE
+        or getattr(wrapper, "__qualname__", None) != _HANDOFF_FACTORY_WRAPPER
+    ):
+        return None, [
+            _unrecognized_handoff(
+                location, "The handoff invocation wrapper is not the SDK factory wrapper."
+            )
+        ]
+    inner = invoker.args[0]
+    if (
+        getattr(inner, "__module__", None) != _HANDOFF_FACTORY_MODULE
+        or getattr(inner, "__qualname__", None) != _HANDOFF_FACTORY_INNER
+        or not inspect.iscoroutinefunction(inner)
+    ):
+        return None, [
+            _unrecognized_handoff(
+                location, "The handoff routing closure is not the SDK factory closure."
+            )
+        ]
+    try:
+        nonlocals = inspect.getclosurevars(inner).nonlocals
+    except (TypeError, ValueError):
+        return None, [
+            _unrecognized_handoff(location, "The handoff routing closure cannot be inspected.")
+        ]
+    if not _HANDOFF_CLOSURE_KEYS.issubset(nonlocals):
+        return None, [
+            _unrecognized_handoff(
+                location, "The handoff routing closure is missing expected factory state."
+            )
+        ]
+
+    issues: list[SupportIssue] = []
+    if nonlocals["on_handoff"] is not None:
+        issues.append(
+            SupportIssue(
+                code="handoff_callback",
+                message=(
+                    "The handoff declares an on_handoff callback; AgentCheck never "
+                    "executes target callbacks, so this handoff is rejected."
+                ),
+                location=f"{location}.on_handoff",
+            )
+        )
+    if nonlocals["input_type"] is not None or nonlocals["type_adapter"] is not None:
+        issues.append(
+            SupportIssue(
+                code="handoff_input_schema",
+                message=(
+                    "The handoff validates a typed tool-call payload; Phase 5A "
+                    "supports payload-free routing handoffs only."
+                ),
+                location=f"{location}.input_type",
+            )
+        )
+
+    destination = nonlocals["agent"]
+    if type(destination) is not Agent:
+        return None, [
+            *issues,
+            SupportIssue(
+                code="unsupported_agent_type",
+                message=(
+                    "Handoff destinations must be exact agents.Agent instances; "
+                    f"found {type(destination).__name__}."
+                ),
+                location=location,
+            ),
+        ]
+    reference = entry._agent_ref
+    referenced = reference() if reference is not None else None
+    if referenced is not destination:
+        return None, [
+            *issues,
+            _unrecognized_handoff(
+                location, "The handoff agent reference does not match its routing closure."
+            ),
+        ]
+    if isinstance(entry.agent_name, str) and entry.agent_name != destination.name:
+        return None, [
+            *issues,
+            _unrecognized_handoff(
+                location, "The handoff agent_name does not match its destination agent."
+            ),
+        ]
+    return destination, issues
+
+
+def _analyze_handoff_entry(entry: Any, from_agent: Any, location: str) -> _HandoffEdge:
+    if type(entry) is Agent:
+        return _HandoffEdge(
+            location=location,
+            from_agent=from_agent,
+            destination=entry,
+            tool_name=Handoff.default_tool_name(entry),
+            tool_description=Handoff.default_tool_description(entry),
+            input_json_schema=None,
+            strict_json_schema=True,
+            issues=(),
+        )
+    if isinstance(entry, Agent):
+        return _HandoffEdge(
+            location=location,
+            from_agent=from_agent,
+            destination=None,
+            tool_name=None,
+            tool_description=None,
+            input_json_schema=None,
+            strict_json_schema=True,
+            issues=(
+                SupportIssue(
+                    code="unsupported_agent_type",
+                    message=(
+                        "Handoff destinations must be exact agents.Agent instances; "
+                        f"found {type(entry).__name__}."
+                    ),
+                    location=location,
+                ),
+            ),
+        )
+    if not isinstance(entry, Handoff):
+        return _HandoffEdge(
+            location=location,
+            from_agent=from_agent,
+            destination=None,
+            tool_name=None,
+            tool_description=None,
+            input_json_schema=None,
+            strict_json_schema=True,
+            issues=(
+                _unrecognized_handoff(
+                    location,
+                    f"Handoff entry is {type(entry).__name__}, not an Agent or SDK Handoff.",
+                ),
+            ),
+        )
+
+    issues: list[SupportIssue] = []
+    if entry.input_filter is not None:
+        issues.append(
+            SupportIssue(
+                code="handoff_input_filter",
+                message=(
+                    "The handoff rewrites conversation history through an input "
+                    "filter callback, which AgentCheck never executes."
+                ),
+                location=f"{location}.input_filter",
+            )
+        )
+    if entry.is_enabled is not True:
+        issues.append(
+            SupportIssue(
+                code="dynamic_handoff_enablement",
+                message=(
+                    "The handoff uses non-default enablement; callable or disabled "
+                    "is_enabled values are unsupported in Phase 5A."
+                ),
+                location=f"{location}.is_enabled",
+            )
+        )
+    if entry.nest_handoff_history not in (None, False):
+        issues.append(
+            SupportIssue(
+                code="handoff_history_override",
+                message=(
+                    "The handoff overrides the default conversation-history "
+                    "behavior, which is unsupported in Phase 5A."
+                ),
+                location=f"{location}.nest_handoff_history",
+            )
+        )
+    schema = entry.input_json_schema
+    schema_declares_payload = not isinstance(schema, Mapping) or bool(
+        schema.get("properties") or schema.get("required")
+    )
+
+    destination, closure_issues = _resolve_factory_destination(entry, location)
+    issues.extend(closure_issues)
+    if schema_declares_payload and not any(
+        issue.code == "handoff_input_schema" for issue in issues
+    ):
+        issues.append(
+            SupportIssue(
+                code="handoff_input_schema",
+                message=(
+                    "The handoff exposes a tool-call payload schema to the model; "
+                    "Phase 5A supports payload-free routing handoffs only."
+                ),
+                location=f"{location}.input_json_schema",
+            )
+        )
+
+    tool_name = entry.tool_name if isinstance(entry.tool_name, str) and entry.tool_name else None
+    if tool_name is None:
+        issues.append(
+            _unrecognized_handoff(location, "The handoff has no usable tool name.")
+        )
+    return _HandoffEdge(
+        location=location,
+        from_agent=from_agent,
+        destination=destination,
+        tool_name=tool_name,
+        tool_description=entry.tool_description if isinstance(entry.tool_description, str) else None,
+        input_json_schema=dict(schema) if isinstance(schema, Mapping) else None,
+        strict_json_schema=bool(entry.strict_json_schema),
+        issues=tuple(issues),
+    )
+
+
+def _reachable_graph(target: Any) -> _AgentGraph:
+    """Collect the bounded, cycle-safe agent graph without executing target code."""
+
+    agents: list[Any] = [target]
+    locations: list[str] = ["agent"]
+    visited: set[int] = {id(target)}
+    edges: list[_HandoffEdge] = []
+    issues: list[SupportIssue] = []
+    index = 0
+    truncated = False
+    while index < len(agents):
+        current = agents[index]
+        current_location = locations[index]
+        index += 1
+        entries = getattr(current, "handoffs", None) or ()
+        for position, entry in enumerate(entries):
+            location = f"{current_location}.handoffs[{position}]"
+            edge = _analyze_handoff_entry(entry, current, location)
+            edges.append(edge)
+            destination = edge.destination
+            if destination is None or id(destination) in visited:
+                continue
+            if len(agents) >= _MAX_REACHABLE_AGENTS:
+                if not truncated:
+                    truncated = True
+                    issues.append(
+                        SupportIssue(
+                            code="handoff_graph_too_large",
+                            message=(
+                                "The reachable agent graph exceeds the Phase 5A "
+                                f"bound of {_MAX_REACHABLE_AGENTS} agents."
+                            ),
+                            location=location,
+                        )
+                    )
+                continue
+            visited.add(id(destination))
+            agents.append(destination)
+            locations.append(f"{location}.agent")
+    return _AgentGraph(
+        agents=tuple(agents),
+        locations=tuple(locations),
+        edges=tuple(edges),
+        issues=tuple(issues),
+    )
+
+
+def _edges_by_agent(graph: _AgentGraph) -> dict[int, list[_HandoffEdge]]:
+    grouped: dict[int, list[_HandoffEdge]] = {}
+    for edge in graph.edges:
+        grouped.setdefault(id(edge.from_agent), []).append(edge)
+    return grouped
 
 
 def _json_value(value: Any) -> Any:
@@ -288,10 +635,13 @@ class _Capture:
     attempts: list[ToolAttempt] = dataclasses.field(default_factory=list)
     outcomes: list[ToolOutcome] = dataclasses.field(default_factory=list)
     responses: list[Any] = dataclasses.field(default_factory=list)
+    response_agents: list[str | None] = dataclasses.field(default_factory=list)
+    response_event_ids: list[str] = dataclasses.field(default_factory=list)
     request_ids: list[str] = dataclasses.field(default_factory=list)
     transition_links: dict[str, tuple[str, str]] = dataclasses.field(
         default_factory=dict
     )
+    agent_by_attempt: dict[str, str | None] = dataclasses.field(default_factory=dict)
 
     async def event(
         self,
@@ -329,6 +679,7 @@ class _Capture:
         validation_errors: Sequence[str],
         state_changing: bool,
         destructive: bool,
+        agent_name: str | None = None,
     ) -> ToolAttempt:
         source_event_ids: tuple[str, ...] = ()
         for source_event in reversed(self.events):
@@ -341,6 +692,7 @@ class _Capture:
                 "tool_name": tool_name,
                 "arguments": arguments,
                 "call_id": call_id,
+                "agent_name": agent_name,
                 "validation_errors": list(validation_errors),
                 "raw_arguments_sha256": hashlib.sha256(
                     raw_arguments.encode("utf-8")
@@ -359,7 +711,49 @@ class _Capture:
             destructive=destructive,
         )
         self.attempts.append(attempt)
+        self.agent_by_attempt[attempt.attempt_id] = agent_name
         return attempt
+
+    async def handoff_event(
+        self,
+        *,
+        tool_name: str | None,
+        from_agent: str | None,
+        to_agent: str | None,
+        arguments: dict[str, Any],
+        ignored: bool,
+        call_id: str | None = None,
+        source_event_id: str | None = None,
+    ) -> CanonicalEvent:
+        source_event_ids: tuple[str, ...] = ()
+        if source_event_id is not None:
+            source_event_ids = (source_event_id,)
+        else:
+            for source_event in reversed(self.events):
+                if source_event.event_type == CanonicalEventType.MODEL_RESPONSE:
+                    source_event_ids = (source_event.event_id,)
+                    break
+        if call_id is None and self.responses and tool_name is not None:
+            matches = [
+                output
+                for output in getattr(self.responses[-1], "output", ())
+                if isinstance(output, ResponseFunctionToolCall)
+                and output.name == tool_name
+            ]
+            if matches:
+                call_id = matches[0].call_id
+        return await self.event(
+            CanonicalEventType.HANDOFF,
+            {
+                "handoff_tool_name": tool_name,
+                "from_agent": from_agent,
+                "to_agent": to_agent,
+                "arguments": arguments,
+                "call_id": call_id,
+                "ignored": ignored,
+            },
+            source_event_ids=source_event_ids,
+        )
 
     async def tool_result(
         self,
@@ -390,6 +784,7 @@ class _Capture:
             {
                 "tool_name": attempt.tool_name,
                 "attempt_id": attempt.attempt_id,
+                "agent_name": self.agent_by_attempt.get(attempt.attempt_id),
                 "status": status.value,
                 "result": _json_value(result),
                 "error": _json_value(error) if error is not None else None,
@@ -461,6 +856,10 @@ class _CapturingHooks(_CapturingHooksBase):
     async def on_llm_end(self, context: Any, agent: Any, response: Any) -> None:
         del context
         self.capture.responses.append(response)
+        agent_name = getattr(agent, "name", None)
+        self.capture.response_agents.append(
+            agent_name if isinstance(agent_name, str) else None
+        )
         if response.request_id and response.request_id not in self.capture.request_ids:
             self.capture.request_ids.append(response.request_id)
         response_event = await self.capture.event(
@@ -473,6 +872,7 @@ class _CapturingHooks(_CapturingHooksBase):
                 "usage_known": response.raw_usage is not None,
             },
         )
+        self.capture.response_event_ids.append(response_event.event_id)
         for output in response.output:
             if isinstance(output, ResponseOutputMessage):
                 text = ItemHelpers.extract_text(output)
@@ -721,6 +1121,7 @@ def _make_safe_invoker(
 
         arguments, validation_errors = _parse_arguments(raw_arguments, schema)
         call_id = str(getattr(context, "tool_call_id", "") or "unknown")
+        active_agent = getattr(getattr(context, "agent", None), "name", None)
         attempt = await capture.tool_attempt(
             tool_name=tool_name,
             arguments=arguments,
@@ -729,6 +1130,7 @@ def _make_safe_invoker(
             validation_errors=validation_errors,
             state_changing=state_changing,
             destructive=destructive,
+            agent_name=active_agent if isinstance(active_agent, str) else None,
         )
         started_at = utc_now()
         if validation_errors:
@@ -820,6 +1222,43 @@ def _make_safe_invoker(
             gateway_metadata=gateway_metadata,
         )
         return _model_visible_tool_output(status, result, error)
+
+    return invoke
+
+
+def _make_safe_handoff_invoker(
+    *,
+    tool_name: str,
+    from_agent_name: str,
+    to_agent_name: str,
+    destination: Any,
+    capture_holder: dict[str, _Capture | None],
+) -> Any:
+    """Route to the safe destination clone; no original handoff code is reachable."""
+
+    async def invoke(context: Any, input_json: str | None = None) -> Any:
+        del context
+        capture = capture_holder.get("capture")
+        if capture is None:
+            raise RuntimeError(
+                "prepared AgentCheck target was invoked outside adapter.run()"
+            )
+        arguments: dict[str, Any] = {}
+        if input_json:
+            try:
+                decoded = json.loads(input_json)
+            except (json.JSONDecodeError, ValueError):
+                decoded = None
+            if isinstance(decoded, dict):
+                arguments = decoded
+        await capture.handoff_event(
+            tool_name=tool_name,
+            from_agent=from_agent_name,
+            to_agent=to_agent_name,
+            arguments=arguments,
+            ignored=False,
+        )
+        return destination
 
     return invoke
 
@@ -961,19 +1400,43 @@ def _runner_input(
 
 async def _record_unknown_tool_calls(
     capture: _Capture,
-    supported_tool_names: Sequence[str],
+    prepared: PreparedTarget,
     gateway: ToolGatewayProtocol,
 ) -> int:
-    """Preserve model-owned unknown calls as deterministic agent evidence."""
+    """Preserve model-owned unknown calls as deterministic agent evidence.
 
-    supported = set(supported_tool_names)
+    Allowed names are the active agent's own FunctionTools plus that agent's
+    declared handoff tool names.  A tool that exists only on a different
+    reachable agent is recorded as blocked, not treated as infrastructure.
+    """
+
+    tools_by_agent = prepared.metadata.get("tools_by_agent", {})
+    handoff_tools_by_agent = prepared.metadata.get("handoff_tools_by_agent", {})
+    fallback = {
+        *prepared.tool_names,
+        *prepared.metadata.get("handoff_tool_names", ()),
+    }
     recorded = 0
-    for response in capture.responses:
+    for index, response in enumerate(capture.responses):
+        agent_name = (
+            capture.response_agents[index]
+            if index < len(capture.response_agents)
+            else None
+        )
+        if isinstance(agent_name, str) and (
+            agent_name in tools_by_agent or agent_name in handoff_tools_by_agent
+        ):
+            allowed = {
+                *tools_by_agent.get(agent_name, ()),
+                *handoff_tools_by_agent.get(agent_name, ()),
+            }
+        else:
+            allowed = set(fallback)
         for output in getattr(response, "output", ()):
             if not isinstance(output, ResponseFunctionToolCall):
                 continue
             tool_name = output.name
-            if tool_name in supported:
+            if tool_name in allowed:
                 continue
             raw_arguments = output.arguments
             try:
@@ -986,16 +1449,29 @@ async def _record_unknown_tool_calls(
                 arguments=arguments,
                 raw_arguments=raw_arguments,
                 call_id=output.call_id,
-                validation_errors=("tool is not declared by the inspected agent",),
+                validation_errors=(
+                    "tool is not declared by the active agent"
+                    if isinstance(agent_name, str)
+                    else "tool is not declared by the inspected agent"
+                ),
                 state_changing=False,
                 destructive=False,
+                agent_name=agent_name if isinstance(agent_name, str) else None,
             )
             budget_error = _consume_adapter_tool_budget(gateway)
             error = budget_error or ToolError(
                 code="unknown_tool",
-                message=f"Tool {tool_name!r} is not declared and was blocked.",
+                message=(
+                    f"Tool {tool_name!r} is not declared by agent {agent_name!r} "
+                    "and was blocked."
+                    if isinstance(agent_name, str)
+                    else f"Tool {tool_name!r} is not declared and was blocked."
+                ),
                 retryable=False,
-                details={"supported_tools": sorted(supported)},
+                details={
+                    "supported_tools": sorted(allowed),
+                    **({"agent_name": agent_name} if isinstance(agent_name, str) else {}),
+                },
             )
             await capture.tool_result(
                 attempt=attempt,
@@ -1006,6 +1482,256 @@ async def _record_unknown_tool_calls(
             )
             recorded += 1
     return recorded
+
+
+def _agent_preflight_issues(
+    agent: Any,
+    location: str,
+    *,
+    handoff_tool_names: tuple[str, ...] = (),
+) -> list[SupportIssue]:
+    """Apply the full single-agent support checks to one reachable agent."""
+
+    issues: list[SupportIssue] = []
+    if not isinstance(agent.instructions, str) and agent.instructions is not None:
+        issues.append(
+            SupportIssue(
+                code="dynamic_instructions",
+                message="Dynamic instruction callbacks are unsupported in Phase 1.",
+                location=f"{location}.instructions",
+            )
+        )
+    if agent.prompt is not None:
+        issues.append(
+            SupportIssue(
+                code="stored_prompt",
+                message="Stored prompts can add opaque runtime behavior and are unsupported.",
+                location=f"{location}.prompt",
+            )
+        )
+    if agent.output_type is not None:
+        issues.append(
+            SupportIssue(
+                code="structured_output",
+                message="Phase 1 supports text output only; structured output types are unsupported.",
+                location=f"{location}.output_type",
+            )
+        )
+    if agent.mcp_servers:
+        issues.append(
+            SupportIssue(
+                code="mcp_servers",
+                message="MCP tools cannot be intercepted by the Phase 1 gateway.",
+                location=f"{location}.mcp_servers",
+            )
+        )
+    if agent.hooks is not None:
+        issues.append(
+            SupportIssue(
+                code="agent_hooks",
+                message="Agent-owned lifecycle hooks are unsupported in isolated evaluation runs.",
+                location=f"{location}.hooks",
+            )
+        )
+    if agent.input_guardrails or agent.output_guardrails:
+        issues.append(
+            SupportIssue(
+                code="agent_guardrails",
+                message="Executable agent guardrails are inspected but not run in Phase 1.",
+                location=f"{location}.guardrails",
+            )
+        )
+    if agent.tool_use_behavior != "run_llm_again":
+        issues.append(
+            SupportIssue(
+                code="tool_use_behavior",
+                message="Only the default run_llm_again tool behavior is supported.",
+                location=f"{location}.tool_use_behavior",
+            )
+        )
+
+    extras = {
+        "extra_query": agent.model_settings.extra_query,
+        "extra_body": agent.model_settings.extra_body,
+        "extra_headers": agent.model_settings.extra_headers,
+        "extra_args": agent.model_settings.extra_args,
+    }
+    for name, value in extras.items():
+        if value is not None:
+            issues.append(
+                SupportIssue(
+                    code="opaque_model_settings",
+                    message=f"Model setting {name} is opaque and unsupported in Phase 1.",
+                    location=f"{location}.model_settings.{name}",
+                )
+            )
+
+    seen_names: set[str] = set()
+    for index, tool in enumerate(agent.tools):
+        tool_location = f"{location}.tools[{index}]"
+        if type(tool) is not FunctionTool:
+            issues.append(
+                SupportIssue(
+                    code="unsupported_tool_type",
+                    message=(
+                        "Only exact FunctionTool instances can be replaced safely; "
+                        f"found {type(tool).__name__}."
+                    ),
+                    location=tool_location,
+                )
+            )
+            continue
+        if tool.name in seen_names:
+            issues.append(
+                SupportIssue(
+                    code="duplicate_tool_name",
+                    message=f"Duplicate tool name {tool.name!r} is ambiguous.",
+                    location=tool_location,
+                )
+            )
+        seen_names.add(tool.name)
+        if not isinstance(tool.is_enabled, bool):
+            issues.append(
+                SupportIssue(
+                    code="dynamic_tool_enablement",
+                    message=f"Tool {tool.name!r} has an executable is_enabled callback.",
+                    location=f"{tool_location}.is_enabled",
+                )
+            )
+        if tool.tool_input_guardrails or tool.tool_output_guardrails:
+            issues.append(
+                SupportIssue(
+                    code="tool_guardrails",
+                    message=f"Tool {tool.name!r} has executable tool guardrails.",
+                    location=f"{tool_location}.guardrails",
+                )
+            )
+        if tool.needs_approval is not False:
+            issues.append(
+                SupportIssue(
+                    code="tool_approval_callback",
+                    message=f"Tool {tool.name!r} has approval behavior unsupported by Phase 1.",
+                    location=f"{tool_location}.needs_approval",
+                )
+            )
+        if (
+            tool.timeout_seconds is not None
+            or tool.timeout_error_function is not None
+        ):
+            issues.append(
+                SupportIssue(
+                    code="tool_timeout_callback",
+                    message=f"Tool {tool.name!r} has SDK-owned timeout behavior.",
+                    location=f"{tool_location}.timeout",
+                )
+            )
+        if tool.defer_loading or tool.allowed_callers is not None:
+            issues.append(
+                SupportIssue(
+                    code="advanced_tool_dispatch",
+                    message=f"Tool {tool.name!r} uses deferred or programmatic dispatch.",
+                    location=tool_location,
+                )
+            )
+        if tool.custom_data_extractor is not None:
+            issues.append(
+                SupportIssue(
+                    code="tool_custom_data_callback",
+                    message=f"Tool {tool.name!r} has a custom data callback.",
+                    location=f"{tool_location}.custom_data_extractor",
+                )
+            )
+        if (
+            tool._is_agent_tool
+            or tool._agent_instance is not None
+            or tool._is_codex_tool
+            or tool._tool_namespace is not None
+            or tool._tool_namespace_description is not None
+            or tool._tool_origin is not None
+        ):
+            issues.append(
+                SupportIssue(
+                    code="advanced_function_tool",
+                    message=f"Tool {tool.name!r} is not a plain local function tool.",
+                    location=tool_location,
+                )
+            )
+        try:
+            offline_validator(tool.params_json_schema)
+        except (SchemaError, UnsafeSchemaReference) as exc:
+            issues.append(
+                SupportIssue(
+                    code="invalid_tool_schema",
+                    message=f"Tool {tool.name!r} has invalid or unsafe JSON Schema: {exc}",
+                    location=f"{tool_location}.params_json_schema",
+                )
+            )
+
+    tool_choice = agent.model_settings.tool_choice
+    allowed_choices = {None, "auto", "required", "none", *seen_names, *handoff_tool_names}
+    if (
+        not isinstance(tool_choice, str | type(None))
+        or tool_choice not in allowed_choices
+    ):
+        issues.append(
+            SupportIssue(
+                code="unsupported_tool_choice",
+                message="Model tool_choice targets an unsupported tool surface.",
+                location=f"{location}.model_settings.tool_choice",
+            )
+        )
+    return issues
+
+
+async def _record_ignored_handoffs(capture: _Capture, prepared: PreparedTarget) -> None:
+    """Record redundant same-turn handoff calls the SDK discarded.
+
+    The SDK executes only the first handoff tool call in one model turn and
+    answers every additional one with a fixed "Multiple handoffs detected"
+    message.  Those discarded calls are deterministic model behavior worth
+    asserting on, so they become ``ignored`` HANDOFF events.
+    """
+
+    handoff_names = set(prepared.metadata.get("handoff_tool_names", ()))
+    if not handoff_names:
+        return
+    handoff_targets = cast(
+        dict[tuple[str, str], str], prepared.metadata.get("handoff_targets", {})
+    )
+    for index, response in enumerate(capture.responses):
+        calls = [
+            output
+            for output in getattr(response, "output", ())
+            if isinstance(output, ResponseFunctionToolCall)
+            and output.name in handoff_names
+        ]
+        for extra in calls[1:]:
+            try:
+                decoded = json.loads(extra.arguments)
+            except (json.JSONDecodeError, TypeError, ValueError):
+                decoded = None
+            from_agent = (
+                capture.response_agents[index]
+                if index < len(capture.response_agents)
+                else None
+            )
+            await capture.handoff_event(
+                tool_name=extra.name,
+                from_agent=from_agent,
+                to_agent=(
+                    handoff_targets.get((from_agent, extra.name))
+                    if from_agent is not None
+                    else None
+                ),
+                arguments=decoded if isinstance(decoded, dict) else {},
+                ignored=True,
+                call_id=extra.call_id,
+                source_event_id=(
+                    capture.response_event_ids[index]
+                    if index < len(capture.response_event_ids)
+                    else None
+                ),
+            )
 
 
 class OpenAIAgentsAdapter(FrameworkAdapter):
@@ -1066,6 +1792,7 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
                 )
             )
 
+        graph = _reachable_graph(target)
         tool_properties: list[AgentProperty[Any]] = []
         definitions: list[ToolDefinition] = []
         fingerprint_tools: list[Any] = []
@@ -1109,6 +1836,107 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
                     )
                 )
 
+        # Tools declared by reachable handoff destinations join the merged tool
+        # surface: the scenario gateway must be able to allowlist every tool a
+        # downstream agent can attempt, and preflight separately rejects
+        # cross-agent name collisions before any run.
+        subagent_fingerprints: list[dict[str, Any]] = []
+        for agent, agent_location in zip(graph.agents[1:], graph.locations[1:]):
+            subagent_tools: list[Any] = []
+            for index, tool in enumerate(agent.tools):
+                locator = f"{source}.{agent_location}.tools[{index}]"
+                if isinstance(tool, FunctionTool):
+                    definition = _tool_definition(tool)
+                    definitions.append(definition)
+                    subagent_tools.append(definition.model_dump(mode="json"))
+                    tool_properties.append(
+                        _property(
+                            definition,
+                            locator=locator,
+                            summary=(
+                                f"Function tool declared by reachable handoff agent {agent.name!r}."
+                            ),
+                            kind=SourceKind.TOOL_SCHEMA,
+                            confidence=0.9,
+                            inferred=True,
+                            authoritative=False,
+                        )
+                    )
+                else:
+                    tool_type = type(tool).__name__
+                    subagent_tools.append({"unsupported_type": tool_type})
+                    unknowns.append(
+                        UnknownProperty(
+                            path=f"{agent_location}.tools[{index}]",
+                            reason=f"Unsupported SDK tool type: {tool_type}",
+                            source=SourceReference(
+                                kind=SourceKind.RUNTIME_INTROSPECTION,
+                                locator=f"{locator}.type",
+                            ),
+                            confidence=1.0,
+                            evidence=(
+                                SpecEvidence(
+                                    evidence_id=_evidence_id(f"{locator}.type"),
+                                    summary=f"Runtime object is {tool_type}, not FunctionTool.",
+                                    locator=f"{locator}.type",
+                                ),
+                            ),
+                        )
+                    )
+            if not isinstance(agent.instructions, str) and agent.instructions is not None:
+                locator = f"{source}.{agent_location}.instructions"
+                unknowns.append(
+                    UnknownProperty(
+                        path=f"{agent_location}.instructions",
+                        reason="The reachable agent uses a dynamic instruction callback.",
+                        source=SourceReference(
+                            kind=SourceKind.RUNTIME_INTROSPECTION, locator=locator
+                        ),
+                        confidence=0.0,
+                        evidence=(
+                            SpecEvidence(
+                                evidence_id=_evidence_id(locator),
+                                summary="Dynamic instruction callbacks are not executed during inspection.",
+                                locator=locator,
+                            ),
+                        ),
+                    )
+                )
+            subagent_fingerprints.append(
+                {
+                    "location": agent_location,
+                    "name": agent.name,
+                    "model": _model_identity(agent)[1],
+                    "instructions_hash": (
+                        canonical_hash(agent.instructions)
+                        if isinstance(agent.instructions, str)
+                        else None
+                    ),
+                    "tools": subagent_tools,
+                }
+            )
+        for edge in graph.edges:
+            if edge.destination is not None:
+                continue
+            locator = f"{source}.{edge.location}"
+            unknowns.append(
+                UnknownProperty(
+                    path=edge.location,
+                    reason="The handoff entry could not be resolved to a static destination agent.",
+                    source=SourceReference(
+                        kind=SourceKind.RUNTIME_INTROSPECTION, locator=locator
+                    ),
+                    confidence=0.0,
+                    evidence=(
+                        SpecEvidence(
+                            evidence_id=_evidence_id(locator),
+                            summary="Handoff destinations are resolved statically and never executed.",
+                            locator=locator,
+                        ),
+                    ),
+                )
+            )
+
         capability_properties: list[AgentProperty[Any]] = []
         for extracted in extract_capabilities(definitions):
             capability_properties.append(
@@ -1130,7 +1958,7 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
             )
             unknowns.extend(extracted.unknowns)
 
-        fingerprint = {
+        fingerprint: dict[str, Any] = {
             "source": source,
             "name": target.name,
             "framework_version": framework_version,
@@ -1142,6 +1970,26 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
             ),
             "tools": fingerprint_tools,
         }
+        if graph.has_handoffs:
+            # Included only for handoff targets so every existing single-agent
+            # spec_id (and the replay/baseline bindings derived from it) stays
+            # byte-stable.
+            fingerprint["handoff_graph"] = {
+                "agents": subagent_fingerprints,
+                "edges": [
+                    {
+                        "location": edge.location,
+                        "from": edge.from_agent.name,
+                        "tool_name": edge.tool_name,
+                        "to": (
+                            edge.destination.name
+                            if edge.destination is not None
+                            else None
+                        ),
+                    }
+                    for edge in graph.edges
+                ],
+            }
         spec_id = f"agentspec-{canonical_hash(fingerprint).split(':', 1)[1][:24]}"
         runtime_locator = f"{source}.agent.runtime"
 
@@ -1271,6 +2119,7 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
                         CanonicalEventType.MODEL_RESPONSE.value,
                         CanonicalEventType.TOOL_ATTEMPT.value,
                         CanonicalEventType.TOOL_RESULT.value,
+                        CanonicalEventType.HANDOFF.value,
                         CanonicalEventType.ERROR.value,
                         CanonicalEventType.FINAL_OUTPUT.value,
                     ),
@@ -1338,220 +2187,150 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
             )
             return PreflightReport(framework=FRAMEWORK_NAME, issues=tuple(issues))
 
-        if not isinstance(target.instructions, str) and target.instructions is not None:
-            issues.append(
-                SupportIssue(
-                    code="dynamic_instructions",
-                    message="Dynamic instruction callbacks are unsupported in Phase 1.",
-                    location="agent.instructions",
-                )
-            )
-        if target.prompt is not None:
-            issues.append(
-                SupportIssue(
-                    code="stored_prompt",
-                    message="Stored prompts can add opaque runtime behavior and are unsupported.",
-                    location="agent.prompt",
-                )
-            )
-        if target.output_type is not None:
-            issues.append(
-                SupportIssue(
-                    code="structured_output",
-                    message="Phase 1 supports text output only; structured output types are unsupported.",
-                    location="agent.output_type",
-                )
-            )
-        if target.handoffs:
-            issues.append(
-                SupportIssue(
-                    code="handoffs",
-                    message="Phase 1 supports one interactive agent and no handoffs.",
-                    location="agent.handoffs",
-                )
-            )
-        if target.mcp_servers:
-            issues.append(
-                SupportIssue(
-                    code="mcp_servers",
-                    message="MCP tools cannot be intercepted by the Phase 1 gateway.",
-                    location="agent.mcp_servers",
-                )
-            )
-        if target.hooks is not None:
-            issues.append(
-                SupportIssue(
-                    code="agent_hooks",
-                    message="Agent-owned lifecycle hooks are unsupported in isolated evaluation runs.",
-                    location="agent.hooks",
-                )
-            )
-        if target.input_guardrails or target.output_guardrails:
-            issues.append(
-                SupportIssue(
-                    code="agent_guardrails",
-                    message="Executable agent guardrails are inspected but not run in Phase 1.",
-                    location="agent.guardrails",
-                )
-            )
-        if target.tool_use_behavior != "run_llm_again":
-            issues.append(
-                SupportIssue(
-                    code="tool_use_behavior",
-                    message="Only the default run_llm_again tool behavior is supported.",
-                    location="agent.tool_use_behavior",
-                )
-            )
+        graph = _reachable_graph(target)
+        issues.extend(graph.issues)
+        for edge in graph.edges:
+            issues.extend(edge.issues)
 
-        extras = {
-            "extra_query": target.model_settings.extra_query,
-            "extra_body": target.model_settings.extra_body,
-            "extra_headers": target.model_settings.extra_headers,
-            "extra_args": target.model_settings.extra_args,
-        }
-        for name, value in extras.items():
-            if value is not None:
+        edges_by_agent = _edges_by_agent(graph)
+        seen_agent_names: dict[str, str] = {}
+        tool_owner_location: dict[str, str] = {}
+        all_function_tool_names: set[str] = set()
+        for agent, location in zip(graph.agents, graph.locations):
+            agent_edges = edges_by_agent.get(id(agent), [])
+            handoff_names = [
+                edge.tool_name for edge in agent_edges if edge.tool_name is not None
+            ]
+            issues.extend(
+                _agent_preflight_issues(
+                    agent, location, handoff_tool_names=tuple(handoff_names)
+                )
+            )
+            if agent.name in seen_agent_names:
                 issues.append(
                     SupportIssue(
-                        code="opaque_model_settings",
-                        message=f"Model setting {name} is opaque and unsupported in Phase 1.",
-                        location=f"agent.model_settings.{name}",
-                    )
-                )
-
-        seen_names: set[str] = set()
-        for index, tool in enumerate(target.tools):
-            location = f"agent.tools[{index}]"
-            if type(tool) is not FunctionTool:
-                issues.append(
-                    SupportIssue(
-                        code="unsupported_tool_type",
+                        code="duplicate_agent_name",
                         message=(
-                            "Only exact FunctionTool instances can be replaced safely; "
-                            f"found {type(tool).__name__}."
+                            f"Two reachable agents share the name {agent.name!r}; "
+                            "handoff and event attribution would be ambiguous."
                         ),
                         location=location,
                     )
                 )
-                continue
-            if tool.name in seen_names:
+            else:
+                seen_agent_names[agent.name] = location
+            local_names: set[str] = set()
+            for index, tool in enumerate(agent.tools):
+                if type(tool) is not FunctionTool or tool.name in local_names:
+                    continue
+                local_names.add(tool.name)
+                all_function_tool_names.add(tool.name)
+                owner = tool_owner_location.get(tool.name)
+                if owner is None:
+                    tool_owner_location[tool.name] = location
+                elif owner != location:
+                    issues.append(
+                        SupportIssue(
+                            code="duplicate_tool_name",
+                            message=(
+                                f"Tool name {tool.name!r} is declared by multiple "
+                                "reachable agents; scenario tool identity would be "
+                                "ambiguous."
+                            ),
+                            location=f"{location}.tools[{index}]",
+                        )
+                    )
+            seen_handoff_names: set[str] = set()
+            for edge in agent_edges:
+                if edge.tool_name is None:
+                    continue
+                if edge.tool_name in seen_handoff_names:
+                    issues.append(
+                        SupportIssue(
+                            code="handoff_tool_name_collision",
+                            message=(
+                                f"Handoff tool name {edge.tool_name!r} is declared "
+                                "twice on one agent."
+                            ),
+                            location=edge.location,
+                        )
+                    )
+                seen_handoff_names.add(edge.tool_name)
+        for edge in graph.edges:
+            if edge.tool_name is not None and edge.tool_name in all_function_tool_names:
                 issues.append(
                     SupportIssue(
-                        code="duplicate_tool_name",
-                        message=f"Duplicate tool name {tool.name!r} is ambiguous.",
-                        location=location,
+                        code="handoff_tool_name_collision",
+                        message=(
+                            f"Handoff tool name {edge.tool_name!r} collides with a "
+                            "declared function tool name."
+                        ),
+                        location=edge.location,
                     )
                 )
-            seen_names.add(tool.name)
-            if not isinstance(tool.is_enabled, bool):
-                issues.append(
-                    SupportIssue(
-                        code="dynamic_tool_enablement",
-                        message=f"Tool {tool.name!r} has an executable is_enabled callback.",
-                        location=f"{location}.is_enabled",
-                    )
-                )
-            if tool.tool_input_guardrails or tool.tool_output_guardrails:
-                issues.append(
-                    SupportIssue(
-                        code="tool_guardrails",
-                        message=f"Tool {tool.name!r} has executable tool guardrails.",
-                        location=f"{location}.guardrails",
-                    )
-                )
-            if tool.needs_approval is not False:
-                issues.append(
-                    SupportIssue(
-                        code="tool_approval_callback",
-                        message=f"Tool {tool.name!r} has approval behavior unsupported by Phase 1.",
-                        location=f"{location}.needs_approval",
-                    )
-                )
-            if (
-                tool.timeout_seconds is not None
-                or tool.timeout_error_function is not None
-            ):
-                issues.append(
-                    SupportIssue(
-                        code="tool_timeout_callback",
-                        message=f"Tool {tool.name!r} has SDK-owned timeout behavior.",
-                        location=f"{location}.timeout",
-                    )
-                )
-            if tool.defer_loading or tool.allowed_callers is not None:
-                issues.append(
-                    SupportIssue(
-                        code="advanced_tool_dispatch",
-                        message=f"Tool {tool.name!r} uses deferred or programmatic dispatch.",
-                        location=location,
-                    )
-                )
-            if tool.custom_data_extractor is not None:
-                issues.append(
-                    SupportIssue(
-                        code="tool_custom_data_callback",
-                        message=f"Tool {tool.name!r} has a custom data callback.",
-                        location=f"{location}.custom_data_extractor",
-                    )
-                )
-            if (
-                tool._is_agent_tool
-                or tool._agent_instance is not None
-                or tool._is_codex_tool
-                or tool._tool_namespace is not None
-                or tool._tool_namespace_description is not None
-                or tool._tool_origin is not None
-            ):
-                issues.append(
-                    SupportIssue(
-                        code="advanced_function_tool",
-                        message=f"Tool {tool.name!r} is not a plain local function tool.",
-                        location=location,
-                    )
-                )
-            try:
-                offline_validator(tool.params_json_schema)
-            except (SchemaError, UnsafeSchemaReference) as exc:
-                issues.append(
-                    SupportIssue(
-                        code="invalid_tool_schema",
-                        message=f"Tool {tool.name!r} has invalid or unsafe JSON Schema: {exc}",
-                        location=f"{location}.params_json_schema",
-                    )
-                )
-
-        tool_choice = target.model_settings.tool_choice
-        allowed_choices = {None, "auto", "required", "none", *seen_names}
-        if (
-            not isinstance(tool_choice, str | type(None))
-            or tool_choice not in allowed_choices
-        ):
-            issues.append(
-                SupportIssue(
-                    code="unsupported_tool_choice",
-                    message="Model tool_choice targets an unsupported tool surface.",
-                    location="agent.model_settings.tool_choice",
-                )
-            )
         return PreflightReport(framework=FRAMEWORK_NAME, issues=tuple(issues))
 
-    def prepare(
-        self,
-        target: Any,
-        gateway: ToolGatewayProtocol,
-        *,
-        world_state: Any = None,
-        event_sink: EventSinkProtocol | None = None,
-        source: str | None = None,
-    ) -> PreparedTarget:
-        report = self.preflight(target)
-        report.require_supported()
-        spec = self.inspect(target, source=source)
-        capture_holder: dict[str, _Capture | None] = {"capture": None}
-        safe_tools: list[Any] = []
-        tool_risks: dict[str, tuple[bool, bool]] = {}
+    def describe_topology(
+        self, target: Any, *, source: str | None = None
+    ) -> dict[str, Any] | None:
+        """Additive inspect diagnostic describing the reachable handoff graph.
 
-        for original in target.tools:
+        Returns ``None`` for single-agent targets so existing inspect behavior
+        and payloads stay byte-identical.  This is diagnostic data, not part of
+        ``agentcheck.agent_spec.v1``.
+        """
+
+        _require_sdk()
+        del source
+        if type(target) is not Agent:
+            return None
+        graph = _reachable_graph(target)
+        if not graph.has_handoffs:
+            return None
+        edges_by_agent = _edges_by_agent(graph)
+        agents_payload: list[dict[str, Any]] = []
+        for agent, location in zip(graph.agents, graph.locations):
+            handoffs_payload: list[dict[str, Any]] = []
+            for edge in edges_by_agent.get(id(agent), []):
+                handoffs_payload.append(
+                    {
+                        "tool_name": edge.tool_name,
+                        "target_agent": (
+                            edge.destination.name
+                            if edge.destination is not None
+                            else None
+                        ),
+                        "location": edge.location,
+                        "issue_codes": sorted({issue.code for issue in edge.issues}),
+                    }
+                )
+            agents_payload.append(
+                {
+                    "name": agent.name,
+                    "location": location,
+                    "model": _model_identity(agent)[1],
+                    "instructions_static": (
+                        isinstance(agent.instructions, str) or agent.instructions is None
+                    ),
+                    "tool_names": [
+                        tool.name for tool in agent.tools if isinstance(tool, FunctionTool)
+                    ],
+                    "handoffs": handoffs_payload,
+                }
+            )
+        return _json_object({"framework": FRAMEWORK_NAME, "agents": agents_payload})
+
+    def _safe_tools_for(
+        self,
+        agent: Any,
+        *,
+        gateway: ToolGatewayProtocol,
+        world_state: Any,
+        capture_holder: dict[str, _Capture | None],
+        tool_risks: dict[str, tuple[bool, bool]],
+    ) -> list[Any]:
+        safe_tools: list[Any] = []
+        for original in agent.tools:
             definition = _tool_definition(original)
             schema = copy.deepcopy(original.params_json_schema)
             invoker = _make_safe_invoker(
@@ -1584,28 +2363,112 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
                 definition.state_changing,
                 definition.destructive,
             )
+        return safe_tools
 
-        safe_agent = target.clone(
-            tools=safe_tools,
-            mcp_servers=[],
-            handoffs=[],
-            prompt=None,
-            hooks=None,
-            input_guardrails=[],
-            output_guardrails=[],
-            model_settings=_sanitized_model_settings(target.model_settings),
-        )
+    def prepare(
+        self,
+        target: Any,
+        gateway: ToolGatewayProtocol,
+        *,
+        world_state: Any = None,
+        event_sink: EventSinkProtocol | None = None,
+        source: str | None = None,
+    ) -> PreparedTarget:
+        report = self.preflight(target)
+        report.require_supported()
+        spec = self.inspect(target, source=source)
+        graph = _reachable_graph(target)
+        capture_holder: dict[str, _Capture | None] = {"capture": None}
+        tool_risks: dict[str, tuple[bool, bool]] = {}
+        tool_names: list[str] = []
+        tools_by_agent: dict[str, tuple[str, ...]] = {}
+        clones: dict[int, Any] = {}
+
+        # Pass one: clone every reachable agent with reconstructed tools and no
+        # handoffs; each clone keeps its own model object so local scripted
+        # models keep driving offline runs.
+        for agent in graph.agents:
+            safe_tools = self._safe_tools_for(
+                agent,
+                gateway=gateway,
+                world_state=world_state,
+                capture_holder=capture_holder,
+                tool_risks=tool_risks,
+            )
+            agent_tool_names = tuple(tool.name for tool in safe_tools)
+            tools_by_agent[agent.name] = agent_tool_names
+            tool_names.extend(agent_tool_names)
+            clones[id(agent)] = agent.clone(
+                tools=safe_tools,
+                mcp_servers=[],
+                handoffs=[],
+                prompt=None,
+                hooks=None,
+                input_guardrails=[],
+                output_guardrails=[],
+                model_settings=_sanitized_model_settings(agent.model_settings),
+            )
+
+        # Pass two: wire AgentCheck-owned handoffs between clones.  Original
+        # Handoff objects, their routing closures, and any user callbacks are
+        # left behind on the source graph and are never invoked.
+        handoff_tool_names: list[str] = []
+        handoff_tools_by_agent: dict[str, list[str]] = {}
+        handoff_targets: dict[tuple[str, str], str] = {}
+        for edge in graph.edges:
+            if edge.destination is None or edge.tool_name is None:
+                raise AdapterRuntimeError(
+                    "an unproven handoff edge survived preflight"
+                )  # pragma: no cover - preflight fails closed first
+            destination_clone = clones[id(edge.destination)]
+            safe_handoff = Handoff(
+                tool_name=edge.tool_name,
+                tool_description=edge.tool_description or "",
+                input_json_schema=(
+                    copy.deepcopy(edge.input_json_schema)
+                    if edge.input_json_schema is not None
+                    else _empty_handoff_payload_schema()
+                ),
+                on_invoke_handoff=_make_safe_handoff_invoker(
+                    tool_name=edge.tool_name,
+                    from_agent_name=edge.from_agent.name,
+                    to_agent_name=edge.destination.name,
+                    destination=destination_clone,
+                    capture_holder=capture_holder,
+                ),
+                agent_name=edge.destination.name,
+                input_filter=None,
+                nest_handoff_history=None,
+                strict_json_schema=edge.strict_json_schema,
+                is_enabled=True,
+            )
+            clones[id(edge.from_agent)].handoffs.append(safe_handoff)
+            handoff_tool_names.append(edge.tool_name)
+            handoff_tools_by_agent.setdefault(edge.from_agent.name, []).append(
+                edge.tool_name
+            )
+            handoff_targets[(edge.from_agent.name, edge.tool_name)] = (
+                edge.destination.name
+            )
+
         return PreparedTarget(
             framework=FRAMEWORK_NAME,
-            runtime_agent=safe_agent,
+            runtime_agent=clones[id(target)],
             spec=spec,
-            tool_names=tuple(tool.name for tool in safe_tools),
+            tool_names=tuple(tool_names),
             gateway=gateway,
             world_state=world_state,
             event_sink=event_sink,
             metadata={
                 "capture_holder": capture_holder,
                 "tool_risks": tool_risks,
+                "tools_by_agent": tools_by_agent,
+                "handoff_tool_names": tuple(dict.fromkeys(handoff_tool_names)),
+                "handoff_tools_by_agent": {
+                    name: tuple(dict.fromkeys(names))
+                    for name, names in handoff_tools_by_agent.items()
+                },
+                "handoff_targets": handoff_targets,
                 "consumed": False,
             },
         )
@@ -1709,7 +2572,7 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
             )
         except ModelBehaviorError as exc:
             unknown_calls = await _record_unknown_tool_calls(
-                capture, prepared.tool_names, prepared.gateway
+                capture, prepared, prepared.gateway
             )
             if unknown_calls:
                 termination = RunTermination.COMPLETED
@@ -1752,6 +2615,7 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         finally:
             holder["capture"] = None
 
+        await _record_ignored_handoffs(capture, prepared)
         ended_at = utc_now()
         return CanonicalRun(
             run_id=run_id,

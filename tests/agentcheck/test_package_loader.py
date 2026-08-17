@@ -241,12 +241,14 @@ def test_packaged_handoff_target_still_runs_preflight(
 
     assert main(["inspect", str(root)]) == 0
     output = capsys.readouterr().out
-    assert "Preflight: unsupported" in output
-    assert "- handoffs (agent.handoffs):" in output
+    assert "Preflight: supported" in output
+    assert "Handoff topology (2 reachable agents):" in output
+    assert "- handoffs (agent.handoffs):" not in output
 
     loaded, _source = load_target(root)
     report = OpenAIAgentsAdapter().preflight(loaded)
-    assert "handoffs" in {issue.code for issue in report.issues}
+    assert report.supported is True
+    assert "handoffs" not in {issue.code for issue in report.issues}
 
 
 def test_parent_directory_is_not_added_to_sys_path(tmp_path: Path) -> None:

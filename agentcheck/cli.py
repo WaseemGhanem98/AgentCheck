@@ -7,7 +7,7 @@ import json
 import re
 import sys
 from collections import Counter
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 from agentcheck import __version__
 from agentcheck.adapters.base import SupportIssue
@@ -525,10 +525,32 @@ def _print_preflight(issues: Sequence[SupportIssue]) -> None:
         print(f"- {issue.code}{location}: {issue.message}")
 
 
+def _print_topology(topology: Mapping[str, Any] | None) -> None:
+    if not topology:
+        return
+    agents = topology.get("agents") or []
+    print()
+    print(f"Handoff topology ({len(agents)} reachable agents):")
+    for agent in agents:
+        tool_names = agent.get("tool_names") or []
+        tools = ", ".join(tool_names) if tool_names else "none"
+        notes: list[str] = []
+        if not agent.get("instructions_static", True):
+            notes.append("dynamic instructions")
+        suffix = f" [{'; '.join(notes)}]" if notes else ""
+        print(f"- {agent.get('name')} (tools: {tools}){suffix}")
+        for edge in agent.get("handoffs") or []:
+            target_name = edge.get("target_agent") or "(unresolved)"
+            codes = edge.get("issue_codes") or []
+            edge_suffix = f" [unsupported: {', '.join(codes)}]" if codes else ""
+            print(f"  -> {edge.get('tool_name')} to {target_name}{edge_suffix}")
+
+
 def _print_inspection(
     spec: AgentSpec,
     *,
     preflight_issues: Sequence[SupportIssue] = (),
+    topology: Mapping[str, Any] | None = None,
 ) -> None:
     tools = [item.value for item in spec.tools.items]
     capabilities = [item.value for item in spec.capabilities.items]
@@ -571,6 +593,7 @@ def _print_inspection(
     if spec.unknowns:
         print()
         print(f"Unknown properties: {len(spec.unknowns)}")
+    _print_topology(topology)
     _print_preflight(preflight_issues)
 
 
@@ -671,7 +694,11 @@ def _inspect_command(target: str, *, as_json: bool) -> int:
     if as_json:
         print(_json_spec(spec))
     else:
-        _print_inspection(spec, preflight_issues=result.preflight_issues)
+        _print_inspection(
+            spec,
+            preflight_issues=result.preflight_issues,
+            topology=result.topology,
+        )
     return 0
 
 

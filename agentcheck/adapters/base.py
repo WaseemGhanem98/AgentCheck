@@ -70,6 +70,73 @@ def encode_preflight_report(report: PreflightReport) -> dict[str, Any]:
     }
 
 
+def decode_topology(payload: Any) -> dict[str, Any]:
+    """Parse the additive inspect topology object, failing closed on malformation.
+
+    Topology is diagnostic data beside the versioned ``AgentSpec`` result, in the
+    same way the ``preflight`` object is; it is not ``agentcheck.agent_spec.v1``.
+    """
+
+    if not isinstance(payload, dict):
+        raise ValueError("topology must be an object")
+    extra = set(payload) - {"framework", "agents"}
+    if extra:
+        raise ValueError("topology has unknown fields")
+    framework = payload.get("framework")
+    if not isinstance(framework, str) or not framework.strip():
+        raise ValueError("topology requires a framework")
+    agents = payload.get("agents")
+    if not isinstance(agents, list) or not agents:
+        raise ValueError("topology requires a non-empty agents list")
+    for agent in agents:
+        if not isinstance(agent, dict):
+            raise ValueError("topology agents must be objects")
+        if set(agent) - {
+            "name",
+            "location",
+            "model",
+            "instructions_static",
+            "tool_names",
+            "handoffs",
+        }:
+            raise ValueError("topology agent has unknown fields")
+        if not isinstance(agent.get("name"), str) or not agent["name"]:
+            raise ValueError("topology agent requires a name")
+        if not isinstance(agent.get("location"), str) or not agent["location"]:
+            raise ValueError("topology agent requires a location")
+        if not isinstance(agent.get("instructions_static"), bool):
+            raise ValueError("topology agent requires instructions_static")
+        tool_names = agent.get("tool_names")
+        if not isinstance(tool_names, list) or any(
+            not isinstance(name, str) for name in tool_names
+        ):
+            raise ValueError("topology agent tool_names must be strings")
+        handoffs = agent.get("handoffs")
+        if not isinstance(handoffs, list):
+            raise ValueError("topology agent handoffs must be a list")
+        for edge in handoffs:
+            if not isinstance(edge, dict):
+                raise ValueError("topology handoffs must be objects")
+            if set(edge) - {"tool_name", "target_agent", "location", "issue_codes"}:
+                raise ValueError("topology handoff has unknown fields")
+            if not isinstance(edge.get("location"), str) or not edge["location"]:
+                raise ValueError("topology handoff requires a location")
+            if edge.get("tool_name") is not None and not isinstance(
+                edge["tool_name"], str
+            ):
+                raise ValueError("topology handoff tool_name must be a string or null")
+            if edge.get("target_agent") is not None and not isinstance(
+                edge["target_agent"], str
+            ):
+                raise ValueError("topology handoff target_agent must be a string or null")
+            issue_codes = edge.get("issue_codes")
+            if not isinstance(issue_codes, list) or any(
+                not isinstance(code, str) for code in issue_codes
+            ):
+                raise ValueError("topology handoff issue_codes must be strings")
+    return payload
+
+
 def decode_preflight_report(payload: Any) -> PreflightReport:
     """Parse a worker inspect preflight payload, failing closed on malformation."""
 

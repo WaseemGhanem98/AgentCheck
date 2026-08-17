@@ -13,6 +13,7 @@ from .base import (
     ToolGatewayProtocol,
     UnsupportedTargetError,
     decode_preflight_report,
+    decode_topology,
     encode_preflight_report,
     format_support_issues,
 )
@@ -32,6 +33,7 @@ __all__ = [
     "ToolGatewayProtocol",
     "UnsupportedTargetError",
     "decode_preflight_report",
+    "decode_topology",
     "encode_preflight_report",
     "format_support_issues",
 ]
