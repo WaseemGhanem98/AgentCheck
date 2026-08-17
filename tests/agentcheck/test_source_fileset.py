@@ -475,6 +475,82 @@ def test_gitignored_helper_change_blocks_replay_before_inspect(
         replay_suite(target, ".agentcheck/replay/bound.json")
 
 
+def test_agents_directory_excluded_from_inventory(tmp_path: Path) -> None:
+    """Verify that .agents/ (SDK-managed framework materials) are excluded."""
+    target = tmp_path / "local"
+    target.mkdir()
+    (target / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    # Create .agents directory with YAML files (like OpenAI SDK skill definitions)
+    agents_dir = target / ".agents" / "skills" / "test-skill"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "openai.yaml").write_text("agent_definition: test\n", encoding="utf-8")
+    (agents_dir / "script.py").write_text("# test script\n", encoding="utf-8")
+
+    # Should not raise an error about unsafe paths
+    fileset = collect_source_file_set(target)
+    paths = {item.path for item in fileset.files}
+
+    # Verify agent.py is included
+    assert "agent.py" in paths
+
+    # Verify .agents files are NOT included
+    assert not any(".agents" in path for path in paths), (
+        f".agents/ should be excluded, but found: "
+        f"{[p for p in paths if '.agents' in p]}"
+    )
+
+
+def test_github_directory_excluded_from_inventory(tmp_path: Path) -> None:
+    """Verify that .github/ (repository CI/CD) is excluded."""
+    target = tmp_path / "local"
+    target.mkdir()
+    (target / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    # Create .github directory with workflows (like CI/CD configs)
+    github_dir = target / ".github" / "workflows"
+    github_dir.mkdir(parents=True)
+    (github_dir / "test.yml").write_text("name: Test\n", encoding="utf-8")
+
+    # Should not raise an error about unsafe paths
+    fileset = collect_source_file_set(target)
+    paths = {item.path for item in fileset.files}
+
+    # Verify agent.py is included
+    assert "agent.py" in paths
+
+    # Verify .github files are NOT included
+    assert not any(".github" in path for path in paths), (
+        f".github/ should be excluded, but found: "
+        f"{[p for p in paths if '.github' in p]}"
+    )
+
+
+def test_vscode_directory_excluded_from_inventory(tmp_path: Path) -> None:
+    """Verify that .vscode/ (dev tool settings) is excluded."""
+    target = tmp_path / "local"
+    target.mkdir()
+    (target / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")
+
+    # Create .vscode directory with launch settings
+    vscode_dir = target / ".vscode"
+    vscode_dir.mkdir()
+    (vscode_dir / "launch.json").write_text('{"version": "0.2.0"}\n', encoding="utf-8")
+
+    # Should not raise an error about unsafe paths
+    fileset = collect_source_file_set(target)
+    paths = {item.path for item in fileset.files}
+
+    # Verify agent.py is included
+    assert "agent.py" in paths
+
+    # Verify .vscode files are NOT included
+    assert not any(".vscode" in path for path in paths), (
+        f".vscode/ should be excluded, but found: "
+        f"{[p for p in paths if '.vscode' in p]}"
+    )
+
+
 def test_unsafe_relevant_filename_fails_closed(tmp_path: Path) -> None:
     target = tmp_path / "local"
     target.mkdir()

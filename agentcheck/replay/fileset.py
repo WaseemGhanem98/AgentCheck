@@ -47,6 +47,8 @@ _INCLUDED_SUFFIXES = (".py", ".json", ".toml", ".yaml", ".yml")
 _EXCLUDED_DIR_NAMES = frozenset(
     {
         ".git",
+        ".github",
+        ".gitignore",
         ".hg",
         ".svn",
         ".venv",
@@ -55,8 +57,12 @@ _EXCLUDED_DIR_NAMES = frozenset(
         ".mypy_cache",
         ".ruff_cache",
         ".pytest_cache",
+        ".vscode",
+        ".idea",
+        ".vs",
         "__pycache__",
         ".agentcheck",
+        ".agents",
         "dist",
         "build",
         "node_modules",
@@ -219,6 +225,13 @@ def _normalize_relative(relative: str) -> str:
 
 
 def _excluded_by_location(relative: str) -> bool:
+    """Exclude framework, build, and cache directories from source inventory.
+
+    .agents/ contains OpenAI Agents SDK framework materials (skills, references)
+    and is excluded because it is SDK-managed state, not target source code.
+    .github/ contains repository CI/CD workflows and templates that do not affect
+    the target agent's behavior at runtime.
+    """
     parts = relative.split("/")
     if any(part in _EXCLUDED_DIR_NAMES or part.endswith(".egg-info") for part in parts[:-1]):
         return True
