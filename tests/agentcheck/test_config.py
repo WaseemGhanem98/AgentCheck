@@ -142,3 +142,25 @@ def test_contained_path_refuses_traversal_and_outbound_symlinks(tmp_path: Path) 
     (root / "suite.json").symlink_to(outside)
     with pytest.raises(ConfigurationError, match="inside the target"):
         contained_path(root, "suite.json")
+
+
+def test_factory_entrypoint_is_accepted_and_python_executable_is_optional() -> None:
+    config = AgentCheckConfig(entrypoint="src/agent.py:create_agent()")
+    assert config.entrypoint == "src/agent.py:create_agent()"
+    assert config.python_executable is None
+    assert AgentCheckConfig().python_executable is None
+
+
+def test_python_executable_rejects_unsafe_relative_paths() -> None:
+    with pytest.raises(ValueError, match="safe relative path"):
+        AgentCheckConfig(python_executable="../usr/bin/python")
+    with pytest.raises(ValueError, match="must not be empty"):
+        AgentCheckConfig(python_executable="   ")
+    with pytest.raises(ValidationError):
+        AgentCheckConfig.model_validate(
+            {
+                "schema_version": "agentcheck.config.v1",
+                "python_executable": "/usr/bin/python3",
+                "unexpected": True,
+            }
+        )

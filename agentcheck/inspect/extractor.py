@@ -17,36 +17,59 @@ import hashlib
 import importlib
 import importlib.machinery
 import importlib.util
+import inspect
 import json
 import keyword
+import os
 import sys
 from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Iterator
 
+from agentcheck.config import ParsedEntrypoint, parse_entrypoint
+
 
 class TargetLoadError(RuntimeError):
     """Raised when a configured local target cannot be imported unambiguously."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "target_import_failed",
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
 
-def _split_entrypoint(value: str, *, base: Path) -> tuple[Path, str]:
-    module_value, separator, attribute = value.partition(":")
-    attribute = attribute if separator else "agent"
-    if not module_value:
-        raise TargetLoadError("entrypoint must include a Python file")
-    if not attribute or not attribute.isidentifier():
-        raise TargetLoadError(f"invalid entrypoint attribute: {attribute!r}")
 
-    module_path = Path(module_value)
+def _split_entrypoint(value: str, *, base: Path) -> tuple[Path, str, bool]:
+    try:
+        parsed: ParsedEntrypoint = parse_entrypoint(value)
+    except ValueError as exc:
+        raise TargetLoadError(str(exc), code="target_entrypoint_invalid") from exc
+    module_path = Path(parsed.path)
     if not module_path.is_absolute():
         module_path = base / module_path
-    module_path = module_path.resolve()
+    try:
+        module_path = module_path.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise TargetLoadError(
+            f"target path cannot be resolved: {exc}", code="target_path_escape"
+        ) from exc
     if module_path.suffix != ".py":
-        raise TargetLoadError("Phase 1 entrypoints must reference a .py file")
+        raise TargetLoadError(
+            "Phase 1 entrypoints must reference a .py file",
+            code="target_entrypoint_invalid",
+        )
     if not module_path.is_file():
-        raise TargetLoadError(f"entrypoint file does not exist: {module_path}")
-    return module_path, attribute
+        raise TargetLoadError(
+            f"entrypoint file does not exist: {module_path}",
+            code="target_entrypoint_invalid",
+        )
+    return module_path, parsed.attribute, parsed.factory
 
 
 def _require_contained(path: Path, root: Path) -> Path:
@@ -56,12 +79,15 @@ def _require_contained(path: Path, root: Path) -> Path:
         resolved_root = root.resolve()
         resolved = path.resolve()
     except (OSError, RuntimeError) as exc:
-        raise TargetLoadError(f"target path cannot be resolved: {exc}") from exc
+        raise TargetLoadError(
+            f"target path cannot be resolved: {exc}", code="target_path_escape"
+        ) from exc
     try:
         resolved.relative_to(resolved_root)
     except ValueError as exc:
         raise TargetLoadError(
-            "refusing to follow a path that escapes the target directory"
+            "refusing to follow a path that escapes the target directory",
+            code="target_path_escape",
         ) from exc
     return resolved
 
@@ -69,28 +95,35 @@ def _require_contained(path: Path, root: Path) -> Path:
 def resolve_entrypoint(target: str | Path) -> tuple[Path, str]:
     """Resolve a directory/config/direct-file target without importing it."""
 
-    module_path, attribute, _root = _resolve_target(target)
+    module_path, attribute, _root, _factory = _resolve_target(target)
     return module_path, attribute
 
 
-def _resolve_target(target: str | Path) -> tuple[Path, str, Path]:
-    """Return ``(module_path, attribute, root)`` with the module contained in root."""
+def _resolve_target(target: str | Path) -> tuple[Path, str, Path, bool]:
+    """Return ``(module_path, attribute, root, factory)`` contained in root."""
 
     raw_target = str(target)
     if ":" in raw_target:
         possible_file, _ = raw_target.rsplit(":", 1)
         if possible_file.endswith(".py"):
-            module_path, attribute = _split_entrypoint(raw_target, base=Path.cwd())
+            module_path, attribute, factory = _split_entrypoint(
+                raw_target, base=Path.cwd()
+            )
             root = module_path.parent
-            return module_path, attribute, root
+            return module_path, attribute, root, factory
 
     path = Path(raw_target).resolve()
     if path.is_file():
         if path.suffix != ".py":
-            raise TargetLoadError(f"target file must be Python: {path}")
-        return path, "agent", path.parent
+            raise TargetLoadError(
+                f"target file must be Python: {path}",
+                code="target_entrypoint_invalid",
+            )
+        return path, "agent", path.parent, False
     if not path.is_dir():
-        raise TargetLoadError(f"target path does not exist: {path}")
+        raise TargetLoadError(
+            f"target path does not exist: {path}", code="target_entrypoint_invalid"
+        )
 
     config_path = path / "agentcheck.json"
     entrypoint = "agent.py:agent"
@@ -98,18 +131,25 @@ def _resolve_target(target: str | Path) -> tuple[Path, str, Path]:
         try:
             config = json.loads(config_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise TargetLoadError(f"invalid {config_path.name}: {exc}") from exc
+            raise TargetLoadError(
+                f"invalid {config_path.name}: {exc}",
+                code="target_entrypoint_invalid",
+            ) from exc
         if not isinstance(config, dict):
-            raise TargetLoadError(f"{config_path.name} must contain a JSON object")
+            raise TargetLoadError(
+                f"{config_path.name} must contain a JSON object",
+                code="target_entrypoint_invalid",
+            )
         configured = config.get("entrypoint", entrypoint)
         if not isinstance(configured, str) or not configured.strip():
             raise TargetLoadError(
-                "agentcheck.json entrypoint must be a non-empty string"
+                "agentcheck.json entrypoint must be a non-empty string",
+                code="target_entrypoint_invalid",
             )
         entrypoint = configured.strip()
-    module_path, attribute = _split_entrypoint(entrypoint, base=path)
+    module_path, attribute, factory = _split_entrypoint(entrypoint, base=path)
     _require_contained(module_path, path)
-    return module_path, attribute, path
+    return module_path, attribute, path, factory
 
 
 def _path_exists(path: Path) -> bool:
@@ -167,14 +207,16 @@ class _ContainedTargetFinder:
             if file_hit and dir_hit:
                 raise TargetLoadError(
                     f"ambiguous import {fullname!r}: both {module_file.name} "
-                    f"and {package_dir.name}/ exist under the target"
+                    f"and {package_dir.name}/ exist under the target",
+                    code="target_import_failed",
                 )
             last = index == len(parts) - 1
             if not file_hit and not dir_hit:
                 if index == 0:
                     return None
                 raise TargetLoadError(
-                    f"no module named {fullname!r} inside the target directory"
+                    f"no module named {fullname!r} inside the target directory",
+                    code="target_import_failed",
                 )
             if file_hit:
                 resolved = _require_contained(module_file, self.root)
@@ -290,12 +332,164 @@ def _evict_stale_modules(module_name: str, *, root: Path) -> None:
             sys.modules.pop(cached, None)
 
 
+def _provider_required_during_import(exc: BaseException) -> bool:
+    if "OPENAI_API_KEY" in os.environ:
+        return False
+    try:
+        text = str(exc)
+    except BaseException:
+        return False
+    markers = ("OPENAI_API_KEY", "api_key client option must be set")
+    return any(marker in text for marker in markers)
+
+
+def _import_failure(module_path: Path, exc: BaseException) -> TargetLoadError:
+    if isinstance(exc, ModuleNotFoundError):
+        missing = exc.name or "unknown"
+        return TargetLoadError(
+            (
+                f"Target import failed: no module named {missing!r} in the worker "
+                "Python environment. AgentCheck does not install target dependencies "
+                "automatically and does not download packages from the network. "
+                "Prepare a Python environment that contains the target's packages, "
+                "then run AgentCheck from that environment or set python_executable "
+                f"/ --python to that interpreter. Worker Python: {sys.executable}"
+            ),
+            code="target_dependency_missing",
+            details={
+                "missing_module": missing,
+                "python_executable": sys.executable,
+            },
+        )
+    if _provider_required_during_import(exc):
+        return TargetLoadError(
+            (
+                "Target import failed because discovery required a provider "
+                "credential. AgentCheck does not pass OPENAI_API_KEY unless it is "
+                "listed in environment_allowlist. This is not a passing inspection."
+            ),
+            code="provider_required_during_import",
+            details={"error_type": type(exc).__name__},
+        )
+    return TargetLoadError(
+        f"failed to import {module_path}: {exc}",
+        code="target_import_failed",
+        details={"error_type": type(exc).__name__},
+    )
+
+
+def _factory_required_parameters(func: Any) -> tuple[str, ...]:
+    try:
+        signature = inspect.signature(func)
+    except (TypeError, ValueError):
+        return ()
+    required: list[str] = []
+    skip_kinds = {
+        inspect.Parameter.VAR_POSITIONAL,
+        inspect.Parameter.VAR_KEYWORD,
+    }
+    for name, parameter in signature.parameters.items():
+        if parameter.kind in skip_kinds:
+            continue
+        if parameter.default is inspect.Parameter.empty:
+            required.append(name)
+    return tuple(required)
+
+
+def _invoke_factory(value: Any, *, module_path: Path, attribute: str) -> Any:
+    if inspect.isclass(value):
+        raise TargetLoadError(
+            (
+                f"{module_path}:{attribute}() names a class. AgentCheck only calls "
+                "explicit zero-argument factory functions, not classes."
+            ),
+            code="target_factory_unsupported",
+            details={"attribute": attribute},
+        )
+    if not callable(value):
+        raise TargetLoadError(
+            (
+                f"{module_path}:{attribute}() is not callable. The factory form "
+                "requires a zero-argument function."
+            ),
+            code="target_factory_unsupported",
+            details={"attribute": attribute},
+        )
+    if inspect.iscoroutinefunction(value) or inspect.isasyncgenfunction(value):
+        raise TargetLoadError(
+            (
+                f"{module_path}:{attribute}() is async. AgentCheck does not run "
+                "async factories during discovery."
+            ),
+            code="target_factory_unsupported",
+            details={"attribute": attribute},
+        )
+    required = _factory_required_parameters(value)
+    if required:
+        names = ", ".join(required)
+        raise TargetLoadError(
+            (
+                f"{module_path}:{attribute}() requires arguments ({names}). "
+                "AgentCheck only calls zero-argument factories declared as "
+                "path.py:name()."
+            ),
+            code="target_factory_unsupported",
+            details={"attribute": attribute, "required_parameters": list(required)},
+        )
+    try:
+        result = value()
+    except TargetLoadError:
+        raise
+    except Exception as exc:
+        if _provider_required_during_import(exc):
+            raise TargetLoadError(
+                (
+                    "Factory execution failed because discovery required a "
+                    "provider credential. AgentCheck does not pass OPENAI_API_KEY "
+                    "unless it is listed in environment_allowlist. This is not a "
+                    "passing inspection."
+                ),
+                code="provider_required_during_import",
+                details={"attribute": attribute, "error_type": type(exc).__name__},
+            ) from exc
+        raise TargetLoadError(
+            f"factory {attribute}() failed: {exc}",
+            code="target_factory_failed",
+            details={"attribute": attribute, "error_type": type(exc).__name__},
+        ) from exc
+    if inspect.iscoroutine(result) or inspect.isasyncgen(result):
+        close = getattr(result, "close", None)
+        if callable(close):
+            close()
+        raise TargetLoadError(
+            (
+                f"{module_path}:{attribute}() returned an awaitable. AgentCheck "
+                "does not run async factories during discovery."
+            ),
+            code="target_factory_unsupported",
+            details={"attribute": attribute},
+        )
+    return result
+
+
+def _entrypoint_label(module_path: Path, root: Path, attribute: str, *, factory: bool) -> str:
+    try:
+        relative = module_path.relative_to(root.resolve()).as_posix()
+    except ValueError:
+        relative = module_path.name
+    suffix = "()" if factory else ""
+    return f"{relative}:{attribute}{suffix}"
+
+
 def _load_standalone_module(module_path: Path, root: Path) -> ModuleType:
     digest = hashlib.sha256(str(module_path).encode("utf-8")).hexdigest()[:16]
     module_name = f"_agentcheck_target_{digest}"
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
-        raise TargetLoadError(f"could not create an import spec for {module_path}")
+        raise TargetLoadError(
+            f"could not create an import spec for {module_path}",
+            code="target_import_failed",
+        )
     module = importlib.util.module_from_spec(spec)
     sys.modules[module_name] = module
     try:
@@ -306,7 +500,7 @@ def _load_standalone_module(module_path: Path, root: Path) -> ModuleType:
         raise
     except Exception as exc:
         sys.modules.pop(module_name, None)
-        raise TargetLoadError(f"failed to import {module_path}: {exc}") from exc
+        raise _import_failure(module_path, exc) from exc
     return module
 
 
@@ -319,16 +513,18 @@ def _load_package_module(module_path: Path, root: Path, relative: Path) -> Modul
     except TargetLoadError:
         raise
     except Exception as exc:
-        raise TargetLoadError(f"failed to import {module_path}: {exc}") from exc
+        raise _import_failure(module_path, exc) from exc
     origin = getattr(module, "__file__", None)
     if origin is None:
         raise TargetLoadError(
-            f"import {module_name!r} did not produce a source file for {module_path}"
+            f"import {module_name!r} did not produce a source file for {module_path}",
+            code="target_import_failed",
         )
     loaded = Path(origin).resolve()
     if loaded != module_path.resolve():
         raise TargetLoadError(
-            f"import {module_name!r} resolved to {loaded}, not the configured entrypoint"
+            f"import {module_name!r} resolved to {loaded}, not the configured entrypoint",
+            code="target_import_failed",
         )
     return module
 
@@ -345,11 +541,40 @@ def _load_module(module_path: Path, *, root: Path) -> ModuleType:
 def load_target(target: str | Path) -> tuple[Any, str]:
     """Import the configured object and return it with canonical provenance."""
 
-    module_path, attribute, root = _resolve_target(target)
+    module_path, attribute, root, factory = _resolve_target(target)
     module = _load_module(module_path, root=root)
     if not hasattr(module, attribute):
-        raise TargetLoadError(f"{module_path} does not export {attribute!r}")
+        raise TargetLoadError(
+            f"{module_path} does not export {attribute!r}",
+            code="target_attribute_missing",
+            details={"attribute": attribute},
+        )
     value = getattr(module, attribute)
+    if factory:
+        value = _invoke_factory(value, module_path=module_path, attribute=attribute)
+        return value, f"{module_path}:{attribute}()"
+    if inspect.isfunction(value) or inspect.ismethod(value):
+        label = _entrypoint_label(module_path, root, attribute, factory=True)
+        raise TargetLoadError(
+            (
+                f"{module_path} exports {attribute!r} as a function, not an agent "
+                "object. AgentCheck does not auto-call factory functions. To opt in, "
+                f"set entrypoint to {label!r}."
+            ),
+            code="target_factory_not_declared",
+            details={"attribute": attribute},
+        )
+    if inspect.isclass(value):
+        label = _entrypoint_label(module_path, root, attribute, factory=True)
+        raise TargetLoadError(
+            (
+                f"{module_path} exports {attribute!r} as a class, not an agent "
+                "instance. AgentCheck requires an Agent instance or an explicit "
+                f"factory entrypoint {label!r}."
+            ),
+            code="unsupported_agent_shape",
+            details={"attribute": attribute},
+        )
     return value, f"{module_path}:{attribute}"
 
 

@@ -68,6 +68,20 @@ def incompatible_built_in_suite_message(spec: AgentSpec, suite: str) -> str:
     )
 
 
+def empty_generation_message(spec: AgentSpec, suite: str) -> str:
+    required = ", ".join(sorted(required_tools_for_built_in_suite(suite)))
+    declared = ", ".join(sorted(declared_tool_names(spec))) or "(none)"
+    return (
+        "No compatible cases can be generated for this target. "
+        "Schema-boundary generation requires declared FunctionTool schemas, "
+        f"and this target declares: {declared}. "
+        f"Configured suite {suite!r} requires tools: {required}. "
+        "Point AgentCheck at an exported agent that declares FunctionTools, or "
+        "provide a compatible frozen suite. Absence of a compatible suite is "
+        "not a passing verdict."
+    )
+
+
 def _oracle(scenario_id: str, *, strength: OracleStrength) -> OracleProvenance:
     return OracleProvenance(
         oracle_id=f"{scenario_id}:oracle",

@@ -22,7 +22,7 @@ from agentcheck.domain import (
     SimulatedToolStatus,
     ToolFixture,
 )
-from agentcheck.inspect import enable_contained_target_imports, load_target
+from agentcheck.inspect import TargetLoadError, enable_contained_target_imports, load_target
 from agentcheck.privacy import redact_log_text
 
 from .orchestrator import WORKER_REQUEST_VERSION, WORKER_RESPONSE_VERSION
@@ -84,16 +84,47 @@ def _response(
     return value
 
 
+def _safe_details(details: dict[str, Any]) -> dict[str, Any]:
+    safe: dict[str, Any] = {}
+    for key, value in details.items():
+        if isinstance(value, str):
+            safe[str(key)] = redact_log_text(value)[:1_000]
+        elif isinstance(value, (int, float, bool)) or value is None:
+            safe[str(key)] = value
+        elif isinstance(value, list) and all(isinstance(item, str) for item in value):
+            safe[str(key)] = [redact_log_text(item)[:200] for item in value[:16]]
+        else:
+            safe[str(key)] = redact_log_text(str(value))[:1_000]
+    return safe
+
+
 def _safe_error(exc: BaseException, *, phase: str) -> InfrastructureError:
+    if isinstance(exc, TargetLoadError):
+        return InfrastructureError(
+            code=exc.code,
+            message=(redact_log_text(str(exc))[:4_000] or "AgentCheck could not load the target."),
+            phase=phase,
+            retryable=False,
+            details=_safe_details({**exc.details, "error_type": type(exc).__name__}),
+        )
     if isinstance(exc, ValidationError):
         message = f"Contract validation failed with {exc.error_count()} error(s)."
+        code = "worker_execution_failed"
     else:
         try:
             message = str(exc)
         except BaseException:  # pragma: no cover - defensive against hostile __str__
             message = "Exception text was unavailable."
+        code = "worker_execution_failed"
+        if isinstance(exc, TypeError) and "exact agents.Agent" in message:
+            code = "unsupported_agent_shape"
+            message = (
+                "The configured entrypoint did not resolve to an exact agents.Agent. "
+                "Module-level Agent instances are supported; factory functions require "
+                "the explicit path.py:attribute() form."
+            )
     return InfrastructureError(
-        code="worker_execution_failed",
+        code=code,
         message=(redact_log_text(message)[:4_000] or "AgentCheck worker failed."),
         phase=phase,
         retryable=False,

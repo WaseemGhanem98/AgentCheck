@@ -154,7 +154,7 @@ def test_target_import_failure_is_not_an_agent_failure(tmp_path: Path) -> None:
     assert result.ok is False
     assert result.value is None
     assert result.infrastructure_error is not None
-    assert result.infrastructure_error.code == "worker_execution_failed"
+    assert result.infrastructure_error.code == "target_import_failed"
     assert result.infrastructure_error.phase == "load"
     assert "sk-importsecret12345" not in result.infrastructure_error.message
     assert "dXNlcjpwYXNz" not in result.infrastructure_error.message

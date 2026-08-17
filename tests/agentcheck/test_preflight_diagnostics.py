@@ -264,14 +264,15 @@ def test_supported_target_with_no_matching_suite_keeps_empty_generate_error(
 ) -> None:
     target = _write_target(tmp_path, SUPPORTED_NO_TOOLS)
 
-    with pytest.raises(ScenarioValidationError, match="No valid scenarios remain"):
+    with pytest.raises(ScenarioValidationError, match="No compatible cases can be generated"):
         application.generate_suite(target)
     with pytest.raises(IncompatibleSuiteError, match="No compatible built-in suite"):
         application.execute_suite(target, persist_store=False)
 
     assert main(["generate", str(target)]) == 2
     generate_err = capsys.readouterr().err
-    assert "No valid scenarios remain after linting" in generate_err
+    assert "No compatible cases can be generated" in generate_err
+    assert "No valid scenarios remain after linting" not in generate_err
     assert "dynamic_instructions" not in generate_err
     assert "structured_output" not in generate_err
 

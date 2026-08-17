@@ -108,6 +108,20 @@ def _seed(value: str) -> int:
     return parsed
 
 
+def _add_python_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--python",
+        dest="python_executable",
+        metavar="PATH",
+        help=(
+            "Python interpreter for the isolated worker. Defaults to the "
+            "interpreter that invoked AgentCheck. A relative path must stay "
+            "inside the target (for example .venv/bin/python). AgentCheck does "
+            "not install packages automatically."
+        ),
+    )
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agentcheck",
@@ -129,7 +143,10 @@ def _parser() -> argparse.ArgumentParser:
     init_parser.add_argument(
         "--entrypoint",
         default=DEFAULT_ENTRYPOINT,
-        help="agent source and attribute inside the target, as 'relative/path.py:attribute'",
+        help=(
+            "agent source inside the target: 'relative/path.py:attribute' or "
+            "the explicit factory form 'relative/path.py:attribute()'"
+        ),
     )
     init_parser.add_argument(
         "--adapter",
@@ -148,8 +165,11 @@ def _parser() -> argparse.ArgumentParser:
         help="import a trusted local agent and inspect it without running a turn",
         description=(
             "Import the configured trusted local agent in a child process "
-            "(executing its module-level code), then inspect its metadata without "
-            "running an agent turn."
+            "(executing its module-level code, and calling an explicit factory "
+            "entrypoint when configured), then inspect its metadata without "
+            "running an agent turn. Inspection describes the exported object "
+            "after import; it does not prove the complete runtime application "
+            "has no later-attached capabilities."
         ),
     )
     inspect_parser.add_argument("target", nargs="?", default=".")
@@ -158,6 +178,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="emit the versioned AgentSpec as JSON",
     )
+    _add_python_option(inspect_parser)
 
     generate_parser = commands.add_parser(
         "generate",
@@ -229,6 +250,7 @@ def _parser() -> argparse.ArgumentParser:
             f"selection (default: keep every valid case; maximum {MAX_CASES})"
         ),
     )
+    _add_python_option(generate_parser)
 
     test_parser = commands.add_parser(
         "test",
@@ -261,6 +283,7 @@ def _parser() -> argparse.ArgumentParser:
             "valid case; excluded cases are recorded and never scored as passing"
         ),
     )
+    _add_python_option(test_parser)
 
     report_parser = commands.add_parser(
         "report",
@@ -315,6 +338,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip writing the local SQLite evaluation index",
     )
+    _add_python_option(replay_parser)
 
     shrink_parser = commands.add_parser(
         "shrink",
@@ -364,6 +388,7 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="skip writing the local SQLite evaluation index for verification",
     )
+    _add_python_option(shrink_parser)
 
     review_parser = commands.add_parser(
         "review",
@@ -595,6 +620,17 @@ def _print_inspection(
         print(f"Unknown properties: {len(spec.unknowns)}")
     _print_topology(topology)
     _print_preflight(preflight_issues)
+    print()
+    print("Inspection scope:")
+    print("- Describes the exported object after import, not the complete runtime application.")
+    print(
+        "- Tools, MCP servers, or other capabilities assigned later "
+        "(for example in run()) are not visible and are not proven absent."
+    )
+    print(
+        "- Import executes module-level Python in a child process with a "
+        "wall-clock timeout; this is process isolation, not a security sandbox."
+    )
 
 
 def _json_spec(spec: AgentSpec) -> str:
@@ -639,6 +675,7 @@ def _generate_command(
     policy_packs: list[str] | None,
     max_cases: int | None,
     realize: bool,
+    python_executable: str | None,
 ) -> int:
     if max_mutations is not None and not include_mutations:
         raise ConfigurationError("--max-mutations requires --mutations")
@@ -654,6 +691,7 @@ def _generate_command(
         policy_packs=policy_packs,
         max_cases=max_cases,
         realize=realize,
+        python_executable=python_executable,
     )
     _print_inspection(generation.spec)
     print()
@@ -685,11 +723,20 @@ def _generate_command(
     return 0
 
 
-def _inspect_command(target: str, *, as_json: bool) -> int:
+def _inspect_command(
+    target: str, *, as_json: bool, python_executable: str | None
+) -> int:
     if not as_json:
         print("Inspecting agent...")
         print()
-    _, _, result = inspect_target(target)
+    _, _, result = inspect_target(target, python_executable=python_executable)
+    if result.infrastructure_error is not None:
+        error = result.infrastructure_error
+        print(
+            f"AgentCheck error [{error.code}]: {error.message}",
+            file=sys.stderr,
+        )
+        return 2
     spec = result.require_value()
     if as_json:
         print(_json_spec(spec))
@@ -709,6 +756,7 @@ def _test_command(
     run_id: str | None,
     persist_store: bool,
     select: str | None,
+    python_executable: str | None,
 ) -> int:
     print("Inspecting agent...")
     print()
@@ -718,6 +766,7 @@ def _test_command(
         run_id=run_id,
         persist_store=persist_store,
         select=select,
+        python_executable=python_executable,
     )
     if not execution.scenarios:
         raise ScenarioValidationError(
@@ -806,6 +855,7 @@ def _replay_command(
     manifest: str,
     run_id: str | None,
     persist_store: bool,
+    python_executable: str | None,
 ) -> int:
     print("Loading replay manifest...")
     print()
@@ -814,6 +864,7 @@ def _replay_command(
         manifest,
         run_id=run_id,
         persist_store=persist_store,
+        python_executable=python_executable,
     )
     _print_inspection(execution.spec)
     print()
@@ -865,6 +916,7 @@ def _shrink_command(
     max_candidates: int | None,
     max_rounds: int | None,
     persist_store: bool,
+    python_executable: str | None,
 ) -> int:
     print("Loading replay manifest...")
     print()
@@ -876,6 +928,7 @@ def _shrink_command(
         max_candidates=max_candidates or DEFAULT_MAX_CANDIDATES,
         max_rounds=max_rounds or DEFAULT_MAX_ROUNDS,
         persist_store=persist_store,
+        python_executable=python_executable,
     )
     original = execution.result.original_complexity
     minimized = execution.result.minimized_complexity
@@ -1028,7 +1081,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 force=args.force,
             )
         if args.command == "inspect":
-            return _inspect_command(args.target, as_json=args.json)
+            return _inspect_command(
+                args.target,
+                as_json=args.json,
+                python_executable=args.python_executable,
+            )
         if args.command == "generate":
             return _generate_command(
                 args.target,
@@ -1040,6 +1097,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 policy_packs=args.policy_packs,
                 max_cases=args.max_cases,
                 realize=args.realize,
+                python_executable=args.python_executable,
             )
         if args.command == "test":
             return _test_command(
@@ -1048,6 +1106,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_id=args.run_id,
                 persist_store=not args.no_store,
                 select=args.select,
+                python_executable=args.python_executable,
             )
         if args.command == "report":
             return _report_command(
@@ -1062,6 +1121,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 manifest=args.manifest,
                 run_id=args.run_id,
                 persist_store=not args.no_store,
+                python_executable=args.python_executable,
             )
         if args.command == "shrink":
             return _shrink_command(
@@ -1072,6 +1132,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_candidates=args.max_candidates,
                 max_rounds=args.max_rounds,
                 persist_store=not args.no_store,
+                python_executable=args.python_executable,
             )
         if args.command == "review":
             return _review_command(

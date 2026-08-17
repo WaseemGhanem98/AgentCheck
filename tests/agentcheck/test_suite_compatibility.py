@@ -260,7 +260,7 @@ def test_supported_target_with_no_tools_still_refuses_empty_generate(
 
     with pytest.raises(IncompatibleSuiteError, match="No compatible built-in suite"):
         application.execute_suite(target, persist_store=False)
-    with pytest.raises(ScenarioValidationError, match="No valid scenarios remain"):
+    with pytest.raises(ScenarioValidationError, match="No compatible cases can be generated"):
         application.generate_suite(target)
 
     assert main(["test", str(target), "--no-store"]) == 2
@@ -270,5 +270,5 @@ def test_supported_target_with_no_tools_still_refuses_empty_generate(
 
     assert main(["generate", str(target)]) == 2
     generate_err = capsys.readouterr().err
-    assert "No valid scenarios remain after linting" in generate_err
-    assert "refusing to freeze" in generate_err
+    assert "No compatible cases can be generated" in generate_err
+    assert "No valid scenarios remain after linting" not in generate_err

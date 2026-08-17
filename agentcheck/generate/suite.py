@@ -56,7 +56,12 @@ from .selection import (
     lineage_coverage_tags,
     select_scenarios,
 )
-from .templates import build_account_support_suite, spec_matches_built_in_suite
+from .templates import (
+    build_account_support_suite,
+    declared_tool_names,
+    empty_generation_message,
+    spec_matches_built_in_suite,
+)
 
 
 FROZEN_SUITE_CONTRACT_VERSION: Literal["agentcheck.frozen_suite.v1"] = (
@@ -527,6 +532,10 @@ def build_frozen_suite(
         cases = applied_cases
 
     if not cases:
+        if not declared_tool_names(spec) and not spec_matches_built_in_suite(
+            spec, config.suite
+        ):
+            raise ScenarioValidationError(empty_generation_message(spec, config.suite))
         raise ScenarioValidationError(
             "No valid scenarios remain after linting; refusing to freeze a suite "
             "that cannot produce a verdict."

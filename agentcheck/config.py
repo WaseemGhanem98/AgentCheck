@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -13,10 +14,24 @@ from .errors import ConfigurationError
 
 CONFIG_FILENAME = "agentcheck.json"
 DEFAULT_ENTRYPOINT = "agent.py:agent"
-_ENTRYPOINT_RE = re.compile(r"^(?P<path>[^:]+\.py):(?P<attribute>[A-Za-z_][A-Za-z0-9_]*)$")
+_ENTRYPOINT_RE = re.compile(
+    r"^(?P<path>[^:]+\.py):(?P<attribute>[A-Za-z_][A-Za-z0-9_]*)(?P<factory>\(\))?$"
+)
 _SAFE_ENVIRONMENT = ("LANG", "LC_ALL", "TZ", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR")
 _MAX_REALIZATION_CALLS = 32
 _MAX_REALIZATION_RETRIES = 2
+_ENTRYPOINT_FORM = (
+    "entrypoint must use the form 'relative/path.py:attribute' "
+    "or the explicit factory form 'relative/path.py:attribute()'"
+)
+
+
+class ParsedEntrypoint(NamedTuple):
+    """Explicit configured object or zero-argument factory inside the target."""
+
+    path: str
+    attribute: str
+    factory: bool
 
 
 class LlmRealizationConfig(BaseModel):
@@ -50,13 +65,13 @@ class AgentCheckConfig(BaseModel):
     store_path: str | None = None
     max_cases: int | None = Field(default=None, ge=1, le=256)
     llm_realization: LlmRealizationConfig | None = None
+    python_executable: str | None = None
 
     @field_validator("entrypoint")
     @classmethod
     def validate_entrypoint(cls, value: str) -> str:
         normalized = value.strip()
-        if _ENTRYPOINT_RE.fullmatch(normalized) is None:
-            raise ValueError("entrypoint must use the form 'relative/path.py:attribute'")
+        parse_entrypoint(normalized)
         return normalized
 
     @field_validator("environment_allowlist")
@@ -123,6 +138,23 @@ class AgentCheckConfig(BaseModel):
             raise ValueError("store_path must be a safe relative path")
         return path.as_posix()
 
+    @field_validator("python_executable")
+    @classmethod
+    def validate_python_executable(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        text = value.strip()
+        if not text:
+            raise ValueError("python_executable must not be empty")
+        if "\x00" in text:
+            raise ValueError("python_executable must not contain NUL")
+        path = Path(text)
+        if path.is_absolute():
+            return text
+        if any(part in {"", ".", ".."} for part in path.parts):
+            raise ValueError("python_executable relative path must be a safe relative path")
+        return path.as_posix()
+
 
 def normalize_target(target: str | os.PathLike[str]) -> Path:
     path = Path(target).expanduser().resolve()
@@ -175,6 +207,19 @@ def contained_path(root: Path, relative: str) -> Path:
     return resolved
 
 
+def parse_entrypoint(value: str) -> ParsedEntrypoint:
+    """Parse an explicit attribute or zero-argument factory entrypoint."""
+
+    match = _ENTRYPOINT_RE.fullmatch(value.strip())
+    if match is None:
+        raise ValueError(_ENTRYPOINT_FORM)
+    return ParsedEntrypoint(
+        path=match.group("path"),
+        attribute=match.group("attribute"),
+        factory=match.group("factory") == "()",
+    )
+
+
 def entrypoint_location(root: Path, entrypoint: str) -> tuple[Path, str]:
     """Resolve a contained entrypoint without requiring the source to exist.
 
@@ -182,16 +227,17 @@ def entrypoint_location(root: Path, entrypoint: str) -> tuple[Path, str]:
     or even require on disk yet; existence is the caller's separate concern.
     """
 
-    match = _ENTRYPOINT_RE.fullmatch(entrypoint)
-    if match is None:  # already validated; retained for direct callers
-        raise ConfigurationError("entrypoint must use the form 'relative/path.py:attribute'")
+    try:
+        parsed = parse_entrypoint(entrypoint)
+    except ValueError as exc:
+        raise ConfigurationError(str(exc)) from exc
     resolved_root = root.resolve()
-    source = (resolved_root / match.group("path")).resolve()
+    source = (resolved_root / parsed.path).resolve()
     try:
         source.relative_to(resolved_root)
     except ValueError as exc:
         raise ConfigurationError("entrypoint must remain inside the target directory") from exc
-    return source, match.group("attribute")
+    return source, parsed.attribute
 
 
 def resolve_entrypoint(root: Path, entrypoint: str) -> tuple[Path, str]:
@@ -214,3 +260,64 @@ def child_environment(config: AgentCheckConfig) -> dict[str, str]:
         }
     )
     return environment
+
+
+def apply_python_executable(
+    config: AgentCheckConfig, python_executable: str | None
+) -> AgentCheckConfig:
+    """Return config with an optional CLI interpreter override applied."""
+
+    if python_executable is None:
+        return config
+    text = python_executable.strip()
+    if not text:
+        raise ConfigurationError("python_executable must not be empty")
+    try:
+        return config.model_copy(update={"python_executable": text})
+    except ValueError as exc:
+        raise ConfigurationError(f"invalid python_executable: {exc}") from exc
+
+
+def resolve_python_executable(root: Path, config: AgentCheckConfig) -> Path:
+    """Resolve the worker interpreter without inheriting host PYTHONPATH.
+
+    ``None`` uses the interpreter that invoked AgentCheck, preserving a venv
+    wrapper executable (do not follow it to the system Python). A relative
+    path must be lexically inside the target (typically ``.venv/bin/python``).
+    A venv interpreter may symlink outside the target; that is an explicit
+    trust decision, not automatic host site-packages inheritance. Absolute
+    paths are also explicit opt-in. The returned path is the file that will
+    be executed, not a flattened symlink target.
+    """
+
+    configured = config.python_executable
+    if configured is None:
+        return Path(sys.executable)
+    raw = Path(configured)
+    if raw.is_absolute():
+        candidate = raw.expanduser()
+        _require_interpreter_file(candidate)
+        return candidate
+    if any(part in {"", ".", ".."} for part in raw.parts):
+        raise ConfigurationError(
+            "python_executable relative path must be a safe relative path"
+        )
+    resolved_root = root.resolve()
+    declared = resolved_root / raw
+    try:
+        declared.relative_to(resolved_root)
+    except ValueError as exc:
+        raise ConfigurationError(
+            "python_executable must remain inside the target directory"
+        ) from exc
+    _require_interpreter_file(declared)
+    return declared
+
+
+def _require_interpreter_file(path: Path) -> None:
+    if not path.is_file():
+        raise ConfigurationError(
+            f"python_executable is not an existing interpreter file: {path}"
+        )
+    if os.name == "posix" and not os.access(path, os.X_OK):
+        raise ConfigurationError(f"python_executable is not executable: {path}")

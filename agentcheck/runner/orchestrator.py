@@ -25,13 +25,19 @@ from agentcheck.adapters.base import (
     decode_preflight_report,
     decode_topology,
 )
-from agentcheck.config import AgentCheckConfig, child_environment, resolve_entrypoint
+from agentcheck.config import (
+    AgentCheckConfig,
+    child_environment,
+    resolve_entrypoint,
+    resolve_python_executable,
+)
 from agentcheck.domain import (
     AgentSpec,
     CanonicalRun,
     InfrastructureError,
     Scenario,
 )
+from agentcheck.errors import ConfigurationError
 from agentcheck.privacy import redact_log_text
 
 
@@ -132,6 +138,77 @@ def _read_response(path: Path) -> dict[str, Any] | None:
     except (OSError, json.JSONDecodeError, UnicodeError):
         return None
     return raw if isinstance(raw, dict) else None
+
+
+def _probe_worker_python(executable: Path) -> None:
+    """Fail closed if the selected interpreter cannot host an AgentCheck worker."""
+
+    probe_config = AgentCheckConfig()
+    environment = child_environment(probe_config)
+    environment["PYTHONPATH"] = str(_PACKAGE_ROOT)
+    try:
+        completed = subprocess.run(
+            [
+                str(executable),
+                "-c",
+                (
+                    "import sys, agentcheck, pydantic, agents\n"
+                    "print('%d.%d.%d' % sys.version_info[:3])"
+                ),
+            ],
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+            check=False,
+        )
+    except OSError as exc:
+        raise ConfigurationError(
+            f"python_executable could not be started: {exc}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ConfigurationError(
+            "python_executable probe exceeded the 10s timeout"
+        ) from exc
+    if completed.returncode != 0:
+        stderr = redact_log_text(
+            completed.stderr.decode("utf-8", errors="replace")[:2_000]
+        )
+        raise ConfigurationError(
+            "The selected python_executable could not import AgentCheck and its "
+            "runtime dependencies (pydantic, openai-agents). Install AgentCheck "
+            "into that environment (`python -m pip install -e '.[agentcheck]'`) "
+            "or run AgentCheck from an environment that already contains the "
+            "target's dependencies. AgentCheck does not install packages "
+            "automatically. "
+            f"{stderr}".strip()
+        )
+    version_text = completed.stdout.decode("utf-8", errors="replace").strip().splitlines()
+    version_line = version_text[-1] if version_text else ""
+    parts = version_line.split(".")
+    try:
+        version = tuple(int(part) for part in parts[:3])
+    except ValueError:
+        version = ()
+    if len(version) < 2 or version < (3, 10):
+        raise ConfigurationError(
+            "python_executable must be Python 3.10 or newer "
+            f"(observed {version_line or 'unknown'})"
+        )
+
+
+def _worker_command(root: Path, config: AgentCheckConfig) -> list[str]:
+    executable = resolve_python_executable(root, config)
+    # Compare the invoked wrapper paths, not symlink targets. Two venvs may
+    # share a base interpreter binary but have different site-packages.
+    if os.path.normpath(str(executable)) != os.path.normpath(sys.executable):
+        _probe_worker_python(executable)
+    return [
+        str(executable),
+        "-m",
+        "agentcheck.runner.worker",
+    ]
 
 
 def _worker_environment(config: AgentCheckConfig) -> dict[str, str]:
@@ -263,9 +340,7 @@ def _execute_worker(
         try:
             process = subprocess.Popen(
                 [
-                    sys.executable,
-                    "-m",
-                    "agentcheck.runner.worker",
+                    *_worker_command(root, config),
                     str(request_path),
                     str(response_path),
                 ],

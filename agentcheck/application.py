@@ -14,7 +14,12 @@ from typing import Callable, Sequence
 from agentcheck.analyze import analyze_failures
 from agentcheck.adapters import UnsupportedTargetError
 from agentcheck.artifacts import ArtifactStore, new_run_id
-from agentcheck.config import AgentCheckConfig, contained_path, load_config
+from agentcheck.config import (
+    AgentCheckConfig,
+    apply_python_executable,
+    contained_path,
+    load_config,
+)
 from agentcheck.domain import (
     AgentSpec,
     CanonicalRun,
@@ -166,8 +171,10 @@ def inspect_target(
     target: str | Path,
     *,
     timeout_seconds: float = 30.0,
+    python_executable: str | None = None,
 ) -> tuple[Path, AgentCheckConfig, ProcessResult[AgentSpec]]:
     root, config = load_config(target)
+    config = apply_python_executable(config, python_executable)
     inspection = inspect_in_subprocess(
         root,
         config,
@@ -221,10 +228,12 @@ def generate_suite(
     realize: bool = False,
     realizer: object | None = None,
     timeout_seconds: float = 30.0,
+    python_executable: str | None = None,
 ) -> SuiteGeneration:
     """Inspect a target, freeze its deterministic suite, and persist a reviewable file."""
 
     root, config = load_config(target)
+    config = apply_python_executable(config, python_executable)
     actual_seed = _effective_seed(config, seed)
     destination = resolve_suite_destination(root, config, out)
     if not force and (destination.exists() or destination.is_symlink()):
@@ -300,10 +309,12 @@ def execute_suite(
     progress: ProgressCallback | None = None,
     persist_store: bool = True,
     select: str | None = None,
+    python_executable: str | None = None,
 ) -> SuiteExecution:
     """Execute the configured suite and persist an immutable report."""
 
     root, config = load_config(target)
+    config = apply_python_executable(config, python_executable)
     if select not in (None, "coverage"):
         raise ConfigurationError(
             "select must be omitted or set to 'coverage'"
@@ -422,10 +433,12 @@ def replay_suite(
     run_id: str | None = None,
     persist_store: bool = True,
     progress: ProgressCallback | None = None,
+    python_executable: str | None = None,
 ) -> SuiteExecution:
     """Re-execute a replay manifest through the existing isolated runtime."""
 
     root, config = load_config(target)
+    config = apply_python_executable(config, python_executable)
     # Untrusted manifest is parsed before the target is imported.
     manifest = load_replay_manifest(root, manifest_path)
     suite_run_id = run_id or new_run_id()
@@ -488,6 +501,7 @@ def shrink_suite(
     max_candidates: int = DEFAULT_MAX_CANDIDATES,
     max_rounds: int = DEFAULT_MAX_ROUNDS,
     persist_store: bool = True,
+    python_executable: str | None = None,
 ) -> ShrinkExecution:
     """Minimize a failing replay case without weakening oracles or bindings."""
 
@@ -501,6 +515,7 @@ def shrink_suite(
         )
 
     root, config = load_config(target)
+    config = apply_python_executable(config, python_executable)
     source_manifest = load_replay_manifest(root, manifest_path)
     source_resolved = contained_path(root, manifest_path)
     suite_run_id = run_id or new_run_id()

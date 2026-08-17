@@ -99,6 +99,19 @@ def test_custom_adapter_and_entrypoint_are_persisted(tmp_path: Path) -> None:
     )
 
 
+def test_factory_entrypoint_form_is_persisted_without_importing(tmp_path: Path) -> None:
+    root = _target(tmp_path, with_agent=False)
+    (root / "agent.py").write_text("def create_agent():\n    raise RuntimeError('no')\n")
+
+    config_path = write_initial_config(root, entrypoint="agent.py:create_agent()")
+
+    _, loaded = load_config(root)
+    assert loaded.entrypoint == "agent.py:create_agent()"
+    assert json.loads(config_path.read_text(encoding="utf-8"))["entrypoint"] == (
+        "agent.py:create_agent()"
+    )
+
+
 @POSIX_ONLY
 def test_written_config_uses_owner_only_permissions(tmp_path: Path) -> None:
     root = _target(tmp_path)
@@ -163,6 +176,7 @@ def test_forced_rewrite_leaves_no_temporary_file(tmp_path: Path) -> None:
         "agent.py",
         "agent.py:2bad",
         "agent.py:agent:extra",
+        "agent.py:create_agent(config)",
         "",
     ],
 )

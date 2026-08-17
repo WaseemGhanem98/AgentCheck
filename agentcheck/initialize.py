@@ -18,6 +18,10 @@ from .errors import ConfigurationError
 
 
 DEFAULT_ADAPTER = "openai_agents"
+_ENTRYPOINT_FORM = (
+    "entrypoint must use the form 'relative/path.py:attribute' "
+    "or the explicit factory form 'relative/path.py:attribute()'"
+)
 SUPPORTED_ADAPTERS: tuple[str, ...] = get_args(
     AgentCheckConfig.model_fields["adapter"].annotation
 )
@@ -51,7 +55,7 @@ def _validated_config(adapter: str, entrypoint: str) -> AgentCheckConfig:
         return AgentCheckConfig.model_validate(document)
     except ValueError as exc:
         raise ConfigurationError(
-            "entrypoint must use the form 'relative/path.py:attribute'"
+            _ENTRYPOINT_FORM
         ) from exc
 
 
