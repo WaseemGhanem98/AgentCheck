@@ -94,6 +94,33 @@ agent = Agent(
 )
 """
 
+SUPPORTED_CALLBACK_HANDOFF_AGENT = """
+import random
+from agents import Agent, handoff
+
+
+async def on_seat_booking_handoff(context):
+    flight_number = f"FLT-{random.randint(100, 999)}"
+    context.context.flight_number = flight_number
+
+
+faq = Agent(name="FAQ", instructions="Answer FAQ questions.", model="gpt-4.1-mini")
+seat = Agent(name="Seat Booking", instructions="Book seats.", model="gpt-4.1-mini")
+agent = Agent(
+    name="Triage",
+    instructions="Route the request.",
+    handoffs=[
+        faq,
+        handoff(
+            seat,
+            on_handoff=on_seat_booking_handoff,
+            tool_name_override="transfer_to_seat_booking_agent",
+        ),
+    ],
+    model="gpt-4.1-mini",
+)
+"""
+
 CALLBACK_HANDOFF_AGENT = """
 from agents import Agent, handoff
 
@@ -178,6 +205,16 @@ def test_inspect_lists_structured_output_handoffs_and_unsupported_tool_type(
     callback_out = capsys.readouterr().out
     assert "Handoff topology (2 reachable agents):" in callback_out
     assert "- handoff_callback (agent.handoffs[0].on_handoff):" in callback_out
+
+    supported_callback = _write_target(
+        tmp_path, SUPPORTED_CALLBACK_HANDOFF_AGENT, name="supported-callback"
+    )
+    assert main(["inspect", str(supported_callback)]) == 0
+    supported_out = capsys.readouterr().out
+    assert "Handoff topology (3 reachable agents):" in supported_out
+    assert "Preflight: supported" in supported_out
+    assert "handoff_callback" not in supported_out
+    assert "context assignment: flight_number='FLT-100'" in supported_out
 
     hosted = _write_target(tmp_path, UNSUPPORTED_TOOL_TYPE, name="hosted")
     assert main(["inspect", str(hosted)]) == 0

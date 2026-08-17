@@ -569,6 +569,14 @@ def _print_topology(topology: Mapping[str, Any] | None) -> None:
             codes = edge.get("issue_codes") or []
             edge_suffix = f" [unsupported: {', '.join(codes)}]" if codes else ""
             print(f"  -> {edge.get('tool_name')} to {target_name}{edge_suffix}")
+            assignments = edge.get("context_assignments") or []
+            for item in assignments:
+                if not isinstance(item, dict):
+                    continue
+                field = item.get("field")
+                if not isinstance(field, str) or not field:
+                    continue
+                print(f"     context assignment: {field}={item.get('value')!r}")
 
 
 def _print_inspection(

@@ -117,7 +117,13 @@ def decode_topology(payload: Any) -> dict[str, Any]:
         for edge in handoffs:
             if not isinstance(edge, dict):
                 raise ValueError("topology handoffs must be objects")
-            if set(edge) - {"tool_name", "target_agent", "location", "issue_codes"}:
+            if set(edge) - {
+                "tool_name",
+                "target_agent",
+                "location",
+                "issue_codes",
+                "context_assignments",
+            }:
                 raise ValueError("topology handoff has unknown fields")
             if not isinstance(edge.get("location"), str) or not edge["location"]:
                 raise ValueError("topology handoff requires a location")
@@ -134,6 +140,26 @@ def decode_topology(payload: Any) -> dict[str, Any]:
                 not isinstance(code, str) for code in issue_codes
             ):
                 raise ValueError("topology handoff issue_codes must be strings")
+            assignments = edge.get("context_assignments")
+            if assignments is not None:
+                if not isinstance(assignments, list):
+                    raise ValueError(
+                        "topology handoff context_assignments must be a list"
+                    )
+                for item in assignments:
+                    if not isinstance(item, dict) or set(item) != {"field", "value"}:
+                        raise ValueError(
+                            "topology context_assignments must be field/value objects"
+                        )
+                    if not isinstance(item.get("field"), str) or not item["field"]:
+                        raise ValueError(
+                            "topology context assignment requires a field name"
+                        )
+                    value = item.get("value")
+                    if value is not None and type(value) not in (bool, int, str):
+                        raise ValueError(
+                            "topology context assignment value must be a JSON scalar"
+                        )
     return payload
 
 

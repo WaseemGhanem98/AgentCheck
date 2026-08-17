@@ -73,6 +73,13 @@ from .base import (
     SupportIssue,
     ToolGatewayProtocol,
 )
+from .openai_handoff_effects import (
+    AgentCheckRunContext,
+    ContextAssignment,
+    analyze_on_handoff_callback,
+    apply_context_assignments,
+    encode_context_assignments,
+)
 
 _SDK_IMPORT_ERROR: ImportError | None = None
 try:
@@ -172,6 +179,7 @@ class _HandoffEdge:
     input_json_schema: dict[str, Any] | None
     strict_json_schema: bool
     issues: tuple[SupportIssue, ...]
+    context_assignments: tuple[ContextAssignment, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -201,12 +209,13 @@ def _unrecognized_handoff(location: str, reason: str) -> SupportIssue:
 
 def _resolve_factory_destination(
     entry: Any, location: str
-) -> tuple[Any | None, list[SupportIssue]]:
+) -> tuple[Any | None, list[SupportIssue], tuple[ContextAssignment, ...]]:
     """Prove a factory-built handoff's static destination without executing it.
 
     The closure is introspected, never called: ``inspect.getclosurevars`` reads
     cell contents only, and the ``_agent_ref`` weakref dereference runs no target
     code.  Any shape mismatch fails closed as ``unrecognized_handoff``.
+    ``on_handoff`` is analyzed statically; the original callable is never invoked.
     """
 
     invoker = entry.on_invoke_handoff
@@ -219,7 +228,7 @@ def _resolve_factory_destination(
             _unrecognized_handoff(
                 location, "The handoff invocation closure is not the SDK factory shape."
             )
-        ]
+        ], ()
     wrapper = invoker.func
     if (
         getattr(wrapper, "__module__", None) != _HANDOFF_FACTORY_MODULE
@@ -229,7 +238,7 @@ def _resolve_factory_destination(
             _unrecognized_handoff(
                 location, "The handoff invocation wrapper is not the SDK factory wrapper."
             )
-        ]
+        ], ()
     inner = invoker.args[0]
     if (
         getattr(inner, "__module__", None) != _HANDOFF_FACTORY_MODULE
@@ -240,32 +249,30 @@ def _resolve_factory_destination(
             _unrecognized_handoff(
                 location, "The handoff routing closure is not the SDK factory closure."
             )
-        ]
+        ], ()
     try:
         nonlocals = inspect.getclosurevars(inner).nonlocals
     except (TypeError, ValueError):
         return None, [
             _unrecognized_handoff(location, "The handoff routing closure cannot be inspected.")
-        ]
+        ], ()
     if not _HANDOFF_CLOSURE_KEYS.issubset(nonlocals):
         return None, [
             _unrecognized_handoff(
                 location, "The handoff routing closure is missing expected factory state."
             )
-        ]
+        ], ()
 
     issues: list[SupportIssue] = []
+    assignments: tuple[ContextAssignment, ...] = ()
     if nonlocals["on_handoff"] is not None:
-        issues.append(
-            SupportIssue(
-                code="handoff_callback",
-                message=(
-                    "The handoff declares an on_handoff callback; AgentCheck never "
-                    "executes target callbacks, so this handoff is rejected."
-                ),
-                location=f"{location}.on_handoff",
-            )
+        analysis = analyze_on_handoff_callback(
+            nonlocals["on_handoff"], location=f"{location}.on_handoff"
         )
+        if analysis.issue is not None:
+            issues.append(analysis.issue)
+        else:
+            assignments = analysis.assignments
     if nonlocals["input_type"] is not None or nonlocals["type_adapter"] is not None:
         issues.append(
             SupportIssue(
@@ -290,7 +297,7 @@ def _resolve_factory_destination(
                 ),
                 location=location,
             ),
-        ]
+        ], ()
     reference = entry._agent_ref
     referenced = reference() if reference is not None else None
     if referenced is not destination:
@@ -299,15 +306,15 @@ def _resolve_factory_destination(
             _unrecognized_handoff(
                 location, "The handoff agent reference does not match its routing closure."
             ),
-        ]
+        ], ()
     if isinstance(entry.agent_name, str) and entry.agent_name != destination.name:
         return None, [
             *issues,
             _unrecognized_handoff(
                 location, "The handoff agent_name does not match its destination agent."
             ),
-        ]
-    return destination, issues
+        ], ()
+    return destination, issues, assignments
 
 
 def _analyze_handoff_entry(entry: Any, from_agent: Any, location: str) -> _HandoffEdge:
@@ -398,7 +405,9 @@ def _analyze_handoff_entry(entry: Any, from_agent: Any, location: str) -> _Hando
         schema.get("properties") or schema.get("required")
     )
 
-    destination, closure_issues = _resolve_factory_destination(entry, location)
+    destination, closure_issues, context_assignments = _resolve_factory_destination(
+        entry, location
+    )
     issues.extend(closure_issues)
     if schema_declares_payload and not any(
         issue.code == "handoff_input_schema" for issue in issues
@@ -428,6 +437,7 @@ def _analyze_handoff_entry(entry: Any, from_agent: Any, location: str) -> _Hando
         input_json_schema=dict(schema) if isinstance(schema, Mapping) else None,
         strict_json_schema=bool(entry.strict_json_schema),
         issues=tuple(issues),
+        context_assignments=context_assignments,
     )
 
 
@@ -724,6 +734,7 @@ class _Capture:
         ignored: bool,
         call_id: str | None = None,
         source_event_id: str | None = None,
+        context_assignments: Sequence[ContextAssignment] = (),
     ) -> CanonicalEvent:
         source_event_ids: tuple[str, ...] = ()
         if source_event_id is not None:
@@ -742,16 +753,22 @@ class _Capture:
             ]
             if matches:
                 call_id = matches[0].call_id
+        payload: dict[str, Any] = {
+            "handoff_tool_name": tool_name,
+            "from_agent": from_agent,
+            "to_agent": to_agent,
+            "arguments": arguments,
+            "call_id": call_id,
+            "ignored": ignored,
+        }
+        if context_assignments:
+            payload["callback_effect"] = "context_assignment"
+            payload["context_assignments"] = encode_context_assignments(
+                context_assignments
+            )
         return await self.event(
             CanonicalEventType.HANDOFF,
-            {
-                "handoff_tool_name": tool_name,
-                "from_agent": from_agent,
-                "to_agent": to_agent,
-                "arguments": arguments,
-                "call_id": call_id,
-                "ignored": ignored,
-            },
+            payload,
             source_event_ids=source_event_ids,
         )
 
@@ -1233,15 +1250,19 @@ def _make_safe_handoff_invoker(
     to_agent_name: str,
     destination: Any,
     capture_holder: dict[str, _Capture | None],
+    context_assignments: tuple[ContextAssignment, ...] = (),
 ) -> Any:
     """Route to the safe destination clone; no original handoff code is reachable."""
 
     async def invoke(context: Any, input_json: str | None = None) -> Any:
-        del context
         capture = capture_holder.get("capture")
         if capture is None:
             raise RuntimeError(
                 "prepared AgentCheck target was invoked outside adapter.run()"
+            )
+        if context_assignments:
+            apply_context_assignments(
+                getattr(context, "context", None), context_assignments
             )
         arguments: dict[str, Any] = {}
         if input_json:
@@ -1257,6 +1278,7 @@ def _make_safe_handoff_invoker(
             to_agent=to_agent_name,
             arguments=arguments,
             ignored=False,
+            context_assignments=context_assignments,
         )
         return destination
 
@@ -2292,18 +2314,21 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         for agent, location in zip(graph.agents, graph.locations):
             handoffs_payload: list[dict[str, Any]] = []
             for edge in edges_by_agent.get(id(agent), []):
-                handoffs_payload.append(
-                    {
-                        "tool_name": edge.tool_name,
-                        "target_agent": (
-                            edge.destination.name
-                            if edge.destination is not None
-                            else None
-                        ),
-                        "location": edge.location,
-                        "issue_codes": sorted({issue.code for issue in edge.issues}),
-                    }
-                )
+                edge_payload: dict[str, Any] = {
+                    "tool_name": edge.tool_name,
+                    "target_agent": (
+                        edge.destination.name
+                        if edge.destination is not None
+                        else None
+                    ),
+                    "location": edge.location,
+                    "issue_codes": sorted({issue.code for issue in edge.issues}),
+                }
+                if edge.context_assignments:
+                    edge_payload["context_assignments"] = encode_context_assignments(
+                        edge.context_assignments
+                    )
+                handoffs_payload.append(edge_payload)
             agents_payload.append(
                 {
                     "name": agent.name,
@@ -2411,10 +2436,15 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
 
         # Pass two: wire AgentCheck-owned handoffs between clones.  Original
         # Handoff objects, their routing closures, and any user callbacks are
-        # left behind on the source graph and are never invoked.
+        # left behind on the source graph and are never invoked.  Proven
+        # on_handoff effects become declarative assignments on an
+        # AgentCheck-owned context bag.
         handoff_tool_names: list[str] = []
         handoff_tools_by_agent: dict[str, list[str]] = {}
         handoff_targets: dict[tuple[str, str], str] = {}
+        run_context: AgentCheckRunContext | None = None
+        if any(edge.context_assignments for edge in graph.edges):
+            run_context = AgentCheckRunContext()
         for edge in graph.edges:
             if edge.destination is None or edge.tool_name is None:
                 raise AdapterRuntimeError(
@@ -2435,6 +2465,7 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
                     to_agent_name=edge.destination.name,
                     destination=destination_clone,
                     capture_holder=capture_holder,
+                    context_assignments=edge.context_assignments,
                 ),
                 agent_name=edge.destination.name,
                 input_filter=None,
@@ -2469,6 +2500,7 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
                     for name, names in handoff_tools_by_agent.items()
                 },
                 "handoff_targets": handoff_targets,
+                "run_context": run_context,
                 "consumed": False,
             },
         )
@@ -2513,20 +2545,26 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         termination_reason: str | None = None
         final_output: str | None = None
         try:
-            result = await Runner.run(
-                prepared.runtime_agent,
-                runner_input,
-                max_turns=max_turns,
-                hooks=_CapturingHooks(
+            run_kwargs: dict[str, Any] = {
+                "max_turns": max_turns,
+                "hooks": _CapturingHooks(
                     capture, getattr(prepared.gateway, "budgets", None)
                 ),
-                run_config=RunConfig(
+                "run_config": RunConfig(
                     tracing_disabled=True,
                     trace_include_sensitive_data=False,
                     tool_execution=ToolExecutionConfig(max_function_tool_concurrency=1),
                     tool_not_found_behavior="raise_error",
                     tool_name_collision_policy="error",
                 ),
+            }
+            run_context = prepared.metadata.get("run_context")
+            if run_context is not None:
+                run_kwargs["context"] = run_context
+            result = await Runner.run(
+                prepared.runtime_agent,
+                runner_input,
+                **run_kwargs,
             )
             value = result.final_output
             if value is not None:

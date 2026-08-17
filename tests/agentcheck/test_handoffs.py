@@ -539,6 +539,7 @@ def test_topology_is_described_for_handoff_targets_only() -> None:
     assert triage_edges[0]["tool_name"] == "transfer_to_billing_agent"
     assert triage_edges[0]["target_agent"] == "Billing Agent"
     assert triage_edges[0]["issue_codes"] == []
+    assert "context_assignments" not in triage_edges[0]
     with pytest.raises(ValueError):
         decode_topology({"framework": "openai_agents", "agents": [{"name": "x"}]})
 
