@@ -745,7 +745,7 @@ def test_target_extractor_directory_entrypoint_cannot_escape(tmp_path: Any) -> N
         encoding="utf-8",
     )
 
-    with pytest.raises(TargetLoadError, match="inside the target directory"):
+    with pytest.raises(TargetLoadError, match="target directory"):
         resolve_entrypoint(target)
-    with pytest.raises(TargetLoadError, match="inside the target directory"):
+    with pytest.raises(TargetLoadError, match="target directory"):
         load_target(target)

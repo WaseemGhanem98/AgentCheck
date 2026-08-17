@@ -12,6 +12,9 @@ from .base import (
     SupportIssue,
     ToolGatewayProtocol,
     UnsupportedTargetError,
+    decode_preflight_report,
+    encode_preflight_report,
+    format_support_issues,
 )
 from .openai_agents import OpenAIAgentsAdapter
 
@@ -28,4 +31,7 @@ __all__ = [
     "SupportIssue",
     "ToolGatewayProtocol",
     "UnsupportedTargetError",
+    "decode_preflight_report",
+    "encode_preflight_report",
+    "format_support_issues",
 ]

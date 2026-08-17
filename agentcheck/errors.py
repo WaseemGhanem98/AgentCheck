@@ -17,6 +17,10 @@ class UnsupportedTargetError(AdapterError):
     """The target uses behavior outside the fail-closed Phase 1 support surface."""
 
 
+class IncompatibleSuiteError(AgentCheckError):
+    """The configured built-in suite does not match the inspected target."""
+
+
 class ScenarioValidationError(AgentCheckError):
     """A scenario is invalid and must not affect the agent's score."""
 

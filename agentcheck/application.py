@@ -7,11 +7,12 @@ import os
 import sys
 from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Sequence
 
 from agentcheck.analyze import analyze_failures
+from agentcheck.adapters import UnsupportedTargetError
 from agentcheck.artifacts import ArtifactStore, new_run_id
 from agentcheck.config import AgentCheckConfig, contained_path, load_config
 from agentcheck.domain import (
@@ -25,7 +26,11 @@ from agentcheck.domain import (
 )
 from agentcheck import __version__
 from agentcheck.evaluate import evaluate_run, infrastructure_evaluation
-from agentcheck.errors import ConfigurationError, ScenarioValidationError
+from agentcheck.errors import (
+    ConfigurationError,
+    IncompatibleSuiteError,
+    ScenarioValidationError,
+)
 from agentcheck.generate import lint_scenario, lint_suite
 from agentcheck.generate.realization import (
     REALIZATION_CREDENTIAL_ENV,
@@ -45,6 +50,10 @@ from agentcheck.generate.suite import (
     configured_frozen_suite,
     resolve_suite_destination,
     write_frozen_suite,
+)
+from agentcheck.generate.templates import (
+    incompatible_built_in_suite_message,
+    spec_matches_built_in_suite,
 )
 from agentcheck.policies import (
     apply_policy_packs_to_many,
@@ -166,14 +175,9 @@ def inspect_target(
     )
     if inspection.value is not None:
         packs = resolve_policy_packs(root, config)
-        inspection = ProcessResult(
+        inspection = replace(
+            inspection,
             value=attach_declared_policies(inspection.value, packs),
-            infrastructure_error=None,
-            stdout=inspection.stdout,
-            stderr=inspection.stderr,
-            returncode=inspection.returncode,
-            timed_out=inspection.timed_out,
-            worker_pid=inspection.worker_pid,
         )
     return (
         root,
@@ -191,6 +195,13 @@ def _effective_seed(config: AgentCheckConfig, seed: int | None) -> int:
     if actual_seed < 0 or actual_seed > 2**63 - 1:
         raise ValueError("seed must be between 0 and 2^63 - 1")
     return actual_seed
+
+
+def _require_supported_spec(inspection: ProcessResult[AgentSpec]) -> AgentSpec:
+    spec = inspection.require_value()
+    if inspection.preflight_issues:
+        raise UnsupportedTargetError(list(inspection.preflight_issues))
+    return spec
 
 
 def _suite(config: AgentCheckConfig, seed: int | None) -> tuple[Scenario, ...]:
@@ -223,7 +234,7 @@ def generate_suite(
         )
     inspection = inspect_in_subprocess(root, config, timeout_seconds=timeout_seconds)
     packs = resolve_policy_packs(root, config, policy_packs)
-    spec = attach_declared_policies(inspection.require_value(), packs)
+    spec = attach_declared_policies(_require_supported_spec(inspection), packs)
     active_realizer: object | None = None
     if realize:
         require_realization_consent(config, realize=True)
@@ -305,10 +316,17 @@ def execute_suite(
     revision = _git_revision(root)
     inspection = inspect_in_subprocess(root, config)
     packs = resolve_policy_packs(root, config)
-    spec = attach_declared_policies(inspection.require_value(), packs)
+    spec = attach_declared_policies(_require_supported_spec(inspection), packs)
 
     frozen: FrozenSuite | None = None
     if configured is None:
+        # The built-in suite is a domain-specific tool contract, not a generic
+        # fallback. Linting it against an unrelated agent would drop every case
+        # as nonexistent_tool and look like an empty suite rather than a mismatch.
+        if not spec_matches_built_in_suite(spec, config.suite):
+            raise IncompatibleSuiteError(
+                incompatible_built_in_suite_message(spec, config.suite)
+            )
         effective_seed = _effective_seed(config, seed)
         candidates = apply_policy_packs_to_many(
             _suite(config, seed), packs, declared=True

@@ -10,6 +10,7 @@ from collections import Counter
 from typing import Sequence
 
 from agentcheck import __version__
+from agentcheck.adapters.base import SupportIssue
 from agentcheck.application import (
     execute_suite,
     generate_suite,
@@ -163,8 +164,9 @@ def _parser() -> argparse.ArgumentParser:
         help="derive, lint, and freeze a deterministic suite for a trusted local agent",
         description=(
             "Import the configured trusted local agent in a child process "
-            "(executing its module-level code), derive the supported built-in and "
-            "schema-boundary cases, lint them, and write a frozen suite. Workflow "
+            "(executing its module-level code), derive compatible built-in cases "
+            "when the spec satisfies the configured suite, add schema-boundary "
+            "cases, lint them, and write a frozen suite. Workflow "
             "mutations are off by default. Coverage selection is off unless "
             "--max-cases is passed. The written file is inert data, not a "
             "replay manifest, and is not a security sandbox."
@@ -231,6 +233,13 @@ def _parser() -> argparse.ArgumentParser:
     test_parser = commands.add_parser(
         "test",
         help="run the deterministic Phase 1 suite in isolated child processes",
+        description=(
+            "Inspect the target, fail closed on unsupported preflight codes, then "
+            "run a compatible frozen suite or the matching built-in suite. "
+            "account_support_v1 is used only when the spec declares that suite's "
+            "required tools. A supported target with no compatible suite is not "
+            "PASS; run generate or provide a frozen suite."
+        ),
     )
     test_parser.add_argument("target", nargs="?", default=".")
     test_parser.add_argument("--seed", type=_seed, help="override the configured suite seed")
@@ -504,7 +513,23 @@ def _capability_line(extracted: ExtractedCapability) -> str:
     )
 
 
-def _print_inspection(spec: AgentSpec) -> None:
+def _print_preflight(issues: Sequence[SupportIssue]) -> None:
+    print()
+    if not issues:
+        print("Preflight: supported")
+        return
+    print("Preflight: unsupported")
+    print("The following conditions block generate and test:")
+    for issue in issues:
+        location = f" ({issue.location})" if issue.location else ""
+        print(f"- {issue.code}{location}: {issue.message}")
+
+
+def _print_inspection(
+    spec: AgentSpec,
+    *,
+    preflight_issues: Sequence[SupportIssue] = (),
+) -> None:
     tools = [item.value for item in spec.tools.items]
     capabilities = [item.value for item in spec.capabilities.items]
     state_changing = sum(item.state_changing for item in tools)
@@ -546,6 +571,7 @@ def _print_inspection(spec: AgentSpec) -> None:
     if spec.unknowns:
         print()
         print(f"Unknown properties: {len(spec.unknowns)}")
+    _print_preflight(preflight_issues)
 
 
 def _json_spec(spec: AgentSpec) -> str:
@@ -645,7 +671,7 @@ def _inspect_command(target: str, *, as_json: bool) -> int:
     if as_json:
         print(_json_spec(spec))
     else:
-        _print_inspection(spec)
+        _print_inspection(spec, preflight_issues=result.preflight_issues)
     return 0
 
 

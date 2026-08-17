@@ -162,6 +162,7 @@ def test_offline_cli_initializes_a_target_before_inspecting_it(tmp_path: Path) -
         "- delete_account: delete, state-changing, destructive (confidence 0.70); "
         "1 required, 0 optional argument(s)" in inspection.stdout
     )
+    assert "Preflight: supported" in inspection.stdout
 
 
 def test_offline_cli_runs_complete_phase1_flow_with_intercepted_tools(

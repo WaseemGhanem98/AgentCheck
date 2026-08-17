@@ -20,6 +20,7 @@ from typing import IO, Any, Generic, TypeVar, cast
 
 from pydantic import ValidationError
 
+from agentcheck.adapters.base import SupportIssue, decode_preflight_report
 from agentcheck.config import AgentCheckConfig, child_environment, resolve_entrypoint
 from agentcheck.domain import (
     AgentSpec,
@@ -57,6 +58,7 @@ class ProcessResult(Generic[ResultT]):
     returncode: int | None = None
     timed_out: bool = False
     worker_pid: int | None = None
+    preflight_issues: tuple[SupportIssue, ...] = ()
 
     def __post_init__(self) -> None:
         if (self.value is None) == (self.infrastructure_error is None):
@@ -452,12 +454,16 @@ def _execute_worker(
             )
 
         result = response.get("result")
+        preflight_issues: tuple[SupportIssue, ...] = ()
         try:
             encoded_result = json.dumps(
                 result, ensure_ascii=False, allow_nan=False, sort_keys=True
             )
             if operation == "inspect":
                 value: Any = AgentSpec.model_validate_json(encoded_result)
+                if "preflight" not in response:
+                    raise ValueError("inspect response requires a preflight report")
+                preflight_issues = decode_preflight_report(response["preflight"]).issues
             elif operation == "run":
                 value = CanonicalRun.model_validate_json(encoded_result)
             else:  # pragma: no cover - internal caller invariant
@@ -517,6 +523,7 @@ def _execute_worker(
             returncode=returncode,
             timed_out=False,
             worker_pid=worker_pid,
+            preflight_issues=preflight_issues,
         )
 
 

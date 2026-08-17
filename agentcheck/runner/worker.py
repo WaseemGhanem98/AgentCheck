@@ -12,7 +12,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from agentcheck.adapters import OpenAIAgentsAdapter
+from agentcheck.adapters import OpenAIAgentsAdapter, encode_preflight_report
 from agentcheck.config import AgentCheckConfig, resolve_entrypoint
 from agentcheck.domain import (
     FaultType,
@@ -22,7 +22,7 @@ from agentcheck.domain import (
     SimulatedToolStatus,
     ToolFixture,
 )
-from agentcheck.inspect import load_target
+from agentcheck.inspect import enable_contained_target_imports, load_target
 from agentcheck.privacy import redact_log_text
 
 from .orchestrator import WORKER_REQUEST_VERSION, WORKER_RESPONSE_VERSION
@@ -62,6 +62,7 @@ def _response(
     operation: str | None = None,
     result: Any = None,
     error: InfrastructureError | None = None,
+    preflight: Any | None = None,
 ) -> dict[str, Any]:
     value: dict[str, Any] = {
         "contract_version": WORKER_RESPONSE_VERSION,
@@ -75,6 +76,8 @@ def _response(
         value["result"] = result
     if error is not None:
         value["error"] = error.model_dump(mode="json")
+    if preflight is not None:
+        value["preflight"] = preflight
     return value
 
 
@@ -112,14 +115,12 @@ def _load_agent(root: Path, config: AgentCheckConfig) -> tuple[Any, str]:
         config.adapter != "openai_agents"
     ):  # pragma: no cover - config currently narrows this
         raise ValueError(f"unsupported adapter {config.adapter!r}")
-    source_path, attribute = resolve_entrypoint(root, config.entrypoint)
+    resolve_entrypoint(root, config.entrypoint)
     # The parent starts this module from AgentCheck's package root, so target
-    # code cannot shadow the worker during Python startup. Add the target only
-    # after all AgentCheck imports, preserving its normal sibling/lazy imports.
-    source_directory = str(source_path.parent)
-    if source_directory not in sys.path:
-        sys.path.insert(0, source_directory)
-    return load_target(f"{source_path}:{attribute}")
+    # code cannot shadow the worker during Python startup. Add only the
+    # configured target root after AgentCheck imports are complete.
+    enable_contained_target_imports(root)
+    return load_target(root)
 
 
 def _fault_fixtures(scenario: Scenario) -> tuple[ToolFixture, ...]:
@@ -173,9 +174,11 @@ def _controlled_fixtures(scenario: Scenario) -> tuple[ToolFixture, ...]:
     return (*baseline, *faults)
 
 
-def _inspect(root: Path, config: AgentCheckConfig) -> Any:
+def _inspect(root: Path, config: AgentCheckConfig) -> tuple[Any, dict[str, Any]]:
     target, source = _load_agent(root, config)
-    return OpenAIAgentsAdapter().inspect(target, source=source)
+    adapter = OpenAIAgentsAdapter()
+    spec = adapter.inspect(target, source=source)
+    return spec, encode_preflight_report(adapter.preflight(target))
 
 
 def _run(root: Path, config: AgentCheckConfig, scenario: Scenario, run_id: str) -> Any:
@@ -234,8 +237,9 @@ def execute_request(request_path: Path, response_path: Path) -> int:
             response_path,
             _response(status="running", phase=phase, operation=operation),
         )
+        preflight: Any | None = None
         if operation == "inspect":
-            result = _inspect(root, config)
+            result, preflight = _inspect(root, config)
         else:
             phase = "scenario"
             scenario = Scenario.model_validate_json(
@@ -263,6 +267,7 @@ def execute_request(request_path: Path, response_path: Path) -> int:
                 phase="complete",
                 operation=operation,
                 result=result.model_dump(mode="json"),
+                preflight=preflight,
             ),
         )
         return 0

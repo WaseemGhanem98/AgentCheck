@@ -56,7 +56,7 @@ from .selection import (
     lineage_coverage_tags,
     select_scenarios,
 )
-from .templates import build_account_support_suite
+from .templates import build_account_support_suite, spec_matches_built_in_suite
 
 
 FROZEN_SUITE_CONTRACT_VERSION: Literal["agentcheck.frozen_suite.v1"] = (
@@ -398,10 +398,12 @@ def build_frozen_suite(
         raise ValueError("max_mutations requires include_mutations=True")
     budget = config.max_cases if max_cases is None else max_cases
 
-    candidates: list[tuple[Scenario, CaseLineage]] = [
-        (scenario, CaseLineage(origin=CaseOrigin.BUILT_IN))
-        for scenario in built_in_suite(config, seed)
-    ]
+    candidates: list[tuple[Scenario, CaseLineage]] = []
+    if spec_matches_built_in_suite(spec, config.suite):
+        candidates.extend(
+            (scenario, CaseLineage(origin=CaseOrigin.BUILT_IN))
+            for scenario in built_in_suite(config, seed)
+        )
     boundary_tools: set[str] = set()
     for boundary, scenario in build_boundary_cases(spec, seed=seed):
         boundary_tools.add(boundary.tool_name)
@@ -709,5 +711,6 @@ __all__ = [
     "encode_frozen_suite",
     "load_frozen_suite",
     "resolve_suite_destination",
+    "spec_matches_built_in_suite",
     "write_frozen_suite",
 ]

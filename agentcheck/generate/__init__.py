@@ -57,9 +57,19 @@ from .suite import (
     resolve_suite_destination,
     write_frozen_suite,
 )
-from .templates import build_account_support_suite
+from .templates import (
+    ACCOUNT_SUPPORT_SUITE,
+    ACCOUNT_TOOLS,
+    build_account_support_suite,
+    declared_tool_names,
+    incompatible_built_in_suite_message,
+    required_tools_for_built_in_suite,
+    spec_matches_built_in_suite,
+)
 
 __all__ = [
+    "ACCOUNT_SUPPORT_SUITE",
+    "ACCOUNT_TOOLS",
     "DEFAULT_MAX_MUTATIONS",
     "DEFAULT_SUITE_FILENAME",
     "DEFERRED_MUTATION_REASONS",
@@ -95,18 +105,22 @@ __all__ = [
     "built_in_suite",
     "complete_chat",
     "configured_frozen_suite",
+    "declared_tool_names",
     "default_suite_path",
     "derive_boundaries",
     "encode_frozen_suite",
+    "incompatible_built_in_suite_message",
     "inherited_hard_failure_oracles",
     "lint_scenario",
     "lint_suite",
     "load_frozen_suite",
     "mutate_scenario",
     "require_realization_consent",
+    "required_tools_for_built_in_suite",
     "resolve_suite_destination",
     "select_scenarios",
     "select_units",
+    "spec_matches_built_in_suite",
     "unsupported_boundary_reasons",
     "unsupported_mutation_reasons",
     "write_frozen_suite",

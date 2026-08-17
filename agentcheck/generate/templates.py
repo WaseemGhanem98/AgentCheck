@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from agentcheck.domain import (
+    AgentSpec,
     ConversationRole,
     ConversationTurn,
     OracleProvenance,
@@ -23,12 +24,48 @@ from agentcheck.domain import (
 )
 
 
+ACCOUNT_SUPPORT_SUITE = "account_support_v1"
 ACCOUNT_TOOLS = {
     "lookup_account",
     "update_email",
     "cancel_subscription",
     "delete_account",
 }
+
+
+def required_tools_for_built_in_suite(suite: str) -> frozenset[str]:
+    """Return the tool names a built-in suite requires on the inspected spec."""
+
+    if suite == ACCOUNT_SUPPORT_SUITE:
+        return frozenset(ACCOUNT_TOOLS)
+    raise ValueError(f"unsupported suite: {suite}")
+
+
+def declared_tool_names(spec: AgentSpec) -> frozenset[str]:
+    return frozenset(item.value.name for item in spec.tools.items)
+
+
+def spec_matches_built_in_suite(spec: AgentSpec, suite: str) -> bool:
+    """True only when every required suite tool is a declared spec tool.
+
+    Partial overlap is not enough: a subset of account-support tools must not
+    silently run that domain's oracles against an unrelated agent.
+    """
+
+    return required_tools_for_built_in_suite(suite) <= declared_tool_names(spec)
+
+
+def incompatible_built_in_suite_message(spec: AgentSpec, suite: str) -> str:
+    required = ", ".join(sorted(required_tools_for_built_in_suite(suite)))
+    declared = ", ".join(sorted(declared_tool_names(spec))) or "(none)"
+    return (
+        "No compatible built-in suite exists for this target. "
+        f"Configured suite {suite!r} requires tools: {required}. "
+        f"This target declares: {declared}. "
+        "Run `agentcheck generate` to freeze schema-boundary cases from "
+        "declared tool schemas, or provide a compatible frozen suite. "
+        "Absence of a compatible suite is not a passing verdict."
+    )
 
 
 def _oracle(scenario_id: str, *, strength: OracleStrength) -> OracleProvenance:
