@@ -25,6 +25,7 @@ from agentcheck.domain import (
 from agentcheck.inspect import TargetLoadError, enable_contained_target_imports, load_target
 from agentcheck.privacy import redact_log_text
 
+from .network_guard import install_network_guard
 from .orchestrator import WORKER_REQUEST_VERSION, WORKER_RESPONSE_VERSION
 from .tool_gateway import ToolGateway
 from .world import WorldSimulator
@@ -267,6 +268,9 @@ def execute_request(request_path: Path, response_path: Path) -> int:
         if not root.is_dir():
             raise ValueError("worker target root must be an existing directory")
         config = AgentCheckConfig.model_validate(request.get("config"))
+        # Deny egress before any target module is imported, so import-time
+        # network calls are contained too, not only calls made during a run.
+        install_network_guard(allow_network=config.allow_network)
         previous_cwd = Path.cwd()
         os.chdir(root)
         # Restore cwd so an in-process execute_request call cannot leak the

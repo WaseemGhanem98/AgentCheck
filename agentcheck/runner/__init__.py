@@ -1,6 +1,7 @@
 """Execution primitives for isolated AgentCheck cases."""
 
 from .budgets import BudgetExceeded, BudgetTracker, BudgetUsage
+from .network_guard import NetworkAccessDenied, install_network_guard
 from .orchestrator import (
     ProcessResult,
     WorkerProcessError,
@@ -24,6 +25,7 @@ __all__ = [
     "BudgetUsage",
     "FixtureDefinitionError",
     "FixtureNotFoundError",
+    "NetworkAccessDenied",
     "ProcessResult",
     "ToolCallBlockedError",
     "ToolGateway",
@@ -35,5 +37,6 @@ __all__ = [
     "WorldStateError",
     "WorldTransition",
     "inspect_in_subprocess",
+    "install_network_guard",
     "run_scenario_in_subprocess",
 ]

@@ -58,6 +58,10 @@ class AgentCheckConfig(BaseModel):
     seed: int = Field(default=1729, ge=0, le=2**63 - 1)
     max_concurrency: int = Field(default=2, ge=1, le=16)
     environment_allowlist: tuple[str, ...] = ()
+    # Deny-by-default egress. Stripping credentials is not a boundary: a target
+    # that configures its own provider base_url (Ollama, vLLM, a staging host)
+    # otherwise reaches it for real during evaluation.
+    allow_network: bool = False
     include_instructions_in_report: bool = False
     artifacts_directory: str = ".agentcheck"
     suite_path: str | None = None
