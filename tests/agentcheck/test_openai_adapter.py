@@ -437,22 +437,94 @@ def test_unsupported_tool_fails_preflight_before_model_execution() -> None:
     assert model.calls == 0
 
 
-def test_structured_output_fails_closed_before_model_execution() -> None:
+def test_statically_typed_structured_output_passes_preflight_with_derived_schema() -> None:
     class StructuredAnswer(BaseModel):
         answer: str
 
-    model = ScriptedModel([[_message("must not run")]])
     agent = Agent(
         name="Structured",
         instructions="Answer.",
         output_type=StructuredAnswer,
+        model=ScriptedModel([[_message("must not run")]]),
+    )
+
+    report = OpenAIAgentsAdapter().preflight(agent)
+
+    assert report.supported is True
+    assert "structured_output" not in {issue.code for issue in report.issues}
+
+    spec = OpenAIAgentsAdapter().inspect(agent)
+    schema = spec.interface.output_schema
+    assert schema.authoritative is True
+    assert schema.value is not None
+    assert schema.value["properties"]["answer"]["type"] == "string"
+    # Schema derivation is pure type introspection: re-deriving it is byte-identical.
+    assert OpenAIAgentsAdapter().inspect(agent).interface.output_schema.value == schema.value
+
+
+def test_ambiguous_structured_output_type_fails_closed() -> None:
+    class OpaqueResult:
+        """Not a BaseModel/dataclass/TypedDict: pydantic cannot derive a schema."""
+
+        def __init__(self, value: Any) -> None:
+            self.value = value
+
+    model = ScriptedModel([[_message("must not run")]])
+    agent = Agent(
+        name="Opaque",
+        instructions="Answer.",
+        output_type=OpaqueResult,
         model=model,
     )
 
     report = OpenAIAgentsAdapter().preflight(agent)
 
     assert report.supported is False
-    assert "structured_output" in {issue.code for issue in report.issues}
+    issues = {issue.code: issue for issue in report.issues}
+    assert "structured_output" in issues
+    assert "output schema could not be extracted" in issues["structured_output"].message
+    with pytest.raises(UnsupportedTargetError):
+        OpenAIAgentsAdapter().prepare(agent, RecordingGateway())
+    assert model.calls == 0
+
+
+def test_custom_output_schema_fails_closed_and_its_methods_are_never_called() -> None:
+    class TripwireOutputSchema(AgentOutputSchemaBase):
+        """A custom AgentOutputSchemaBase: every method is target-defined code.
+
+        Every method raises so this test also proves AgentCheck never calls any
+        of them merely to discover or validate a schema.
+        """
+
+        def is_plain_text(self) -> bool:
+            raise AssertionError("is_plain_text must not be called during preflight")
+
+        def name(self) -> str:
+            raise AssertionError("name must not be called during preflight")
+
+        def json_schema(self) -> dict[str, Any]:
+            raise AssertionError("json_schema must not be called during preflight")
+
+        def is_strict_json_schema(self) -> bool:
+            raise AssertionError("is_strict_json_schema must not be called during preflight")
+
+        def validate_json(self, json_str: str) -> Any:
+            raise AssertionError("validate_json must not be called during preflight")
+
+    model = ScriptedModel([[_message("must not run")]])
+    agent = Agent(
+        name="Structured",
+        instructions="Answer.",
+        output_type=TripwireOutputSchema(),
+        model=model,
+    )
+
+    report = OpenAIAgentsAdapter().preflight(agent)
+
+    assert report.supported is False
+    issues = {issue.code: issue for issue in report.issues}
+    assert "structured_output" in issues
+    assert "AgentOutputSchemaBase" in issues["structured_output"].message
     with pytest.raises(UnsupportedTargetError):
         OpenAIAgentsAdapter().prepare(agent, RecordingGateway())
     assert model.calls == 0

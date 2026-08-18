@@ -565,14 +565,28 @@ def _unknown_property(value: Any, *, locator: str, summary: str) -> AgentPropert
 
 
 def _output_schema(agent: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """Derive a JSON Schema for ``agent.output_type`` by pure type introspection.
+
+    A custom ``AgentOutputSchemaBase`` instance is deliberately never asked for
+    its schema: ``json_schema()``/``validate_json()`` are free-form target-defined
+    methods, not declarative type annotations, so calling them would execute
+    arbitrary target code merely to discover an output schema. Every other
+    ``output_type`` (a plain class, dataclass, TypedDict, or generic alias) is
+    resolved with ``pydantic.TypeAdapter``, the same declarative mechanism the
+    SDK's own default ``AgentOutputSchema`` uses internally.
+    """
+
     output_type = agent.output_type
     if output_type is None:
         return None, None
+    if isinstance(output_type, AgentOutputSchemaBase):
+        return None, (
+            "output_type is a custom AgentOutputSchemaBase instance; its "
+            "json_schema()/validate_json() methods are target-defined code, not "
+            "a statically provable schema"
+        )
     try:
-        if isinstance(output_type, AgentOutputSchemaBase):
-            schema = output_type.json_schema()
-        else:
-            schema = TypeAdapter(output_type).json_schema()
+        schema = TypeAdapter(output_type).json_schema()
         return _json_object(schema), None
     except Exception as exc:
         return None, f"output schema could not be extracted: {type(exc).__name__}"
@@ -1532,13 +1546,19 @@ def _agent_preflight_issues(
             )
         )
     if agent.output_type is not None:
-        issues.append(
-            SupportIssue(
-                code="structured_output",
-                message="Phase 1 supports text output only; structured output types are unsupported.",
-                location=f"{location}.output_type",
+        _, output_schema_error = _output_schema(agent)
+        if output_schema_error is not None:
+            issues.append(
+                SupportIssue(
+                    code="structured_output",
+                    message=(
+                        "Structured output is supported only when its JSON schema "
+                        "can be statically derived without executing target code: "
+                        f"{output_schema_error}"
+                    ),
+                    location=f"{location}.output_type",
+                )
             )
-        )
     if agent.mcp_servers:
         issues.append(
             SupportIssue(

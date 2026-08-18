@@ -38,7 +38,7 @@ agent = Agent(
 )
 """
 
-STRUCTURED_OUTPUT = """
+SUPPORTED_STRUCTURED_OUTPUT = """
 from pydantic import BaseModel
 from agents import Agent
 
@@ -51,6 +51,64 @@ agent = Agent(
     name="Planner",
     instructions="Plan the work.",
     output_type=Plan,
+    model="gpt-4.1-mini",
+)
+"""
+
+SUPPORTED_STRUCTURED_OUTPUT_WITH_TOOL = """
+from pydantic import BaseModel
+from agents import Agent, function_tool
+
+
+class EmailDraft(BaseModel):
+    to: str
+    subject: str
+    body: str
+
+
+@function_tool
+def lookup_recipient(name: str) -> str:
+    return "user@example.com"
+
+
+agent = Agent(
+    name="Email Drafter",
+    instructions="Draft an email.",
+    tools=[lookup_recipient],
+    output_type=EmailDraft,
+    model="gpt-4.1-mini",
+)
+"""
+
+CUSTOM_STRUCTURED_OUTPUT = """
+from typing import Any
+from agents import Agent
+from agents.agent_output import AgentOutputSchemaBase
+
+
+class CustomOutputSchema(AgentOutputSchemaBase):
+    def is_plain_text(self) -> bool:
+        return False
+
+    def name(self) -> str:
+        return "CustomOutputSchema"
+
+    def json_schema(self) -> dict[str, Any]:
+        return {"type": "object", "properties": {"steps": {"type": "array"}}}
+
+    def is_strict_json_schema(self) -> bool:
+        return False
+
+    def validate_json(self, json_str: str) -> Any:
+        import json as _json
+
+        return _json.loads(json_str)
+
+
+agent = Agent(
+    name="Planner",
+    instructions="Plan the work.",
+    output_type=CustomOutputSchema(),
     model="gpt-4.1-mini",
 )
 """
@@ -187,7 +245,7 @@ def test_inspect_lists_dynamic_instructions_and_keeps_exit_zero(
 def test_inspect_lists_structured_output_handoffs_and_unsupported_tool_type(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    structured = _write_target(tmp_path, STRUCTURED_OUTPUT, name="structured")
+    structured = _write_target(tmp_path, CUSTOM_STRUCTURED_OUTPUT, name="structured")
     assert main(["inspect", str(structured)]) == 0
     structured_out = capsys.readouterr().out
     assert "Preflight: unsupported" in structured_out
@@ -261,7 +319,7 @@ def test_generate_and_test_surface_dynamic_instructions_not_empty_suite(
 def test_generate_and_test_surface_structured_output_not_empty_suite(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    target = _write_target(tmp_path, STRUCTURED_OUTPUT)
+    target = _write_target(tmp_path, CUSTOM_STRUCTURED_OUTPUT)
 
     with pytest.raises(UnsupportedTargetError, match="structured_output"):
         application.generate_suite(target)
@@ -278,6 +336,59 @@ def test_generate_and_test_surface_structured_output_not_empty_suite(
     assert "structured_output" in test_err
     assert "No valid scenarios remain after linting" not in test_err
     assert "No compatible built-in suite" not in test_err
+
+
+def test_inspect_supported_structured_output_agent_reports_preflight_supported(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = _write_target(tmp_path, SUPPORTED_STRUCTURED_OUTPUT)
+
+    assert main(["inspect", str(target)]) == 0
+    output = capsys.readouterr().out
+    assert "Preflight: supported" in output
+    assert "structured_output" not in output
+
+    assert main(["inspect", str(target), "--json"]) == 0
+    payload = capsys.readouterr().out
+    spec = AgentSpec.model_validate_json(payload)
+    assert spec.interface.output_schema.value == {
+        "type": "object",
+        "properties": {
+            "steps": {"type": "array", "items": {"type": "string"}, "title": "Steps"}
+        },
+        "required": ["steps"],
+        "title": "Plan",
+    }
+
+
+def test_supported_structured_output_agent_with_no_tools_has_no_matching_suite(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = _write_target(tmp_path, SUPPORTED_STRUCTURED_OUTPUT)
+
+    with pytest.raises(ScenarioValidationError, match="No compatible cases can be generated"):
+        application.generate_suite(target)
+
+    assert main(["generate", str(target)]) == 2
+    generate_err = capsys.readouterr().err
+    assert "No compatible cases can be generated" in generate_err
+    assert "structured_output" not in generate_err
+
+
+def test_supported_structured_output_agent_with_tool_can_generate_schema_boundaries(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    target = _write_target(tmp_path, SUPPORTED_STRUCTURED_OUTPUT_WITH_TOOL)
+
+    assert main(["generate", str(target), "--force"]) == 0
+    output = capsys.readouterr().out
+    assert "Preflight: supported" in output
+    assert "Frozen suite written." in output
+    suite = json.loads((target / DEFAULT_SUITE_FILENAME).read_text(encoding="utf-8"))
+    assert len(suite["cases"]) >= 1
+    assert any(
+        case["lineage"]["origin"] == "schema_boundary" for case in suite["cases"]
+    )
 
 
 def test_supported_function_tool_agent_can_generate_schema_boundaries(
