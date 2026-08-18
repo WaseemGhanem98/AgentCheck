@@ -31,6 +31,8 @@ from agentcheck.domain import (
     JsonValue,
     OracleProvenance,
     OracleStrength,
+    OutputCriterion,
+    OutputCriterionKind,
     ResourceBudgets,
     Scenario,
     SimulatedToolOutcome,
@@ -587,6 +589,89 @@ def _boundary_scenario(boundary: SchemaBoundary, *, seed: int) -> Scenario:
         ),
         resource_budgets=ResourceBudgets(max_model_turns=4, max_tool_calls=4),
         generation_seed=seed,
+    )
+
+
+def build_output_schema_cases(spec: AgentSpec, *, seed: int) -> tuple[Scenario, ...]:
+    """Assert the declared structured output contract for a statically typed agent.
+
+    An agent can declare an authoritative ``output_type`` and expose no
+    ``FunctionTool`` at all -- the real ``email-agent-workflow`` triage agent is
+    exactly that shape. Tool-boundary generation has nothing to derive from
+    there, which previously left such a target inspectable but with no
+    compatible suite.
+
+    The declared output JSON Schema is itself an authoritative contract, so
+    "the final output must validate against it" is a deterministic, offline
+    assertion -- the existing ``json_schema`` output criterion, evaluated by the
+    offline validator. No model writes the case, nothing is sampled, and the
+    schema is the one PR #12 already proved statically recoverable. A schema
+    that is absent, non-authoritative, empty, or unsafe to validate yields no
+    case rather than a weaker one.
+    """
+
+    if seed < 0 or seed > 2**63 - 1:
+        raise ValueError("seed must be between 0 and 2^63 - 1")
+    declared = spec.interface.output_schema
+    schema = declared.value
+    if not declared.authoritative or not isinstance(schema, Mapping) or not schema:
+        return ()
+    try:
+        # Refuse rather than emit a case whose oracle could not run offline.
+        offline_validator(dict(schema))
+    except Exception:
+        return ()
+
+    scenario_id = "output-schema-conformance"
+    oracle_id = f"{scenario_id}:oracle"
+    evidence_ids = tuple(item.evidence_id for item in declared.evidence) or (
+        "declared-output-schema",
+    )
+    return (
+        Scenario(
+            scenario_id=scenario_id,
+            title="final output must satisfy the declared output schema",
+            description=(
+                "The agent declares a structured output type, so any final output "
+                "that does not validate against that schema breaks its own "
+                "declared contract."
+            ),
+            conversation_turns=(
+                ConversationTurn(
+                    turn_id="turn-1",
+                    role=ConversationRole.USER,
+                    content=(
+                        "Handle this request and return your response using your "
+                        "declared structured output format."
+                    ),
+                ),
+            ),
+            output_criteria=(
+                OutputCriterion(
+                    criterion_id=f"{scenario_id}:schema",
+                    kind=OutputCriterionKind.JSON_SCHEMA,
+                    description=(
+                        "The final output must validate against the declared "
+                        "output schema."
+                    ),
+                    parameters={"schema": dict(schema)},
+                    oracle_ids=(oracle_id,),
+                ),
+            ),
+            dimension_tags=("source:output_schema", "schema:output_conformance"),
+            oracle_provenance=(
+                OracleProvenance(
+                    oracle_id=oracle_id,
+                    strength=OracleStrength.TOOL_CONTRACT,
+                    source=f"declared output schema at {declared.source.locator}",
+                    confidence=1.0,
+                    evidence_ids=evidence_ids,
+                    supports_hard_failure=True,
+                ),
+            ),
+            resource_budgets=ResourceBudgets(max_model_turns=4, max_tool_calls=4),
+            generation_seed=seed,
+        ),
     )
 
 

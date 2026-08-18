@@ -361,18 +361,34 @@ def test_inspect_supported_structured_output_agent_reports_preflight_supported(
     }
 
 
-def test_supported_structured_output_agent_with_no_tools_has_no_matching_suite(
+def test_supported_structured_output_agent_with_no_tools_generates_output_schema_case(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    """A tool-less structured-output agent is now covered by its own contract.
+
+    This previously produced "No compatible cases can be generated": boundary
+    generation had no FunctionTool to derive from. The declared output schema is
+    itself an authoritative contract, so conformance to it is a deterministic
+    offline assertion.
+    """
+
     target = _write_target(tmp_path, SUPPORTED_STRUCTURED_OUTPUT)
 
-    with pytest.raises(ScenarioValidationError, match="No compatible cases can be generated"):
-        application.generate_suite(target)
+    assert main(["generate", str(target), "--force"]) == 0
+    output = capsys.readouterr().out
+    assert "Preflight: supported" in output
+    assert "Frozen suite written." in output
 
-    assert main(["generate", str(target)]) == 2
-    generate_err = capsys.readouterr().err
-    assert "No compatible cases can be generated" in generate_err
-    assert "structured_output" not in generate_err
+    suite = json.loads((target / DEFAULT_SUITE_FILENAME).read_text(encoding="utf-8"))
+    origins = {case["lineage"]["origin"] for case in suite["cases"]}
+    assert "output_schema" in origins
+
+    case = next(
+        item for item in suite["cases"] if item["lineage"]["origin"] == "output_schema"
+    )
+    criterion = case["scenario"]["output_criteria"][0]
+    assert criterion["kind"] == "json_schema"
+    assert criterion["parameters"]["schema"]["title"] == "Plan"
 
 
 def test_supported_structured_output_agent_with_tool_can_generate_schema_boundaries(

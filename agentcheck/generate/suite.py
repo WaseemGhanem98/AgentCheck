@@ -40,6 +40,7 @@ from agentcheck.privacy import redact_log_text
 
 from .boundaries import (
     build_boundary_cases,
+    build_output_schema_cases,
     build_zero_input_cases,
     unsupported_boundary_reasons,
 )
@@ -83,6 +84,7 @@ class CaseOrigin(str, Enum):
     SCHEMA_BOUNDARY = "schema_boundary"
     WORKFLOW_MUTATION = "workflow_mutation"
     ZERO_INPUT_INVOCATION = "zero_input_invocation"
+    OUTPUT_SCHEMA = "output_schema"
 
 
 _MUTATION_LINEAGE_FIELDS = (
@@ -430,6 +432,9 @@ def build_frozen_suite(
                 ),
             )
         )
+    output_schema_cases = build_output_schema_cases(spec, seed=seed)
+    for scenario in output_schema_cases:
+        candidates.append((scenario, CaseLineage(origin=CaseOrigin.OUTPUT_SCHEMA)))
     zero_input_tools: set[str] = set()
     for tool_name, scenario in build_zero_input_cases(spec, seed=seed):
         zero_input_tools.add(tool_name)
@@ -576,6 +581,8 @@ def build_frozen_suite(
         case.lineage.origin is CaseOrigin.ZERO_INPUT_INVOCATION for case in cases
     ):
         sources = (*sources, "zero_input_invocation")
+    if any(case.lineage.origin is CaseOrigin.OUTPUT_SCHEMA for case in cases):
+        sources = (*sources, "output_schema")
     if include_mutations:
         sources = (*sources, "workflow_mutation")
     if realizer is not None and any(case.realization is not None for case in cases):

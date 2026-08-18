@@ -609,6 +609,32 @@ def _model_identity(
     return None, model_type.__name__, True, False
 
 
+def _tool_contract_identity(tool: Any) -> str:
+    """Canonical digest of the tool contract AgentCheck actually evaluates.
+
+    The gateway intercepts by name and validates arguments against the input
+    schema; the original handler is never executed. Two agents sharing one
+    imported tool therefore present one unambiguous contract, even though they
+    are distinct entries in two ``tools`` lists. Only the fields that decide
+    interception and scenario meaning are included, so a cosmetic difference
+    elsewhere on the SDK object cannot manufacture a false conflict, and a real
+    schema or description conflict cannot be hidden.
+    """
+
+    return canonical_hash(
+        {
+            "name": tool.name,
+            "description": tool.description or None,
+            "input_schema": _json_object(copy.deepcopy(tool.params_json_schema)),
+            "output_schema": (
+                _json_object(copy.deepcopy(tool.output_json_schema))
+                if tool.output_json_schema is not None
+                else None
+            ),
+        }
+    )
+
+
 def _tool_definition(tool: Any) -> ToolDefinition:
     _, state_changing, destructive = classify_tool(tool.name, tool.description or None)
     return ToolDefinition(
@@ -2237,6 +2263,7 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         edges_by_agent = _edges_by_agent(graph)
         seen_agent_names: dict[str, str] = {}
         tool_owner_location: dict[str, str] = {}
+        tool_contract_identity: dict[str, str] = {}
         all_function_tool_names: set[str] = set()
         for agent, location in zip(graph.agents, graph.locations):
             agent_edges = edges_by_agent.get(id(agent), [])
@@ -2268,15 +2295,25 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
                 local_names.add(tool.name)
                 all_function_tool_names.add(tool.name)
                 owner = tool_owner_location.get(tool.name)
+                contract = _tool_contract_identity(tool)
                 if owner is None:
                     tool_owner_location[tool.name] = location
-                elif owner != location:
+                    tool_contract_identity[tool.name] = contract
+                elif owner != location and tool_contract_identity[tool.name] != contract:
+                    # Sharing one imported tool across several agents is ordinary
+                    # SDK usage and is not ambiguous: the gateway intercepts by
+                    # name and validates against the schema, so an identical
+                    # contract means the same call means the same thing wherever
+                    # it is reached. Only a genuine contract conflict -- same name,
+                    # different schema or description -- leaves scenario tool
+                    # identity undecidable, so only that still fails closed.
                     issues.append(
                         SupportIssue(
                             code="duplicate_tool_name",
                             message=(
                                 f"Tool name {tool.name!r} is declared by multiple "
-                                "reachable agents; scenario tool identity would be "
+                                "reachable agents with different schemas or "
+                                "descriptions; scenario tool identity would be "
                                 "ambiguous."
                             ),
                             location=f"{location}.tools[{index}]",
