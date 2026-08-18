@@ -74,6 +74,7 @@ from .base import (
     SupportIssue,
     ToolGatewayProtocol,
 )
+from .controlled_model import ControlledModel
 from .openai_handoff_effects import (
     AgentCheckRunContext,
     ContextAssignment,
@@ -2479,6 +2480,7 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         world_state: Any = None,
         event_sink: EventSinkProtocol | None = None,
         source: str | None = None,
+        controlled_model: bool = False,
     ) -> PreparedTarget:
         report = self.preflight(target)
         report.require_supported()
@@ -2491,8 +2493,16 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         clones: dict[int, Any] = {}
 
         # Pass one: clone every reachable agent with reconstructed tools and no
-        # handoffs; each clone keeps its own model object so local scripted
-        # models keep driving offline runs.
+        # handoffs. Each clone keeps its own model object so a target that
+        # already supplies a local scripted model keeps driving offline runs;
+        # controlled_model instead substitutes a deterministic offline model on
+        # every reachable agent, so a target whose provider is unreachable can
+        # still be evaluated.
+        controlled = (
+            ControlledModel(spec.interface.output_schema.value)
+            if controlled_model
+            else None
+        )
         for agent in graph.agents:
             safe_tools = self._safe_tools_for(
                 agent,
@@ -2504,16 +2514,19 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
             agent_tool_names = tuple(tool.name for tool in safe_tools)
             tools_by_agent[agent.name] = agent_tool_names
             tool_names.extend(agent_tool_names)
-            clones[id(agent)] = agent.clone(
-                tools=safe_tools,
-                mcp_servers=[],
-                handoffs=[],
-                prompt=None,
-                hooks=None,
-                input_guardrails=[],
-                output_guardrails=[],
-                model_settings=_sanitized_model_settings(agent.model_settings),
-            )
+            clone_overrides: dict[str, Any] = {
+                "tools": safe_tools,
+                "mcp_servers": [],
+                "handoffs": [],
+                "prompt": None,
+                "hooks": None,
+                "input_guardrails": [],
+                "output_guardrails": [],
+                "model_settings": _sanitized_model_settings(agent.model_settings),
+            }
+            if controlled is not None:
+                clone_overrides["model"] = controlled
+            clones[id(agent)] = agent.clone(**clone_overrides)
 
         # Pass two: wire AgentCheck-owned handoffs between clones.  Original
         # Handoff objects, their routing closures, and any user callbacks are

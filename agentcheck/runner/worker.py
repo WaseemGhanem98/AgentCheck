@@ -237,6 +237,7 @@ def _run(root: Path, config: AgentCheckConfig, scenario: Scenario, run_id: str) 
         gateway,
         world_state=gateway.world,
         source=source,
+        controlled_model=config.controlled_model,
     )
     return asyncio.run(
         adapter.run(

@@ -62,6 +62,10 @@ class AgentCheckConfig(BaseModel):
     # that configures its own provider base_url (Ollama, vLLM, a staging host)
     # otherwise reaches it for real during evaluation.
     allow_network: bool = False
+    # Replace the target's provider with a deterministic offline model so a run
+    # can reach an actual behavioural verdict instead of stopping at the
+    # provider boundary. Opt-in: a real provider stays the default.
+    controlled_model: bool = False
     include_instructions_in_report: bool = False
     artifacts_directory: str = ".agentcheck"
     suite_path: str | None = None
