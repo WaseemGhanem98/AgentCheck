@@ -523,6 +523,44 @@ def _evaluate_handoff_trajectory(
     )
 
 
+def _semantic_arguments(value: Any) -> Any:
+    """Normalize tool arguments so equivalent calls compare equal.
+
+    Two invocations that differ only in how optional fields are spelled are the
+    same action: naming an optional field as ``null`` and omitting it request
+    identical work. Comparing raw arguments treats them as distinct, which makes
+    a repeated side effect invisible -- a false negative in exactly the check
+    meant to catch a double charge or a double send.
+
+    The OpenAI Agents SDK reached the same conclusion for its own tool
+    invocation identity, excluding ``None`` fields when deciding whether two
+    invocations are the same call (openai/openai-agents-python#4289).
+
+    Recursive so a ``null`` nested inside an object or list normalizes too.
+    Key order is already handled by sorting at the comparison site.
+    """
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _semantic_arguments(item)
+            for key, item in value.items()
+            if item is not None
+        }
+    if isinstance(value, (list, tuple)):
+        return [_semantic_arguments(item) for item in value]
+    return value
+
+
+def _invocation_identity(tool_name: str, arguments: Any) -> str:
+    """Stable identity for "the same call was made again"."""
+
+    return json.dumps(
+        [tool_name, _semantic_arguments(arguments)],
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def _evaluate_trajectory(builder: _EvaluationBuilder, constraint: TrajectoryConstraint) -> None:
     if constraint.kind in _HANDOFF_TRAJECTORY_KINDS:
         _evaluate_handoff_trajectory(builder, constraint)
@@ -544,7 +582,7 @@ def _evaluate_trajectory(builder: _EvaluationBuilder, constraint: TrajectoryCons
         seen: set[str] = set()
         duplicates: list[str] = []
         for attempt in attempts:
-            key = json.dumps([attempt.tool_name, attempt.arguments], sort_keys=True, separators=(",", ":"))
+            key = _invocation_identity(attempt.tool_name, attempt.arguments)
             if key in seen:
                 duplicates.append(attempt.attempt_id)
             seen.add(key)
@@ -568,7 +606,8 @@ def _evaluate_trajectory(builder: _EvaluationBuilder, constraint: TrajectoryCons
             if any(
                 attempt.sequence > origin.sequence
                 and attempt.tool_name == origin.tool_name
-                and attempt.arguments == origin.arguments
+                and _semantic_arguments(attempt.arguments)
+                == _semantic_arguments(origin.arguments)
                 for origin in ambiguous_origins
             )
         ]
