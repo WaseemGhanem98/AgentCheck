@@ -271,7 +271,10 @@ def execute_request(request_path: Path, response_path: Path) -> int:
         config = AgentCheckConfig.model_validate(request.get("config"))
         # Deny egress before any target module is imported, so import-time
         # network calls are contained too, not only calls made during a run.
-        install_network_guard(allow_network=config.allow_network)
+        install_network_guard(
+            allow_network=config.allow_network,
+            allowlist=config.network_allowlist,
+        )
         previous_cwd = Path.cwd()
         os.chdir(root)
         # Restore cwd so an in-process execute_request call cannot leak the

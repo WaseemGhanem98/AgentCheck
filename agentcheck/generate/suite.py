@@ -278,7 +278,9 @@ def built_in_suite(config: AgentCheckConfig, seed: int) -> tuple[Scenario, ...]:
     """Return the configured built-in suite for a seed."""
 
     if config.suite == "account_support_v1":
-        return build_account_support_suite(seed=seed)
+        return build_account_support_suite(
+            seed=seed, wall_clock_seconds=config.scenario_wall_clock_seconds
+        )
     raise ValueError(f"unsupported suite: {config.suite}")
 
 

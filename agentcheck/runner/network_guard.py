@@ -46,6 +46,8 @@ class NetworkAccessDenied(RuntimeError):
 
 _GUARD_INSTALLED = False
 _DENIED_DESTINATIONS: list[str] = []
+_ALLOWED_DESTINATIONS: frozenset[str] = frozenset()
+_LOOPBACK_ALIASES = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", ""})
 _MAX_RECORDED_DENIALS = 16
 
 _DENIAL_HINT = (
@@ -67,6 +69,47 @@ def denied_destinations() -> tuple[str, ...]:
     return tuple(_DENIED_DESTINATIONS)
 
 
+def _canonical_host(host: Any) -> str:
+    """Fold loopback spellings together so one entry covers the same endpoint.
+
+    A client resolves ``localhost`` and then connects to ``127.0.0.1``, so an
+    allowlist matched literally would have to name both. Every alias here refers
+    to this machine, so folding them changes reachability by nothing.
+    """
+
+    text = _text(host).strip().strip("[]").lower()
+    return "localhost" if text in _LOOPBACK_ALIASES else text
+
+
+def normalize_allowlist(entries: Any) -> frozenset[str]:
+    """Parse ``host:port`` entries into canonical match keys."""
+
+    parsed: set[str] = set()
+    for entry in entries or ():
+        text = _text(entry).strip()
+        if not text:
+            continue
+        host, separator, port = text.rpartition(":")
+        # An empty host is rejected rather than folded to loopback: a typo must
+        # not quietly allowlist an endpoint nobody named.
+        if not separator or not port.isdigit() or not host.strip():
+            raise ValueError(
+                f"network allowlist entry {text!r} must use the form host:port"
+            )
+        parsed.add(f"{_canonical_host(host)}:{int(port)}")
+    return frozenset(parsed)
+
+
+def _is_allowed(host: Any, port: Any) -> bool:
+    if not _ALLOWED_DESTINATIONS:
+        return False
+    try:
+        key = f"{_canonical_host(host)}:{int(port)}"
+    except (TypeError, ValueError):
+        return False
+    return key in _ALLOWED_DESTINATIONS
+
+
 def _text(value: Any) -> str:
     """Render one address component; hostnames may arrive as bytes."""
 
@@ -85,7 +128,9 @@ def _describe(address: Any) -> str:
     return type(address).__name__
 
 
-def install_network_guard(*, allow_network: bool) -> None:
+def install_network_guard(
+    *, allow_network: bool, allowlist: Any = ()
+) -> None:
     """Deny network egress in this process unless the target explicitly opted in.
 
     Installed once, before any target module is imported. Patching the methods
@@ -94,10 +139,16 @@ def install_network_guard(*, allow_network: bool) -> None:
     time, so modules imported earlier are covered too.
     """
 
-    global _GUARD_INSTALLED
+    global _GUARD_INSTALLED, _ALLOWED_DESTINATIONS
     if allow_network or _GUARD_INSTALLED:
         return
+    _ALLOWED_DESTINATIONS = normalize_allowlist(allowlist)
     _GUARD_INSTALLED = True
+
+    real_connect = socket.socket.connect
+    real_connect_ex = socket.socket.connect_ex
+    real_create_connection = socket.create_connection
+    real_getaddrinfo = socket.getaddrinfo
 
     def _deny(destination: Any) -> None:
         described = _describe(destination)
@@ -109,9 +160,13 @@ def install_network_guard(*, allow_network: bool) -> None:
         raise NetworkAccessDenied(f"network access to {described} was blocked. {_DENIAL_HINT}")
 
     def connect(self: socket.socket, address: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(address, tuple) and len(address) >= 2 and _is_allowed(*address[:2]):
+            return real_connect(self, address, *args, **kwargs)
         _deny(address)
 
     def connect_ex(self: socket.socket, address: Any, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(address, tuple) and len(address) >= 2 and _is_allowed(*address[:2]):
+            return real_connect_ex(self, address, *args, **kwargs)
         _deny(address)
 
     def sendto(self: socket.socket, data: Any, *args: Any, **kwargs: Any) -> Any:
@@ -121,11 +176,16 @@ def install_network_guard(*, allow_network: bool) -> None:
     def create_connection(address: Any, *args: Any, **kwargs: Any) -> Any:
         # Modules that did `from socket import create_connection` hold their own
         # reference, so the module attribute is replaced as well as the methods.
+        if isinstance(address, tuple) and len(address) >= 2 and _is_allowed(*address[:2]):
+            return real_create_connection(address, *args, **kwargs)
         _deny(address)
 
     def getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
         # DNS resolution is itself an outbound query and leaks the hostname even
-        # when the subsequent connect() is refused.
+        # when the subsequent connect() is refused. Resolving an allowlisted
+        # endpoint has to work, because the client resolves before it connects.
+        if _is_allowed(host, port):
+            return real_getaddrinfo(host, port, *args, **kwargs)
         _deny((host, port) if port is not None else host)
 
     def gethostbyname(hostname: Any) -> Any:
@@ -139,4 +199,9 @@ def install_network_guard(*, allow_network: bool) -> None:
     socket.gethostbyname = gethostbyname
 
 
-__all__ = ["NetworkAccessDenied", "denied_destinations", "install_network_guard"]
+__all__ = [
+    "NetworkAccessDenied",
+    "denied_destinations",
+    "install_network_guard",
+    "normalize_allowlist",
+]

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from agentcheck.domain import (
@@ -191,7 +192,32 @@ def _base(
     )
 
 
-def build_account_support_suite(*, seed: int = 1729) -> tuple[Scenario, ...]:
+def _with_wall_clock(
+    scenarios: tuple[Scenario, ...], seconds: float | None
+) -> tuple[Scenario, ...]:
+    """Re-budget a built suite for a slower model.
+
+    The built-in scenarios assume a scripted model that answers instantly. A
+    real reasoning model needs longer, and raising only the worker timeout would
+    leave the evaluated budget behind, turning slow-but-correct behaviour into a
+    budget failure. Rebuilding through the contract keeps the fingerprint honest:
+    a different budget is a different scenario.
+    """
+
+    if seconds is None:
+        return scenarios
+    rebuilt: list[Scenario] = []
+    for scenario in scenarios:
+        data = json.loads(scenario.model_dump_json())
+        data["resource_budgets"]["wall_clock_seconds"] = seconds
+        data["fingerprint"] = ""
+        rebuilt.append(Scenario.model_validate_json(json.dumps(data, ensure_ascii=False)))
+    return tuple(rebuilt)
+
+
+def build_account_support_suite(
+    *, seed: int = 1729, wall_clock_seconds: float | None = None
+) -> tuple[Scenario, ...]:
     account = {
         "accounts": {
             "acct_123": {
@@ -426,4 +452,4 @@ def build_account_support_suite(*, seed: int = 1729) -> tuple[Scenario, ...]:
             strength=OracleStrength.VERSIONED_POLICY,
         )
     )
-    return tuple(scenarios)
+    return _with_wall_clock(tuple(scenarios), wall_clock_seconds)

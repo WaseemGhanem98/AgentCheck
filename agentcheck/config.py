@@ -66,6 +66,14 @@ class AgentCheckConfig(BaseModel):
     # can reach an actual behavioural verdict instead of stopping at the
     # provider boundary. Opt-in: a real provider stays the default.
     controlled_model: bool = False
+    # Endpoints the evaluation worker may reach, as host:port. Scoped so a real
+    # reasoning provider can be used without handing the target the network:
+    # everything not listed here is still refused.
+    network_allowlist: tuple[str, ...] = ()
+    # Per-scenario wall-clock budget. The built-in suite assumes a scripted
+    # model that answers instantly; a real reasoning model needs longer, and the
+    # same value bounds the worker and the evaluated budget so they agree.
+    scenario_wall_clock_seconds: float | None = Field(default=None, gt=0.0, le=600.0)
     include_instructions_in_report: bool = False
     artifacts_directory: str = ".agentcheck"
     suite_path: str | None = None
@@ -93,6 +101,14 @@ class AgentCheckConfig(BaseModel):
             if name not in result:
                 result.append(name)
         return tuple(result)
+
+    @field_validator("network_allowlist")
+    @classmethod
+    def validate_network_allowlist(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        from .runner.network_guard import normalize_allowlist
+
+        normalize_allowlist(values)  # rejects anything that is not host:port
+        return tuple(dict.fromkeys(value.strip() for value in values if value.strip()))
 
     @field_validator("artifacts_directory")
     @classmethod
