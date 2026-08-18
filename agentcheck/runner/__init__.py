@@ -1,7 +1,11 @@
 """Execution primitives for isolated AgentCheck cases."""
 
 from .budgets import BudgetExceeded, BudgetTracker, BudgetUsage
-from .network_guard import NetworkAccessDenied, install_network_guard
+from .network_guard import (
+    NetworkAccessDenied,
+    denied_destinations,
+    install_network_guard,
+)
 from .orchestrator import (
     ProcessResult,
     WorkerProcessError,
@@ -36,6 +40,7 @@ __all__ = [
     "WorldSimulator",
     "WorldStateError",
     "WorldTransition",
+    "denied_destinations",
     "inspect_in_subprocess",
     "install_network_guard",
     "run_scenario_in_subprocess",

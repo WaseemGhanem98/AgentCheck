@@ -260,8 +260,13 @@ def test_guard_denies_every_client_library_in_process(
         )
 
 
-def test_unix_domain_sockets_remain_available() -> None:
-    """AF_UNIX is local IPC, cannot reach a network peer, and asyncio may need it."""
+def test_socketpair_works_but_unix_socket_connect_is_denied() -> None:
+    """AF_UNIX connect can reach a privileged daemon, so it is denied too.
+
+    /var/run/docker.sock grants effective host root on a typical developer
+    machine. socketpair() returns an already-connected pair without calling
+    connect(), so asyncio internals keep working.
+    """
 
     monkey_installed = False
     original_connect = socket.socket.connect
@@ -283,6 +288,9 @@ def test_unix_domain_sockets_remain_available() -> None:
             assert right.recv(16) == b"local-ipc"
         with pytest.raises(NetworkAccessDenied):
             socket.create_connection(("127.0.0.1", 9), timeout=1)
+        unix_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        with unix_socket, pytest.raises(NetworkAccessDenied):
+            unix_socket.connect("/var/run/docker.sock")
     finally:
         if monkey_installed:
             socket.socket.connect = original_connect
@@ -292,3 +300,90 @@ def test_unix_domain_sockets_remain_available() -> None:
             socket.getaddrinfo = original_getaddrinfo
             socket.gethostbyname = original_gethostbyname
         guard._GUARD_INSTALLED = previous
+
+
+def test_denied_destinations_are_recorded_for_diagnostics(
+    counting_server: HTTPServer,
+) -> None:
+    """A blocked connection must be explainable, not just fail.
+
+    HTTP clients wrap a refused connection in their own transport error, so
+    without this the developer sees a bare "Connection error." and cannot tell
+    an unreachable provider from AgentCheck deliberately denying egress.
+    """
+
+    import agentcheck.runner.network_guard as guard
+
+    port = counting_server.server_address[1]
+    originals = (
+        socket.socket.connect,
+        socket.socket.connect_ex,
+        socket.socket.sendto,
+        socket.create_connection,
+        socket.getaddrinfo,
+        socket.gethostbyname,
+    )
+    previous_installed = guard._GUARD_INSTALLED
+    previous_denied = list(guard._DENIED_DESTINATIONS)
+    guard._GUARD_INSTALLED = False
+    guard._DENIED_DESTINATIONS.clear()
+    try:
+        install_network_guard(allow_network=False)
+        with pytest.raises(NetworkAccessDenied):
+            socket.create_connection(("127.0.0.1", port), timeout=1)
+        # Hostnames reach getaddrinfo as bytes; the record must stay readable.
+        with pytest.raises(NetworkAccessDenied):
+            socket.getaddrinfo(b"localhost", 11434)
+
+        recorded = guard.denied_destinations()
+        assert f"127.0.0.1:{port}" in recorded
+        assert "localhost:11434" in recorded
+        assert not any("b'" in item for item in recorded)
+        assert _CountingHandler.hits == 0
+    finally:
+        (
+            socket.socket.connect,
+            socket.socket.connect_ex,
+            socket.socket.sendto,
+            socket.create_connection,
+            socket.getaddrinfo,
+            socket.gethostbyname,
+        ) = originals
+        guard._GUARD_INSTALLED = previous_installed
+        guard._DENIED_DESTINATIONS[:] = previous_denied
+
+
+def test_recorded_denials_are_bounded() -> None:
+    """Diagnostics must not grow without bound on a chatty target."""
+
+    import agentcheck.runner.network_guard as guard
+
+    originals = (
+        socket.socket.connect,
+        socket.socket.connect_ex,
+        socket.socket.sendto,
+        socket.create_connection,
+        socket.getaddrinfo,
+        socket.gethostbyname,
+    )
+    previous_installed = guard._GUARD_INSTALLED
+    previous_denied = list(guard._DENIED_DESTINATIONS)
+    guard._GUARD_INSTALLED = False
+    guard._DENIED_DESTINATIONS.clear()
+    try:
+        install_network_guard(allow_network=False)
+        for index in range(guard._MAX_RECORDED_DENIALS * 3):
+            with pytest.raises(NetworkAccessDenied):
+                socket.create_connection((f"10.0.0.{index}", 80), timeout=1)
+        assert len(guard.denied_destinations()) <= guard._MAX_RECORDED_DENIALS
+    finally:
+        (
+            socket.socket.connect,
+            socket.socket.connect_ex,
+            socket.socket.sendto,
+            socket.create_connection,
+            socket.getaddrinfo,
+            socket.gethostbyname,
+        ) = originals
+        guard._GUARD_INSTALLED = previous_installed
+        guard._DENIED_DESTINATIONS[:] = previous_denied

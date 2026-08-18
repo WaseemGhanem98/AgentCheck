@@ -260,7 +260,10 @@ def _parser() -> argparse.ArgumentParser:
             "run a compatible frozen suite or the matching built-in suite. "
             "account_support_v1 is used only when the spec declares that suite's "
             "required tools. A supported target with no compatible suite is not "
-            "PASS; run generate or provide a frozen suite."
+            "PASS; run generate or provide a frozen suite. Network access is "
+            "disabled during evaluation so a target cannot cause external side "
+            'effects; set "allow_network": true in agentcheck.json to reach a '
+            "real provider."
         ),
     )
     test_parser.add_argument("target", nargs="?", default=".")

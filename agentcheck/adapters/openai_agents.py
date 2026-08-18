@@ -62,6 +62,7 @@ from agentcheck.domain import (
 from agentcheck.inspect.capabilities import classify_tool, extract_capabilities
 from agentcheck.schema_safety import UnsafeSchemaReference, offline_validator
 from agentcheck.runner.budgets import BudgetExceeded
+from agentcheck.runner.network_guard import denied_destinations
 
 from .base import (
     AdapterDependencyError,
@@ -607,6 +608,29 @@ def _model_identity(
     # A local Model implementation may proxy any provider or none at all. Its
     # Python module name is not provider evidence.
     return None, model_type.__name__, True, False
+
+
+def _explain_failure(exc: BaseException) -> str:
+    """Attribute a run failure to AgentCheck's network denial when that caused it.
+
+    HTTP clients wrap a refused connection in their own transport error, so a
+    blocked call surfaces as a bare "Connection error." and the developer cannot
+    tell an unreachable provider from AgentCheck deliberately denying egress.
+    When the guard actually refused something in this worker, say so and name the
+    setting that changes it.
+    """
+
+    reason = str(exc)[:4_000]
+    destinations = denied_destinations()
+    if not destinations:
+        return reason
+    listed = ", ".join(destinations[:3])
+    return (
+        f"{reason} AgentCheck denied network access to {listed} during this run. "
+        "Evaluation runs with network access disabled so a target cannot cause "
+        "external side effects. If this endpoint is meant to be reached, set "
+        '"allow_network": true in agentcheck.json.'
+    )[:4_000]
 
 
 def _tool_contract_identity(tool: Any) -> str:
@@ -2695,14 +2719,14 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
             )
         except AgentsException as exc:
             termination = RunTermination.ADAPTER_ERROR
-            termination_reason = str(exc)[:4_000]
+            termination_reason = _explain_failure(exc)
             await capture.event(
                 CanonicalEventType.ERROR,
                 {"error_type": type(exc).__name__, "message": termination_reason},
             )
         except Exception as exc:
             termination = RunTermination.ADAPTER_ERROR
-            termination_reason = str(exc)[:4_000]
+            termination_reason = _explain_failure(exc)
             await capture.event(
                 CanonicalEventType.ERROR,
                 {"error_type": type(exc).__name__, "message": termination_reason},

@@ -25,8 +25,13 @@ subprocess. Containing that requires OS-level isolation (network namespaces,
 seccomp), which is platform-specific and privileged; AgentCheck already
 describes its worker as "process isolation, not a security sandbox".
 
-``AF_UNIX`` sockets stay available: they are local IPC and cannot reach a
-network peer, and asyncio/multiprocessing internals may rely on them.
+``AF_UNIX`` *connect* is refused as well. A Unix socket cannot reach a network
+peer, but it can reach a privileged local daemon -- ``/var/run/docker.sock`` is
+present on a typical developer machine and grants effective host root -- which
+is exactly the kind of external side effect evaluation must not cause.
+``socket.socketpair()`` is untouched because it returns an already-connected
+pair without calling ``connect``; asyncio's event loop and its subprocess
+support were verified to keep working under this rule.
 """
 
 from __future__ import annotations
@@ -40,6 +45,8 @@ class NetworkAccessDenied(RuntimeError):
 
 
 _GUARD_INSTALLED = False
+_DENIED_DESTINATIONS: list[str] = []
+_MAX_RECORDED_DENIALS = 16
 
 _DENIAL_HINT = (
     "AgentCheck blocks network access during evaluation so a target cannot "
@@ -48,20 +55,33 @@ _DENIAL_HINT = (
 )
 
 
-def _is_local_ipc(family: int) -> bool:
-    """AF_UNIX is local IPC; it cannot reach a network peer."""
+def denied_destinations() -> tuple[str, ...]:
+    """Destinations refused so far in this process, oldest first.
 
-    unix_family = getattr(socket, "AF_UNIX", None)
-    return unix_family is not None and family == unix_family
+    HTTP clients wrap a failed connection in their own transport error, so the
+    guard's message is otherwise lost and the developer sees only something
+    like "Connection error." Callers use this to say *why* the connection
+    failed. Recording is diagnostic only and never widens what is allowed.
+    """
+
+    return tuple(_DENIED_DESTINATIONS)
+
+
+def _text(value: Any) -> str:
+    """Render one address component; hostnames may arrive as bytes."""
+
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
 
 
 def _describe(address: Any) -> str:
     """Render a destination without trusting a hostile ``__repr__``."""
 
     if isinstance(address, tuple) and len(address) >= 2:
-        return f"{address[0]}:{address[1]}"
+        return f"{_text(address[0])}:{_text(address[1])}"[:200]
     if isinstance(address, (str, bytes)):
-        return str(address)[:200]
+        return _text(address)[:200]
     return type(address).__name__
 
 
@@ -79,29 +99,23 @@ def install_network_guard(*, allow_network: bool) -> None:
         return
     _GUARD_INSTALLED = True
 
-    real_connect = socket.socket.connect
-    real_connect_ex = socket.socket.connect_ex
-    real_sendto = socket.socket.sendto
-
     def _deny(destination: Any) -> None:
-        raise NetworkAccessDenied(
-            f"network access to {_describe(destination)} was blocked. {_DENIAL_HINT}"
-        )
+        described = _describe(destination)
+        if (
+            len(_DENIED_DESTINATIONS) < _MAX_RECORDED_DENIALS
+            and described not in _DENIED_DESTINATIONS
+        ):
+            _DENIED_DESTINATIONS.append(described)
+        raise NetworkAccessDenied(f"network access to {described} was blocked. {_DENIAL_HINT}")
 
     def connect(self: socket.socket, address: Any, *args: Any, **kwargs: Any) -> Any:
-        if _is_local_ipc(self.family):
-            return real_connect(self, address, *args, **kwargs)
         _deny(address)
 
     def connect_ex(self: socket.socket, address: Any, *args: Any, **kwargs: Any) -> Any:
-        if _is_local_ipc(self.family):
-            return real_connect_ex(self, address, *args, **kwargs)
         _deny(address)
 
     def sendto(self: socket.socket, data: Any, *args: Any, **kwargs: Any) -> Any:
         # Connectionless UDP (including DNS queries) never calls connect().
-        if _is_local_ipc(self.family):
-            return real_sendto(self, data, *args, **kwargs)
         _deny(args[-1] if args else "datagram peer")
 
     def create_connection(address: Any, *args: Any, **kwargs: Any) -> Any:
@@ -112,7 +126,7 @@ def install_network_guard(*, allow_network: bool) -> None:
     def getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
         # DNS resolution is itself an outbound query and leaks the hostname even
         # when the subsequent connect() is refused.
-        _deny(f"{host}:{port}" if port is not None else host)
+        _deny((host, port) if port is not None else host)
 
     def gethostbyname(hostname: Any) -> Any:
         _deny(hostname)
@@ -125,4 +139,4 @@ def install_network_guard(*, allow_network: bool) -> None:
     socket.gethostbyname = gethostbyname
 
 
-__all__ = ["NetworkAccessDenied", "install_network_guard"]
+__all__ = ["NetworkAccessDenied", "denied_destinations", "install_network_guard"]
