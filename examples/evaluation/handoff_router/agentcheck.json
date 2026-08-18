@@ -6,6 +6,7 @@
   "seed": 1729,
   "max_concurrency": 2,
   "environment_allowlist": [],
+  "allow_network": false,
   "include_instructions_in_report": false,
   "artifacts_directory": ".agentcheck"
 }

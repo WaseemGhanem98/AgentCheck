@@ -63,6 +63,9 @@ def test_written_document_is_the_complete_default_contract(tmp_path: Path) -> No
         "seed": 1729,
         "max_concurrency": 2,
         "environment_allowlist": [],
+        # Egress is denied unless the target explicitly opts in, and the written
+        # document states that rather than leaving it implicit.
+        "allow_network": False,
         "include_instructions_in_report": False,
         "artifacts_directory": ".agentcheck",
     }
