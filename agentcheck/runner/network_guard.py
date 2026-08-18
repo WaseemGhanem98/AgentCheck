@@ -36,6 +36,7 @@ support were verified to keep working under this rule.
 
 from __future__ import annotations
 
+import ipaddress
 import socket
 from typing import Any
 
@@ -47,8 +48,20 @@ class NetworkAccessDenied(RuntimeError):
 _GUARD_INSTALLED = False
 _DENIED_DESTINATIONS: list[str] = []
 _ALLOWED_DESTINATIONS: frozenset[str] = frozenset()
+# Hostnames the operator named, keyed by the port they were named for, plus the
+# addresses DNS has returned for them. A hostname entry cannot be matched
+# directly: the client resolves it and then connects to an address, so the
+# guard only ever sees the address. These two maps are what let an address be
+# traced back to the hostname that authorised it.
+_ALLOWED_HOSTNAMES: dict[int, frozenset[str]] = {}
+_RESOLVED_ADDRESSES: set[str] = set()
 _LOOPBACK_ALIASES = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", ""})
 _MAX_RECORDED_DENIALS = 16
+# Provider addresses rotate, so a miss re-resolves. Bounded so a target cannot
+# turn a single allowlisted hostname into an unbounded DNS side channel.
+_MAX_RESOLUTIONS = 32
+_resolutions_performed = 0
+_real_getaddrinfo = socket.getaddrinfo
 
 _DENIAL_HINT = (
     "AgentCheck blocks network access during evaluation so a target cannot "
@@ -100,14 +113,65 @@ def normalize_allowlist(entries: Any) -> frozenset[str]:
     return frozenset(parsed)
 
 
+def _is_literal_address(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return True
+
+
+def _resolve_hostnames(port: int) -> None:
+    """Record the addresses DNS returns for hostnames allowlisted on ``port``.
+
+    Resolution is authorisation here, so only hostnames the operator explicitly
+    named are ever resolved, and only the addresses DNS returns for that exact
+    hostname and port are admitted. Reverse DNS is never consulted: an address
+    is admitted because a named hostname resolves *to* it, never because it
+    claims to belong to one.
+
+    Uses the pre-patch ``getaddrinfo`` so the guard cannot recurse into itself.
+    """
+
+    global _resolutions_performed
+    for hostname in _ALLOWED_HOSTNAMES.get(port, frozenset()):
+        if _resolutions_performed >= _MAX_RESOLUTIONS:
+            return
+        _resolutions_performed += 1
+        try:
+            infos = _real_getaddrinfo(hostname, port)
+        except Exception:
+            # Unresolvable stays unreachable: no addresses recorded, so the
+            # caller denies.
+            continue
+        for info in infos:
+            address = info[4]
+            if isinstance(address, tuple) and address:
+                _RESOLVED_ADDRESSES.add(f"{_canonical_host(address[0])}:{port}")
+
+
 def _is_allowed(host: Any, port: Any) -> bool:
     if not _ALLOWED_DESTINATIONS:
         return False
     try:
-        key = f"{_canonical_host(host)}:{int(port)}"
+        canonical = _canonical_host(host)
+        port_number = int(port)
     except (TypeError, ValueError):
         return False
-    return key in _ALLOWED_DESTINATIONS
+    key = f"{canonical}:{port_number}"
+    # Literal entries: an allowlisted IP, a loopback spelling, or the hostname
+    # itself as seen by getaddrinfo before the client resolves it.
+    if key in _ALLOWED_DESTINATIONS:
+        return True
+    if key in _RESOLVED_ADDRESSES:
+        return True
+    # A miss on a port that has hostname entries may simply be DNS rotation, so
+    # re-resolve those hostnames and admit the address only if it is now among
+    # what they return.
+    if _ALLOWED_HOSTNAMES.get(port_number):
+        _resolve_hostnames(port_number)
+        return key in _RESOLVED_ADDRESSES
+    return False
 
 
 def _text(value: Any) -> str:
@@ -139,10 +203,23 @@ def install_network_guard(
     time, so modules imported earlier are covered too.
     """
 
-    global _GUARD_INSTALLED, _ALLOWED_DESTINATIONS
+    global _GUARD_INSTALLED, _ALLOWED_DESTINATIONS, _ALLOWED_HOSTNAMES
+    global _real_getaddrinfo, _resolutions_performed
     if allow_network or _GUARD_INSTALLED:
         return
     _ALLOWED_DESTINATIONS = normalize_allowlist(allowlist)
+    # Capture the real resolver before patching so re-resolution cannot recurse.
+    _real_getaddrinfo = socket.getaddrinfo
+    _resolutions_performed = 0
+    _RESOLVED_ADDRESSES.clear()
+    hostnames: dict[int, set[str]] = {}
+    for entry in _ALLOWED_DESTINATIONS:
+        entry_host, _, entry_port = entry.rpartition(":")
+        if entry_host and not _is_literal_address(entry_host):
+            hostnames.setdefault(int(entry_port), set()).add(entry_host)
+    _ALLOWED_HOSTNAMES = {port: frozenset(names) for port, names in hostnames.items()}
+    for port in _ALLOWED_HOSTNAMES:
+        _resolve_hostnames(port)
     _GUARD_INSTALLED = True
 
     real_connect = socket.socket.connect
