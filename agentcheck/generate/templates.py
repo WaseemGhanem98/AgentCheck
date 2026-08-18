@@ -192,7 +192,7 @@ def _base(
     )
 
 
-def _with_wall_clock(
+def apply_wall_clock(
     scenarios: tuple[Scenario, ...], seconds: float | None
 ) -> tuple[Scenario, ...]:
     """Re-budget a built suite for a slower model.
@@ -452,4 +452,4 @@ def build_account_support_suite(
             strength=OracleStrength.VERSIONED_POLICY,
         )
     )
-    return _with_wall_clock(tuple(scenarios), wall_clock_seconds)
+    return apply_wall_clock(tuple(scenarios), wall_clock_seconds)

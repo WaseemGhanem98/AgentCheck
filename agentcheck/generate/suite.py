@@ -62,6 +62,7 @@ from .selection import (
     select_scenarios,
 )
 from .templates import (
+    apply_wall_clock,
     build_account_support_suite,
     declared_tool_names,
     empty_generation_message,
@@ -449,6 +450,24 @@ def build_frozen_suite(
                 ),
             )
         )
+
+    # One budget for every origin. The built-in suite already honours the
+    # configured wall clock, but boundary, output-schema, and zero-input cases
+    # are built with the ResourceBudgets default, so a third-party target --
+    # which is exactly the target that has no built-in suite -- could not be
+    # given more time for a slower real model. Applying it here, before
+    # mutations are derived, keeps every generated case consistent and lets
+    # mutations inherit it from their parent.
+    candidates = [
+        (scenario, lineage)
+        for scenario, lineage in zip(
+            apply_wall_clock(
+                tuple(scenario for scenario, _ in candidates),
+                config.scenario_wall_clock_seconds,
+            ),
+            [lineage for _, lineage in candidates],
+        )
+    ]
 
     unique: list[tuple[Scenario, CaseLineage]] = []
     rejected: list[RejectedCase] = []
