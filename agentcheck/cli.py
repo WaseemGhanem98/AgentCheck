@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 from collections import Counter
@@ -20,7 +21,13 @@ from agentcheck.application import (
 )
 from agentcheck.baseline.contract import DEFAULT_BASELINE_FILENAME
 from agentcheck.baseline.service import check_baseline, create_baseline, encode_comparison
-from agentcheck.config import DEFAULT_ENTRYPOINT, entrypoint_location
+from agentcheck.config import DEFAULT_ENTRYPOINT, contained_path, entrypoint_location
+from agentcheck.fixtures import (
+    DEFAULT_FIXTURES_FILENAME,
+    FIXTURE_PACK_CONTRACT_VERSION,
+    load_representative_inputs,
+)
+from agentcheck.generate.boundaries import build_positive_path_cases
 from agentcheck.domain import AgentSpec, Severity, Verdict
 from agentcheck.errors import ConfigurationError, ScenarioValidationError
 from agentcheck.generate.mutations import DEFAULT_MAX_MUTATIONS, MAX_MUTATIONS_PER_SUITE
@@ -431,6 +438,37 @@ def _parser() -> argparse.ArgumentParser:
         help="optional explicit reviewer label",
     )
 
+    fixtures_parser = commands.add_parser(
+        "fixtures",
+        help="manage optional representative test data for action-path coverage",
+        description=(
+            "Representative input values let AgentCheck generate an action-path "
+            "scenario a model will actually act on. They are committed test "
+            "data: never real customer records and never secrets. This command "
+            "never imports the target and never makes a network call."
+        ),
+    )
+    fixtures_commands = fixtures_parser.add_subparsers(
+        dest="fixtures_command",
+        required=True,
+    )
+    fixtures_init = fixtures_commands.add_parser(
+        "init",
+        help="write a reviewable template for tools lacking representative values",
+        description=(
+            "Inspect the target and write a template naming exactly the tools "
+            "and parameters whose action path is currently shallow. Existing "
+            "values are never overwritten without --force."
+        ),
+    )
+    fixtures_init.add_argument("target", nargs="?", default=".")
+    fixtures_init.add_argument(
+        "--force",
+        action="store_true",
+        help="replace an existing fixtures file instead of refusing",
+    )
+    _add_python_option(fixtures_init)
+
     baseline_parser = commands.add_parser(
         "baseline",
         help="create or check a trusted evaluation baseline for CI gating",
@@ -582,6 +620,101 @@ def _print_topology(topology: Mapping[str, Any] | None) -> None:
                 print(f"     context assignment: {field}={item.get('value')!r}")
 
 
+def _fixtures_init_command(
+    target: str, *, force: bool, python_executable: str | None
+) -> int:
+    """Write a template naming exactly the parameters that are currently shallow.
+
+    Only tools whose action path would otherwise fall back to a generic
+    synthetic value are listed, so the developer fills in what actually
+    improves coverage rather than restating the whole tool surface.
+    """
+
+    root, config, result = inspect_target(target, python_executable=python_executable)
+    if result.infrastructure_error is not None:
+        error = result.infrastructure_error
+        print(f"AgentCheck error [{error.code}]: {error.message}", file=sys.stderr)
+        return 2
+    spec = result.require_value()
+    existing = load_representative_inputs(root, spec)
+    positive = build_positive_path_cases(
+        spec, seed=config.seed, representative_inputs=existing
+    )
+    shallow = {case.tool_name: case.shallow_parameters for case in positive if case.shallow_parameters}
+
+    destination = contained_path(root, DEFAULT_FIXTURES_FILENAME)
+    if destination.exists() and not force:
+        raise ConfigurationError(
+            f"{destination.name} already exists at {destination}; "
+            "re-run with --force to replace it"
+        )
+    if not shallow:
+        print("Every generated action path already has representative input.")
+        print("Nothing to write.")
+        return 0
+
+    document = {
+        "schema_version": FIXTURE_PACK_CONTRACT_VERSION,
+        "tools": {
+            tool: {
+                "arguments": {name: "REPLACE_ME" for name in sorted(parameters)}
+            }
+            for tool, parameters in sorted(shallow.items())
+        },
+    }
+    payload = json.dumps(document, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+    # Owner-only, matching how init writes agentcheck.json.
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(payload)
+
+    print(f"Wrote {destination}")
+    print()
+    for tool, parameters in sorted(shallow.items()):
+        print(f"  {tool}: {', '.join(sorted(parameters))}")
+    print()
+    print("Replace every REPLACE_ME with a representative test value.")
+    print("This file is committed test data: no real customer records, no secrets.")
+    print()
+    print("Next steps:")
+    print(f"- agentcheck generate {root}")
+    return 0
+
+
+def _print_action_path_coverage(coverage: Any, target: Any) -> None:
+    """Say plainly which action paths a model can realistically act on.
+
+    A generated positive case is not the same as one a model will act on. When
+    the request carries a generic synthetic string the agent may reasonably
+    decline, so a pass proves less than it appears to. Reporting that is the
+    difference between "the agent behaved correctly after calling the tool" and
+    "the agent never called the tool".
+    """
+
+    representative = coverage.action_paths_representative
+    shallow = coverage.action_paths_shallow
+    if not representative and not shallow:
+        return
+    print()
+    print("Action-path coverage:")
+    for name in representative:
+        print(f"  [ok]      {name} - representative input available")
+    for name in shallow:
+        missing = ", ".join(
+            parameter.split(".", 1)[1]
+            for parameter in coverage.shallow_action_parameters
+            if parameter.startswith(f"{name}.")
+        )
+        print(f"  [shallow] {name} - no representative value for {missing}")
+    if shallow:
+        print()
+        print(
+            "  A model may decline to act on placeholder values, so these paths "
+            "may go untested."
+        )
+        print(f"  Add representative test data:  agentcheck fixtures init {target}")
+
+
 def _print_inspection(
     spec: AgentSpec,
     *,
@@ -728,6 +861,7 @@ def _generate_command(
     if realized:
         print(f"Realized:     {realized} display overlay(s)")
     print(f"Fingerprint:  {generation.suite.fingerprint}")
+    _print_action_path_coverage(generation.suite.coverage, generation.target_root)
     print()
     print("Next steps:")
     print(f"- agentcheck test {generation.target_root}")
@@ -1154,6 +1288,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 note=args.note,
                 reviewer=args.reviewer,
             )
+        if args.command == "fixtures":
+            if args.fixtures_command == "init":
+                return _fixtures_init_command(
+                    args.target,
+                    force=args.force,
+                    python_executable=args.python_executable,
+                )
         if args.command == "baseline":
             if args.baseline_command == "create":
                 return _baseline_create_command(

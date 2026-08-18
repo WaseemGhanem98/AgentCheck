@@ -20,7 +20,7 @@ import json
 import os
 from enum import Enum
 from pathlib import Path
-from typing import Any, Literal, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 from pydantic import Field, model_serializer, model_validator
 
@@ -204,6 +204,13 @@ class SuiteCoverage(ContractModel):
     tools_without_boundary_cases: tuple[str, ...] = ()
     boundary_kinds: tuple[str, ...] = ()
     unsupported_schema_features: tuple[str, ...] = ()
+    # Action-path honesty. A generated positive case is not the same as one a
+    # model can plausibly act on: representative tools carry values a developer
+    # or the schema supplied, shallow ones fell back to a generic synthetic
+    # string that a model may reasonably decline to treat as real.
+    action_paths_representative: tuple[str, ...] = ()
+    action_paths_shallow: tuple[str, ...] = ()
+    shallow_action_parameters: tuple[str, ...] = ()
 
 
 class FrozenSuite(ContractModel):
@@ -410,6 +417,7 @@ def build_frozen_suite(
     policy_packs: Sequence[PolicyPack] = (),
     max_cases: int | None = None,
     realizer: Any | None = None,
+    representative_inputs: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> FrozenSuite:
     """Derive, deduplicate, lint, and freeze every supported case for a target."""
 
@@ -437,19 +445,24 @@ def build_frozen_suite(
                 ),
             )
         )
-    for scenario in build_positive_path_cases(spec, seed=seed):
+    representative_tools: list[str] = []
+    shallow_tools: list[str] = []
+    shallow_parameters: list[str] = []
+    for positive in build_positive_path_cases(
+        spec, seed=seed, representative_inputs=representative_inputs
+    ):
+        if positive.representative:
+            representative_tools.append(positive.tool_name)
+        else:
+            shallow_tools.append(positive.tool_name)
+            shallow_parameters.extend(
+                f"{positive.tool_name}.{name}" for name in positive.shallow_parameters
+            )
         candidates.append(
             (
-                scenario,
+                positive.scenario,
                 CaseLineage(
-                    origin=CaseOrigin.POSITIVE_PATH,
-                    # Tags are stored sorted, so select by prefix rather than
-                    # position.
-                    tool_name=next(
-                        tag.split(":", 1)[1]
-                        for tag in scenario.dimension_tags
-                        if tag.startswith("tool:")
-                    ),
+                    origin=CaseOrigin.POSITIVE_PATH, tool_name=positive.tool_name
                 ),
             )
         )
@@ -629,6 +642,9 @@ def build_frozen_suite(
     if realizer is not None and any(case.realization is not None for case in cases):
         sources = (*sources, "llm_realization")
     coverage = SuiteCoverage(
+        action_paths_representative=tuple(sorted(representative_tools)),
+        action_paths_shallow=tuple(sorted(shallow_tools)),
+        shallow_action_parameters=tuple(sorted(shallow_parameters)),
         tools=tools,
         tools_without_boundary_cases=tuple(
             name

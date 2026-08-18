@@ -50,7 +50,9 @@ def _spec(*tools: Any, output_type: Any = None):
 
 
 def _positive(spec, seed: int = 1729):
-    return build_positive_path_cases(spec, seed=seed)
+    """Scenarios only; build_positive_path_cases now also reports coverage."""
+
+    return tuple(case.scenario for case in build_positive_path_cases(spec, seed=seed))
 
 
 def test_positive_case_is_generated_from_a_valid_tool_schema() -> None:

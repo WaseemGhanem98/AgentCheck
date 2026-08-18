@@ -685,6 +685,26 @@ def build_output_schema_cases(spec: AgentSpec, *, seed: int) -> tuple[Scenario, 
 _MAX_POSITIVE_SCENARIOS_PER_SPEC = 24
 
 
+@dataclass(frozen=True, slots=True)
+class PositiveCase:
+    """One action-path scenario plus how representative its inputs are.
+
+    ``shallow_parameters`` names the arguments that fell back to a generic
+    synthetic value because neither a developer fixture nor the declared schema
+    supplied anything domain-shaped. A model may reasonably decline to act on
+    those, so a pass here is weaker evidence than one where the request carried
+    representative values, and the suite reports that rather than hiding it.
+    """
+
+    scenario: Scenario
+    tool_name: str
+    shallow_parameters: tuple[str, ...]
+
+    @property
+    def representative(self) -> bool:
+        return not self.shallow_parameters
+
+
 def _humanise(tool_name: str) -> str:
     """Fallback phrasing when a tool declares no description."""
 
@@ -795,7 +815,47 @@ def _positive_scenario(tool: ToolDefinition, arguments: JsonObject, *, seed: int
     )
 
 
-def build_positive_path_cases(spec: AgentSpec, *, seed: int) -> tuple[Scenario, ...]:
+def _apply_representative_inputs(
+    baseline: JsonObject,
+    supplied: Mapping[str, Any],
+    parameters: Mapping[str, CapabilityParameter],
+) -> tuple[JsonObject, tuple[str, ...]]:
+    """Overlay developer values on the schema baseline and report what stayed generic.
+
+    Precedence is developer fixture, then a value the declared schema actually
+    pins down (an enum member, a bounded number), then the generic synthetic
+    string. Only the last case is shallow: the first two carry meaning the
+    contract or the developer put there.
+    """
+
+    merged: dict[str, Any] = dict(baseline)
+    shallow: list[str] = []
+    for name in sorted(baseline):
+        if name in supplied:
+            merged[name] = supplied[name]
+            continue
+        parameter = parameters.get(name)
+        constrained = bool(
+            parameter is not None
+            and (
+                parameter.constraints.enum_values
+                or parameter.constraints.pattern
+                or parameter.constraints.string_format
+                or parameter.constraints.minimum is not None
+                or parameter.constraints.maximum is not None
+            )
+        )
+        if not constrained and baseline[name] == _SYNTHETIC_STRING:
+            shallow.append(name)
+    return merged, tuple(shallow)
+
+
+def build_positive_path_cases(
+    spec: AgentSpec,
+    *,
+    seed: int,
+    representative_inputs: Mapping[str, Mapping[str, Any]] | None = None,
+) -> tuple[PositiveCase, ...]:
     """One action-path case per tool whose declared schema yields valid arguments.
 
     Boundary cases only ever ask for an invalid call, so a well-behaved agent
@@ -810,7 +870,8 @@ def build_positive_path_cases(spec: AgentSpec, *, seed: int) -> tuple[Scenario, 
 
     if seed < 0 or seed > 2**63 - 1:
         raise ValueError("seed must be between 0 and 2^63 - 1")
-    cases: list[Scenario] = []
+    supplied_by_tool = representative_inputs or {}
+    cases: list[PositiveCase] = []
     seen: set[str] = set()
     for definition in sorted(
         (item.value for item in spec.tools.items), key=lambda tool: tool.name
@@ -820,11 +881,16 @@ def build_positive_path_cases(spec: AgentSpec, *, seed: int) -> tuple[Scenario, 
         analysis = _analyze(definition)
         if analysis.baseline is None:
             continue
-        scenario = _positive_scenario(definition, analysis.baseline, seed=seed)
+        (extracted,) = extract_capabilities([definition])
+        parameters = {p.name: p for p in extracted.arguments.parameters}
+        arguments, shallow = _apply_representative_inputs(
+            analysis.baseline, supplied_by_tool.get(definition.name, {}), parameters
+        )
+        scenario = _positive_scenario(definition, arguments, seed=seed)
         if scenario.fingerprint in seen:
             continue
         seen.add(scenario.fingerprint)
-        cases.append(scenario)
+        cases.append(PositiveCase(scenario, definition.name, shallow))
     return tuple(cases)
 
 
