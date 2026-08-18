@@ -66,6 +66,9 @@ def test_written_document_is_the_complete_default_contract(tmp_path: Path) -> No
         # Egress is denied unless the target explicitly opts in, and the written
         # document states that rather than leaving it implicit.
         "allow_network": False,
+        # Offline deterministic model is opt-in; the written document states
+        # that rather than leaving it implicit.
+        "controlled_model": False,
         "include_instructions_in_report": False,
         "artifacts_directory": ".agentcheck",
     }

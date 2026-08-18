@@ -7,6 +7,7 @@
   "max_concurrency": 2,
   "environment_allowlist": [],
   "allow_network": false,
+  "controlled_model": false,
   "include_instructions_in_report": false,
   "artifacts_directory": ".agentcheck"
 }
