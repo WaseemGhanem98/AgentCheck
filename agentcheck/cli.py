@@ -681,6 +681,33 @@ def _fixtures_init_command(
     return 0
 
 
+def _print_action_path_exercise(execution: Any) -> None:
+    """Say whether a tool was actually called, not just whether a case existed.
+
+    A pass on an action-path case means two very different things depending on
+    this: the agent called the tool and behaved correctly, or the agent never
+    called it and the trajectory checks held vacuously. Without this line a
+    reader cannot tell them apart.
+    """
+
+    runs = getattr(execution, "runs", ()) or ()
+    action_runs = [run for run in runs if str(run.scenario_id).startswith("action-")]
+    if not action_runs:
+        return
+    exercised = [run for run in action_runs if run.tool_attempts]
+    print()
+    print(
+        f"Action paths exercised: {len(exercised)}/{len(action_runs)} "
+        "(a tool was actually called)"
+    )
+    for run in action_runs:
+        if not run.tool_attempts:
+            print(
+                f"  not exercised: {run.scenario_id} - the agent did not call the tool, "
+                "so trajectory checks held vacuously"
+            )
+
+
 def _print_action_path_coverage(coverage: Any, target: Any) -> None:
     """Say plainly which action paths a model can realistically act on.
 
@@ -956,6 +983,7 @@ def _test_command(
     print(f"Failed:        {counts[Verdict.FAIL]}")
     print(f"Inconclusive:  {counts[Verdict.INCONCLUSIVE]}")
     print(f"Infra errors:  {counts[Verdict.INFRA_ERROR]}")
+    _print_action_path_exercise(execution)
 
     severity_counts = Counter(item.severity for item in execution.findings)
     print()
