@@ -74,7 +74,6 @@ from .base import (
     SupportIssue,
     ToolGatewayProtocol,
 )
-from .controlled_model import ControlledModel
 from .openai_handoff_effects import (
     AgentCheckRunContext,
     ContextAssignment,
@@ -2498,11 +2497,15 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         # controlled_model instead substitutes a deterministic offline model on
         # every reachable agent, so a target whose provider is unreachable can
         # still be evaluated.
-        controlled = (
-            ControlledModel(spec.interface.output_schema.value)
-            if controlled_model
-            else None
-        )
+        # Imported here, not at module scope: controlled_model depends on the
+        # framework SDK, and agentcheck.cli must stay importable when the
+        # optional [agentcheck] extra is absent. _require_sdk() in preflight
+        # has already run by this point.
+        controlled = None
+        if controlled_model:
+            from .controlled_model import ControlledModel
+
+            controlled = ControlledModel(spec.interface.output_schema.value)
         for agent in graph.agents:
             safe_tools = self._safe_tools_for(
                 agent,
