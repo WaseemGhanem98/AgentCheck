@@ -181,7 +181,7 @@ def inspect_target(
         timeout_seconds=timeout_seconds,
     )
     if inspection.value is not None:
-        packs = resolve_policy_packs(root, config)
+        packs = resolve_policy_packs(root, config, spec=inspection.value)
         inspection = replace(
             inspection,
             value=attach_declared_policies(inspection.value, packs),
@@ -242,7 +242,9 @@ def generate_suite(
             "re-run with --force to replace it"
         )
     inspection = inspect_in_subprocess(root, config, timeout_seconds=timeout_seconds)
-    packs = resolve_policy_packs(root, config, policy_packs)
+    packs = resolve_policy_packs(
+        root, config, policy_packs, spec=_require_supported_spec(inspection)
+    )
     spec = attach_declared_policies(_require_supported_spec(inspection), packs)
     active_realizer: object | None = None
     if realize:
@@ -326,7 +328,9 @@ def execute_suite(
     # Freeze repository identity before importing or executing target code.
     revision = _git_revision(root)
     inspection = inspect_in_subprocess(root, config)
-    packs = resolve_policy_packs(root, config)
+    packs = resolve_policy_packs(
+        root, config, spec=_require_supported_spec(inspection)
+    )
     spec = attach_declared_policies(_require_supported_spec(inspection), packs)
 
     frozen: FrozenSuite | None = None
@@ -446,7 +450,7 @@ def replay_suite(
     verify_replay_source_bindings(manifest, root=root, config=config)
     _warn_legacy_source_binding(manifest)
     inspection = inspect_in_subprocess(root, config)
-    packs = resolve_policy_packs(root, config)
+    packs = resolve_policy_packs(root, config, spec=inspection.require_value())
     spec = attach_declared_policies(inspection.require_value(), packs)
     pack_ids = tuple(pack.pack_id for pack in packs)
     verify_replay_spec_bindings(

@@ -23,6 +23,7 @@ from agentcheck.domain import (
 from agentcheck.errors import ConfigurationError
 
 from .builtins import builtin_policy_pack_index
+from .derived import DERIVED_TOOL_RISK_PACK_ID, derive_tool_risk_pack
 from .pack import PolicyPack, PolicyRule, PolicyRuleKind
 
 
@@ -95,12 +96,34 @@ def resolve_policy_packs(
     extra: Sequence[str] | None = None,
     *,
     registry: PolicyPackRegistry | None = None,
+    spec: AgentSpec | None = None,
 ) -> tuple[PolicyPack, ...]:
+    """Resolve every named pack, including the spec-derived one when requested.
+
+    ``derived_tool_risk_v1`` is scoped to the inspected target rather than
+    loaded from disk, so it resolves only when a spec is available. Naming it
+    without one fails closed instead of silently contributing no rules.
+    """
+
     resolver = registry or PolicyPackRegistry()
     packs: list[PolicyPack] = []
     seen: set[str] = set()
     for name in merge_policy_pack_names(config, extra):
-        pack = resolver.resolve(name, root=root)
+        if name == DERIVED_TOOL_RISK_PACK_ID:
+            if spec is None:
+                raise ConfigurationError(
+                    f"policy pack {DERIVED_TOOL_RISK_PACK_ID!r} is derived from the "
+                    "inspected agent and cannot be resolved before inspection"
+                )
+            derived = derive_tool_risk_pack(spec)
+            if derived is None:
+                raise ConfigurationError(
+                    f"policy pack {DERIVED_TOOL_RISK_PACK_ID!r} produced no rules: "
+                    "this target declares no state-changing tool to scope them to"
+                )
+            pack = derived
+        else:
+            pack = resolver.resolve(name, root=root)
         if pack.pack_id in seen:
             continue
         seen.add(pack.pack_id)

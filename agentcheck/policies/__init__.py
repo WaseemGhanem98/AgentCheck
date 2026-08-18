@@ -17,6 +17,7 @@ from .loader import (
     policy_oracle,
     resolve_policy_packs,
 )
+from .derived import DERIVED_TOOL_RISK_PACK_ID, derive_tool_risk_pack
 from .pack import (
     POLICY_PACK_CONTRACT_VERSION,
     PolicyPack,
@@ -25,6 +26,8 @@ from .pack import (
 )
 
 __all__ = [
+    "DERIVED_TOOL_RISK_PACK_ID",
+    "derive_tool_risk_pack",
     "BUILTIN_POLICY_PACKS",
     "CONFIRM_BEFORE_DESTRUCTIVE_V1",
     "NO_DUPLICATE_SIDE_EFFECT_V1",
