@@ -63,6 +63,8 @@ def test_written_document_is_the_complete_default_contract(tmp_path: Path) -> No
         "seed": 1729,
         "max_concurrency": 2,
         "environment_allowlist": [],
+        # Empty by default: the worker may open no network destination at all.
+        "network_allowlist": [],
         # Egress is denied unless the target explicitly opts in, and the written
         # document states that rather than leaving it implicit.
         "allow_network": False,
