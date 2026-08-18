@@ -196,7 +196,7 @@ def test_frozen_suite_round_trips_and_keeps_stable_identity() -> None:
     assert len(builtin_ids) == 12
     assert all(case.scenario.fingerprint == case.scenario.expected_fingerprint() for case in first.cases)
     assert first.rejected == ()
-    assert first.provenance.sources == ("built_in", "schema_boundary")
+    assert first.provenance.sources == ("built_in", "schema_boundary", "positive_path")
     assert all(
         case.lineage.origin is not CaseOrigin.ZERO_INPUT_INVOCATION
         for case in first.cases

@@ -192,7 +192,10 @@ def test_generate_omits_incompatible_built_in_cases(tmp_path: Path) -> None:
     suite = build_frozen_suite(spec, AgentCheckConfig(), seed=1729)
 
     assert suite.cases
-    assert all(case.lineage.origin is CaseOrigin.SCHEMA_BOUNDARY for case in suite.cases)
+    # The point is that no incompatible built-in case leaked in; generated
+    # origins such as the action path are expected alongside the boundaries.
+    assert all(case.lineage.origin is not CaseOrigin.BUILT_IN for case in suite.cases)
+    assert any(case.lineage.origin is CaseOrigin.SCHEMA_BOUNDARY for case in suite.cases)
     assert not any(
         rejected.lineage.origin is CaseOrigin.BUILT_IN for rejected in suite.rejected
     )
@@ -215,7 +218,8 @@ def test_generated_frozen_schema_boundary_suite_is_used_by_test(
     frozen = captured["frozen"]
     valid = captured["valid"]
     assert frozen is not None
-    assert all(case.lineage.origin is CaseOrigin.SCHEMA_BOUNDARY for case in frozen.cases)
+    assert all(case.lineage.origin is not CaseOrigin.BUILT_IN for case in frozen.cases)
+    assert any(case.lineage.origin is CaseOrigin.SCHEMA_BOUNDARY for case in frozen.cases)
     assert {scenario.scenario_id for scenario in valid} == {
         case.scenario.scenario_id for case in frozen.cases
     }

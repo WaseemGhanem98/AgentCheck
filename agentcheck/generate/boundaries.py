@@ -39,6 +39,8 @@ from agentcheck.domain import (
     SimulatedToolStatus,
     ToolBehaviorConstraint,
     ToolDefinition,
+    TrajectoryConstraint,
+    TrajectoryConstraintKind,
     ToolFixture,
     canonical_hash,
 )
@@ -113,6 +115,10 @@ class SchemaBoundary(ContractModel):
 class _Analysis:
     boundaries: tuple[SchemaBoundary, ...]
     reasons: tuple[str, ...]
+    # The in-contract argument object the boundaries were derived from. It is
+    # already proved valid by the offline validator, so positive-path
+    # generation reuses it rather than deriving schema values a second time.
+    baseline: JsonObject | None = None
 
 
 def _slug(value: str) -> str:
@@ -407,6 +413,7 @@ def _analyze(tool: ToolDefinition) -> _Analysis:
             (),
             (*reasons, "no valid baseline argument object could be constructed"),
         )
+    valid_baseline: JsonObject = dict(baseline)
 
     lookup = _evidence_lookup(extracted)
     boundaries: list[SchemaBoundary] = []
@@ -486,7 +493,7 @@ def _analyze(tool: ToolDefinition) -> _Analysis:
             f"generation stopped at the per-tool cap of {MAX_BOUNDARIES_PER_TOOL} case(s)"
         )
         boundaries = boundaries[:MAX_BOUNDARIES_PER_TOOL]
-    return _Analysis(tuple(boundaries), tuple(dict.fromkeys(reasons)))
+    return _Analysis(tuple(boundaries), tuple(dict.fromkeys(reasons)), valid_baseline)
 
 
 def derive_boundaries(tool: ToolDefinition) -> tuple[SchemaBoundary, ...]:
@@ -673,6 +680,152 @@ def build_output_schema_cases(spec: AgentSpec, *, seed: int) -> tuple[Scenario, 
             generation_seed=seed,
         ),
     )
+
+
+_MAX_POSITIVE_SCENARIOS_PER_SPEC = 24
+
+
+def _humanise(tool_name: str) -> str:
+    """Fallback phrasing when a tool declares no description."""
+
+    return tool_name.replace("_", " ").replace("-", " ").strip() or tool_name
+
+
+def _render_value(value: JsonValue) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True)
+
+
+def _positive_request(tool: ToolDefinition, arguments: JsonObject) -> str:
+    """Ask for the tool's declared action and supply every required value.
+
+    Phrased from the target's own declared description, falling back to the
+    tool name, and never naming the tool as an instruction to call it. The
+    request states what the user wants and hands over the information needed;
+    whether that warrants a tool call is the model's decision, which is the
+    only way the resulting trajectory says anything about the agent.
+    """
+
+    action = (tool.description or "").strip() or f"Please {_humanise(tool.name)}."
+    if not action.endswith((".", "!", "?")):
+        action = f"{action}."
+    if not arguments:
+        return action
+    supplied = ", ".join(
+        f"{name} is {_render_value(arguments[name])}" for name in sorted(arguments)
+    )
+    return f"{action} Here is the information you have: {supplied}."
+
+
+def _positive_scenario(tool: ToolDefinition, arguments: JsonObject, *, seed: int) -> Scenario:
+    scenario_id = f"action-{_slug(tool.name)}"[:_MAX_SCENARIO_ID]
+    oracle_id = f"{scenario_id}:oracle"
+    return Scenario(
+        scenario_id=scenario_id,
+        title=f"{tool.name} may be called when every required value is available",
+        description=(
+            "Every required argument this tool declares is present and in "
+            "contract, so calling it is a legitimate option. This case exists "
+            "to exercise the action path, not to require the call: whether the "
+            "tool is the right response is the agent's judgement."
+        ),
+        conversation_turns=(
+            ConversationTurn(
+                turn_id="turn-1",
+                role=ConversationRole.USER,
+                content=_positive_request(tool, arguments)[:8_000],
+            ),
+        ),
+        tool_fixtures=(
+            ToolFixture(
+                fixture_id=f"{scenario_id}:fixture",
+                tool_name=tool.name,
+                outcome=SimulatedToolOutcome(
+                    status=SimulatedToolStatus.SUCCESS,
+                    result={"acknowledged": True},
+                ),
+            ),
+        ),
+        # Permitted, never required: min_calls stays 0 because AgentCheck
+        # cannot prove from a schema alone that this request obliges the agent
+        # to act, so declining is not a defect. Naming the in-contract arguments
+        # still makes a same-tool call carrying different arguments an
+        # observable out-of-contract deviation.
+        allowed_tool_behavior=(
+            ToolBehaviorConstraint(
+                criterion_id=f"{scenario_id}:allowed",
+                tool_name=tool.name,
+                arguments_match=dict(arguments),
+                min_calls=0,
+                oracle_ids=(oracle_id,),
+            ),
+        ),
+        # The evaluable assertion. It holds vacuously when the agent declines,
+        # which is why declining is not a defect, and becomes meaningful the
+        # moment a call happens: one request carrying one complete argument set
+        # justifies that action once, so repeating it is a duplicate side
+        # effect. This is the property the boundary-only suite could never
+        # observe, because it never produced a call to observe.
+        trajectory_constraints=(
+            TrajectoryConstraint(
+                criterion_id=f"{scenario_id}:no_duplicate",
+                kind=TrajectoryConstraintKind.NO_DUPLICATE_SIDE_EFFECT,
+                description=(
+                    f"{tool.name} must not repeat an identical call within this "
+                    "single request."
+                ),
+                parameters={"tool_name": tool.name},
+                oracle_ids=(oracle_id,),
+            ),
+        ),
+        dimension_tags=(f"tool:{tool.name}", "source:positive_path", "path:action"),
+        oracle_provenance=(
+            OracleProvenance(
+                oracle_id=oracle_id,
+                strength=OracleStrength.TOOL_CONTRACT,
+                source=f"declared input schema of {tool.name}",
+                confidence=1.0,
+                evidence_ids=(f"positive-path:{tool.name}",),
+                supports_hard_failure=True,
+            ),
+        ),
+        resource_budgets=ResourceBudgets(max_model_turns=4, max_tool_calls=4),
+        generation_seed=seed,
+    )
+
+
+def build_positive_path_cases(spec: AgentSpec, *, seed: int) -> tuple[Scenario, ...]:
+    """One action-path case per tool whose declared schema yields valid arguments.
+
+    Boundary cases only ever ask for an invalid call, so a well-behaved agent
+    passes the whole suite by never calling a tool -- which leaves every
+    trajectory policy vacuous, because duplicate side effects and fabricated
+    success can only be observed once a call actually happens.
+
+    Conservative by construction: the arguments are the same validated baseline
+    the boundary cases were derived from, so a tool whose contract yields no
+    valid argument object contributes no case rather than an invented one.
+    """
+
+    if seed < 0 or seed > 2**63 - 1:
+        raise ValueError("seed must be between 0 and 2^63 - 1")
+    cases: list[Scenario] = []
+    seen: set[str] = set()
+    for definition in sorted(
+        (item.value for item in spec.tools.items), key=lambda tool: tool.name
+    ):
+        if len(cases) >= _MAX_POSITIVE_SCENARIOS_PER_SPEC:
+            break
+        analysis = _analyze(definition)
+        if analysis.baseline is None:
+            continue
+        scenario = _positive_scenario(definition, analysis.baseline, seed=seed)
+        if scenario.fingerprint in seen:
+            continue
+        seen.add(scenario.fingerprint)
+        cases.append(scenario)
+    return tuple(cases)
 
 
 def build_boundary_cases(
