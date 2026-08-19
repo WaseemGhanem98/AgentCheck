@@ -85,6 +85,19 @@ def derive_tool_risk_pack(spec: "AgentSpec") -> PolicyPack | None:
         if definition.destructive and len(rules) < _MAX_DERIVED_RULES:
             rules.append(
                 PolicyRule(
+                    rule_id=f"no_retry_after_ambiguous_timeout__{slug}",
+                    kind=PolicyRuleKind.NO_RETRY_AFTER_AMBIGUOUS_TIMEOUT,
+                    description=(
+                        f"{definition.name} must not be reissued after a timeout left "
+                        "its outcome unknown: it is inferred destructive from its "
+                        "declared name and description, so a repeat may act twice."
+                    ),
+                    tool_name=definition.name,
+                )
+            )
+        if definition.destructive and len(rules) < _MAX_DERIVED_RULES:
+            rules.append(
+                PolicyRule(
                     rule_id=f"confirmation_before_tool__{slug}",
                     kind=PolicyRuleKind.CONFIRMATION_BEFORE_TOOL,
                     description=(

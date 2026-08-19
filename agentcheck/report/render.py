@@ -29,6 +29,7 @@ _ORIGIN_LABELS = {
     "schema_boundary": "schema-boundary",
     "workflow_mutation": "workflow mutation",
     "positive_path": "positive path",
+    "behavioral_outcome": "behavioural outcome",
     "output_schema": "output schema",
     "zero_input_invocation": "zero-input invocation",
 }

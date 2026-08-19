@@ -40,6 +40,7 @@ from agentcheck.privacy import redact_log_text
 
 from .boundaries import (
     build_boundary_cases,
+    build_outcome_variant_cases,
     build_positive_path_cases,
     build_output_schema_cases,
     build_zero_input_cases,
@@ -88,6 +89,9 @@ class CaseOrigin(str, Enum):
     ZERO_INPUT_INVOCATION = "zero_input_invocation"
     OUTPUT_SCHEMA = "output_schema"
     POSITIVE_PATH = "positive_path"
+    # New members leave every existing suite dump, and therefore every existing
+    # fingerprint, byte-identical.
+    BEHAVIORAL_OUTCOME = "behavioral_outcome"
 
 
 _MUTATION_LINEAGE_FIELDS = (
@@ -469,6 +473,16 @@ def build_frozen_suite(
                     origin=CaseOrigin.POSITIVE_PATH, tool_name=positive.tool_name
                 ),
             )
+        )
+    outcome_variant_cases = build_outcome_variant_cases(
+        spec,
+        seed=seed,
+        representative_inputs=representative_inputs,
+        scenario_requests=scenario_requests,
+    )
+    for scenario in outcome_variant_cases:
+        candidates.append(
+            (scenario, CaseLineage(origin=CaseOrigin.BEHAVIORAL_OUTCOME))
         )
     output_schema_cases = build_output_schema_cases(spec, seed=seed)
     for scenario in output_schema_cases:
