@@ -577,3 +577,80 @@ def test_load_stored_run_rejects_a_symlink_artifact(tmp_path: Path) -> None:
     target.symlink_to(outside)
     with pytest.raises(ConfigurationError, match="symlink"):
         load_stored_run(root, run_id="run-link")
+
+
+def test_report_states_when_an_action_path_was_never_exercised() -> None:
+    """The shared artifact must carry the caveat the terminal prints.
+
+    Without it a reader sees a pass rate and no sign that the agent never
+    called the tool, which is the difference between "behaved correctly" and
+    "was never asked to act".
+    """
+
+    now = utc_now()
+    declined = CanonicalRun(
+        run_id="run-declined",
+        scenario_id="action-send-flagged-notification",
+        target_id="spec",
+        started_at=now,
+        ended_at=now,
+        termination=RunTermination.COMPLETED,
+    )
+
+    report = render_report(
+        run_id="run",
+        target="target",
+        git_revision=None,
+        spec=_spec("agent"),
+        scenarios=(),
+        runs=(declined,),
+        evaluations=(),
+        findings=(),
+    )
+
+    assert "Action paths exercised: 0/1" in report
+    assert "action-send-flagged-notification" in report
+    assert "held vacuously" in report
+    assert "not evidence of correct action behaviour" in report
+
+
+def test_report_case_origins_account_for_every_case() -> None:
+    """Origins must reconcile with the scenario count.
+
+    The breakdown used to name a fixed three origins, so positive-path and
+    output-schema cases vanished from it and the numbers did not add up.
+    """
+
+    scenario = build_account_support_suite(seed=SEED)[0]
+    spec = _spec("Account Support Agent")
+    frozen = FrozenSuite(
+        spec_id=spec.spec_id,
+        seed=SEED,
+        provenance=GeneratorProvenance(
+            generator="test", generator_version="1", sources=("test",)
+        ),
+        coverage=SuiteCoverage(),
+        cases=(
+            FrozenCase(
+                scenario=scenario,
+                lineage=CaseLineage(
+                    origin=CaseOrigin.POSITIVE_PATH, tool_name="delete_account"
+                ),
+            ),
+        ),
+    )
+
+    report = render_report(
+        run_id="run",
+        target="target",
+        git_revision=None,
+        spec=spec,
+        scenarios=(scenario,),
+        runs=(),
+        evaluations=(),
+        findings=(),
+        seed=SEED,
+        frozen_suite=frozen,
+    )
+
+    assert "Case origins: 1 positive path" in report

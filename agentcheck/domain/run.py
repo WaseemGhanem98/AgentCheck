@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Literal
+from typing import Literal, NamedTuple, Sequence
 
 from pydantic import Field, model_validator
 
 from .base import ContractModel, JsonObject, JsonValue, UtcDatetime
+from .scenario import ACTION_SCENARIO_PREFIX
 
 
 CANONICAL_EVENT_CONTRACT_VERSION: Literal["agentcheck.canonical_event.v1"] = (
@@ -225,3 +226,36 @@ class CanonicalRun(ContractModel):
             if not set(outcome.state_transition_ids).issubset(transition_ids):
                 raise ValueError("tool outcomes reference an unknown state transition")
         return self
+
+
+class ActionPathExercise(NamedTuple):
+    """Whether the agent actually called the tool on each action-path case.
+
+    A pass on an action-path case means one of two very different things: the
+    agent called the tool and behaved correctly, or it never called the tool
+    and every trajectory check held vacuously. Both the CLI summary and the
+    HTML report have to draw that distinction, so the classification lives
+    here rather than being recomputed, and worded differently, in each.
+    """
+
+    exercised: tuple[str, ...]
+    not_exercised: tuple[str, ...]
+
+    @property
+    def total(self) -> int:
+        return len(self.exercised) + len(self.not_exercised)
+
+
+def action_path_exercise(runs: Sequence[CanonicalRun]) -> ActionPathExercise:
+    """Split action-path runs by whether a tool call was actually attempted."""
+
+    exercised: list[str] = []
+    not_exercised: list[str] = []
+    for run in runs:
+        if not str(run.scenario_id).startswith(ACTION_SCENARIO_PREFIX):
+            continue
+        if run.tool_attempts:
+            exercised.append(run.scenario_id)
+        else:
+            not_exercised.append(run.scenario_id)
+    return ActionPathExercise(tuple(exercised), tuple(not_exercised))

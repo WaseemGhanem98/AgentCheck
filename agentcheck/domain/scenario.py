@@ -15,6 +15,12 @@ SCENARIO_CONTRACT_VERSION: Literal["agentcheck.scenario.v1"] = (
     "agentcheck.scenario.v1"
 )
 
+# Positive-path cases are the only ones whose pass depends on the agent having
+# actually called the tool, so their IDs carry a prefix that both the generator
+# and every reader of a finished run can recognise. Kept here, next to the
+# scenario contract, so the two never drift apart.
+ACTION_SCENARIO_PREFIX = "action-"
+
 
 class ConversationRole(str, Enum):
     SYSTEM = "system"

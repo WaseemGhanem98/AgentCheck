@@ -27,9 +27,12 @@ from agentcheck.fixtures import (
     FIXTURE_PACK_CONTRACT_VERSION,
     load_representative_inputs,
 )
-from agentcheck.generate.boundaries import build_positive_path_cases
-from agentcheck.domain import AgentSpec, Severity, Verdict
+from agentcheck.domain import AgentSpec, Severity, Verdict, action_path_exercise
 from agentcheck.errors import ConfigurationError, ScenarioValidationError
+from agentcheck.generate.boundaries import (
+    AUTHORED_REQUEST_TAG,
+    build_positive_path_cases,
+)
 from agentcheck.generate.mutations import DEFAULT_MAX_MUTATIONS, MAX_MUTATIONS_PER_SUITE
 from agentcheck.generate.selection import MAX_CASES
 from agentcheck.initialize import DEFAULT_ADAPTER, SUPPORTED_ADAPTERS, write_initial_config
@@ -676,6 +679,14 @@ def _fixtures_init_command(
     print("Replace every REPLACE_ME with a representative test value.")
     print("This file is committed test data: no real customer records, no secrets.")
     print()
+    print(
+        'Each tool also accepts an optional "user_request": the situation that '
+        "makes calling it the right response, in the words a user would use. "
+        "Values alone often leave the action path unexercised, because a "
+        "request assembled from a schema reads as a data handover and an agent "
+        "can answer it without acting."
+    )
+    print()
     print("Next steps:")
     print(f"- agentcheck generate {root}")
     return 0
@@ -690,22 +701,49 @@ def _print_action_path_exercise(execution: Any) -> None:
     reader cannot tell them apart.
     """
 
-    runs = getattr(execution, "runs", ()) or ()
-    action_runs = [run for run in runs if str(run.scenario_id).startswith("action-")]
-    if not action_runs:
+    exercise = action_path_exercise(getattr(execution, "runs", ()) or ())
+    if exercise.total == 0:
         return
-    exercised = [run for run in action_runs if run.tool_attempts]
     print()
     print(
-        f"Action paths exercised: {len(exercised)}/{len(action_runs)} "
+        f"Action paths exercised: {len(exercise.exercised)}/{exercise.total} "
         "(a tool was actually called)"
     )
-    for run in action_runs:
-        if not run.tool_attempts:
-            print(
-                f"  not exercised: {run.scenario_id} - the agent did not call the tool, "
-                "so trajectory checks held vacuously"
-            )
+    for scenario_id in exercise.not_exercised:
+        print(
+            f"  not exercised: {scenario_id} - the agent did not call the tool, "
+            "so trajectory checks held vacuously"
+        )
+    authored = {
+        scenario.scenario_id
+        for scenario in getattr(execution, "scenarios", ()) or ()
+        if AUTHORED_REQUEST_TAG in scenario.dimension_tags
+    }
+    if any(item not in authored for item in exercise.not_exercised):
+        # Valid arguments are not the same as a reason to act. The generated
+        # request states the tool's declared purpose and hands over the values,
+        # which reads as a data handover rather than a situation, and a capable
+        # agent can answer it without acting. Naming the fix here is the only
+        # place the reader is already looking at the problem.
+        print(
+            '  To exercise these, add a "user_request" for the tool in '
+            "agentcheck-fixtures.json describing a realistic situation that "
+            "calls for the action. Declining a request remains a valid agent "
+            "choice, so AgentCheck never counts a missing call as a failure."
+        )
+    if any(item in authored for item in exercise.not_exercised):
+        # Already given a situation a developer wrote and still no call. That
+        # is worth saying plainly, because the usual explanation is not a bad
+        # request: the surrounding application, rather than the agent, performs
+        # the action, and the tool is attached to the agent without being the
+        # path production actually uses.
+        print(
+            "  These already carry an authored request and the agent still did "
+            "not call the tool. That is a legitimate answer if the surrounding "
+            "application performs the action itself, in which case this tool is "
+            "not reachable through the agent and its action path cannot be "
+            "covered here."
+        )
 
 
 def _print_action_path_coverage(coverage: Any, target: Any) -> None:

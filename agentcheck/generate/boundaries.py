@@ -23,6 +23,7 @@ from typing import Any, Literal, Mapping
 from pydantic import Field
 
 from agentcheck.domain import (
+    ACTION_SCENARIO_PREFIX,
     AgentSpec,
     ContractModel,
     ConversationRole,
@@ -684,6 +685,10 @@ def build_output_schema_cases(spec: AgentSpec, *, seed: int) -> tuple[Scenario, 
 
 _MAX_POSITIVE_SCENARIOS_PER_SPEC = 24
 
+# Marks an action case whose request a developer wrote rather than one derived
+# from the tool schema. Only present when a request was actually supplied.
+AUTHORED_REQUEST_TAG = "source:authored_request"
+
 
 @dataclass(frozen=True, slots=True)
 class PositiveCase:
@@ -699,6 +704,7 @@ class PositiveCase:
     scenario: Scenario
     tool_name: str
     shallow_parameters: tuple[str, ...]
+    authored_request: bool = False
 
     @property
     def representative(self) -> bool:
@@ -738,8 +744,14 @@ def _positive_request(tool: ToolDefinition, arguments: JsonObject) -> str:
     return f"{action} Here is the information you have: {supplied}."
 
 
-def _positive_scenario(tool: ToolDefinition, arguments: JsonObject, *, seed: int) -> Scenario:
-    scenario_id = f"action-{_slug(tool.name)}"[:_MAX_SCENARIO_ID]
+def _positive_scenario(
+    tool: ToolDefinition,
+    arguments: JsonObject,
+    *,
+    seed: int,
+    authored_request: str | None = None,
+) -> Scenario:
+    scenario_id = f"{ACTION_SCENARIO_PREFIX}{_slug(tool.name)}"[:_MAX_SCENARIO_ID]
     oracle_id = f"{scenario_id}:oracle"
     return Scenario(
         scenario_id=scenario_id,
@@ -754,7 +766,9 @@ def _positive_scenario(tool: ToolDefinition, arguments: JsonObject, *, seed: int
             ConversationTurn(
                 turn_id="turn-1",
                 role=ConversationRole.USER,
-                content=_positive_request(tool, arguments)[:8_000],
+                content=(authored_request or _positive_request(tool, arguments))[
+                    :8_000
+                ],
             ),
         ),
         tool_fixtures=(
@@ -799,7 +813,13 @@ def _positive_scenario(tool: ToolDefinition, arguments: JsonObject, *, seed: int
                 oracle_ids=(oracle_id,),
             ),
         ),
-        dimension_tags=(f"tool:{tool.name}", "source:positive_path", "path:action"),
+        # The authored tag is added only when a developer actually supplied the
+        # request, so a target without authored requests produces byte-identical
+        # scenarios, and therefore identical fingerprints, to before.
+        dimension_tags=(
+            (f"tool:{tool.name}", "source:positive_path", "path:action")
+            + ((AUTHORED_REQUEST_TAG,) if authored_request else ())
+        ),
         oracle_provenance=(
             OracleProvenance(
                 oracle_id=oracle_id,
@@ -855,6 +875,7 @@ def build_positive_path_cases(
     *,
     seed: int,
     representative_inputs: Mapping[str, Mapping[str, Any]] | None = None,
+    scenario_requests: Mapping[str, str] | None = None,
 ) -> tuple[PositiveCase, ...]:
     """One action-path case per tool whose declared schema yields valid arguments.
 
@@ -871,6 +892,7 @@ def build_positive_path_cases(
     if seed < 0 or seed > 2**63 - 1:
         raise ValueError("seed must be between 0 and 2^63 - 1")
     supplied_by_tool = representative_inputs or {}
+    authored_by_tool = scenario_requests or {}
     cases: list[PositiveCase] = []
     seen: set[str] = set()
     for definition in sorted(
@@ -886,11 +908,18 @@ def build_positive_path_cases(
         arguments, shallow = _apply_representative_inputs(
             analysis.baseline, supplied_by_tool.get(definition.name, {}), parameters
         )
-        scenario = _positive_scenario(definition, arguments, seed=seed)
+        authored = authored_by_tool.get(definition.name)
+        scenario = _positive_scenario(
+            definition, arguments, seed=seed, authored_request=authored
+        )
         if scenario.fingerprint in seen:
             continue
         seen.add(scenario.fingerprint)
-        cases.append(PositiveCase(scenario, definition.name, shallow))
+        cases.append(
+            PositiveCase(
+                scenario, definition.name, shallow, authored_request=authored is not None
+            )
+        )
     return tuple(cases)
 
 

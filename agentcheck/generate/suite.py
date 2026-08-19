@@ -418,6 +418,7 @@ def build_frozen_suite(
     max_cases: int | None = None,
     realizer: Any | None = None,
     representative_inputs: Mapping[str, Mapping[str, Any]] | None = None,
+    scenario_requests: Mapping[str, str] | None = None,
 ) -> FrozenSuite:
     """Derive, deduplicate, lint, and freeze every supported case for a target."""
 
@@ -449,7 +450,10 @@ def build_frozen_suite(
     shallow_tools: list[str] = []
     shallow_parameters: list[str] = []
     for positive in build_positive_path_cases(
-        spec, seed=seed, representative_inputs=representative_inputs
+        spec,
+        seed=seed,
+        representative_inputs=representative_inputs,
+        scenario_requests=scenario_requests,
     ):
         if positive.representative:
             representative_tools.append(positive.tool_name)

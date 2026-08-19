@@ -23,6 +23,7 @@ from agentcheck.fixtures import (
     DEFAULT_FIXTURES_FILENAME,
     load_fixture_pack,
     load_representative_inputs,
+    load_scenario_requests,
 )
 from agentcheck.generate.boundaries import build_positive_path_cases
 from agentcheck.generate.suite import CaseOrigin, build_frozen_suite
@@ -357,3 +358,69 @@ def test_generation_never_executes_a_tool_handler() -> None:
     """Every handler in this module raises; generation reads declarations only."""
 
     assert _positive(_spec(update_seat, set_cabin))
+
+
+# --- authored scenario requests -------------------------------------------
+
+
+def _request_pack(request) -> dict:
+    return {
+        "schema_version": "agentcheck.fixtures.v1",
+        "tools": {
+            "update_seat": {
+                "arguments": {"confirmation_number": "TEST-ABC123", "new_seat": "14A"},
+                "user_request": request,
+            }
+        },
+    }
+
+
+def test_authored_request_loads_alongside_values(tmp_path: Path) -> None:
+    """Values and situation are separate answers to the same coverage gap."""
+
+    situation = "I need to move seats; my confirmation number is TEST-ABC123."
+    _write(tmp_path, _request_pack(situation))
+    spec = _spec(update_seat)
+
+    assert load_scenario_requests(tmp_path, spec) == {"update_seat": situation}
+    # The values still load unchanged; the two layers do not interfere.
+    assert load_representative_inputs(tmp_path, spec) == {
+        "update_seat": {"confirmation_number": "TEST-ABC123", "new_seat": "14A"}
+    }
+
+
+def test_absent_authored_request_is_not_an_error(tmp_path: Path) -> None:
+    _write(tmp_path, _pack(confirmation_number="TEST-ABC123", new_seat="14A"))
+
+    assert load_scenario_requests(tmp_path, _spec(update_seat)) == {}
+
+
+def test_blank_authored_request_fails_closed(tmp_path: Path) -> None:
+    """An empty request would silently fall back and look like it applied."""
+
+    _write(tmp_path, _request_pack("   "))
+
+    with pytest.raises(ConfigurationError, match="at least 1 character"):
+        load_scenario_requests(tmp_path, _spec(update_seat))
+
+
+def test_credential_shaped_authored_request_is_refused(tmp_path: Path) -> None:
+    """The request text is committed and reaches the frozen suite."""
+
+    _write(tmp_path, _request_pack("Use key sk-live-abcdef0123456789abcdef0123."))
+
+    with pytest.raises(ConfigurationError, match="credential"):
+        load_scenario_requests(tmp_path, _spec(update_seat))
+
+
+def test_authored_request_for_an_unknown_tool_fails_closed(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "schema_version": "agentcheck.fixtures.v1",
+            "tools": {"no_such_tool": {"user_request": "Do the thing."}},
+        },
+    )
+
+    with pytest.raises(ConfigurationError, match="unknown tool"):
+        load_scenario_requests(tmp_path, _spec(update_seat))

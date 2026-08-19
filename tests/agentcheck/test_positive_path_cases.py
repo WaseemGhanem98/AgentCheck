@@ -237,3 +237,115 @@ def test_output_schema_targets_are_unaffected() -> None:
     """A tool-less structured-output target still derives no action path."""
 
     assert _positive(_spec(output_type=_Plan)) == ()
+
+
+def test_an_authored_request_replaces_the_generated_one() -> None:
+    """A developer can supply the situation a schema cannot describe.
+
+    Valid arguments do not make a reason to act. The generated request states
+    the tool's purpose and hands over values, which reads as a data handover;
+    measured on two unrelated targets, a capable model answered it without
+    calling the tool, leaving the action path unexercised.
+    """
+
+    authored = (
+        "Please review this draft before it goes out. The customer threatened "
+        "legal action over invoice 4471 and the draft reply is dismissive."
+    )
+    cases = build_positive_path_cases(
+        _spec(update_seat),
+        seed=1729,
+        scenario_requests={"update_seat": authored},
+    )
+
+    (case,) = cases
+    assert case.scenario.conversation_turns[0].content == authored
+    assert case.authored_request is True
+    assert "source:authored_request" in case.scenario.dimension_tags
+
+
+def test_an_unauthored_case_is_unchanged_by_the_feature() -> None:
+    """Targets without an authored request keep their existing fingerprint.
+
+    The authored tag is conditional precisely so that adding this capability
+    does not invalidate suites that never use it.
+    """
+
+    spec = _spec(update_seat)
+    before = build_positive_path_cases(spec, seed=1729)
+    after = build_positive_path_cases(spec, seed=1729, scenario_requests={})
+
+    assert before[0].scenario.fingerprint == after[0].scenario.fingerprint
+    assert "source:authored_request" not in after[0].scenario.dimension_tags
+    assert after[0].authored_request is False
+
+
+def test_an_authored_request_for_another_tool_does_not_leak() -> None:
+    spec = _spec(update_seat, lookup_account)
+    cases = build_positive_path_cases(
+        spec, seed=1729, scenario_requests={"update_seat": "Situation for seats."}
+    )
+
+    by_tool = {case.tool_name: case for case in cases}
+    assert by_tool["update_seat"].scenario.conversation_turns[0].content == (
+        "Situation for seats."
+    )
+    assert by_tool["lookup_account"].authored_request is False
+    assert "Look up an account" in (
+        by_tool["lookup_account"].scenario.conversation_turns[0].content
+    )
+
+
+def _exercise_output(scenario, run, capsys) -> str:
+    from types import SimpleNamespace
+
+    from agentcheck.cli import _print_action_path_exercise
+
+    _print_action_path_exercise(
+        SimpleNamespace(runs=(run,), scenarios=(scenario,))
+    )
+    return capsys.readouterr().out
+
+
+def _declined_run(scenario_id: str):
+    from agentcheck.domain import CanonicalRun, RunTermination, utc_now
+
+    now = utc_now()
+    return CanonicalRun(
+        run_id="r",
+        scenario_id=scenario_id,
+        target_id="spec",
+        started_at=now,
+        ended_at=now,
+        termination=RunTermination.COMPLETED,
+    )
+
+
+def test_unexercised_generated_case_suggests_authoring_a_request(capsys) -> None:
+    (case,) = build_positive_path_cases(_spec(update_seat), seed=1729)
+    output = _exercise_output(
+        case.scenario, _declined_run(case.scenario.scenario_id), capsys
+    )
+
+    assert "Action paths exercised: 0/1" in output
+    assert '"user_request"' in output
+
+
+def test_unexercised_authored_case_does_not_repeat_the_suggestion(capsys) -> None:
+    """Telling a developer to add what they already added is noise.
+
+    An agent that declines a request a developer actually wrote usually means
+    the surrounding application performs the action, so the tool is not
+    reachable through the agent at all.
+    """
+
+    (case,) = build_positive_path_cases(
+        _spec(update_seat), seed=1729, scenario_requests={"update_seat": "A situation."}
+    )
+    output = _exercise_output(
+        case.scenario, _declined_run(case.scenario.scenario_id), capsys
+    )
+
+    assert "Action paths exercised: 0/1" in output
+    assert '"user_request"' not in output
+    assert "already carry an authored request" in output

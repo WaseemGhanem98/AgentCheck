@@ -49,6 +49,7 @@ from .finding import (
 from .run import (
     CANONICAL_EVENT_CONTRACT_VERSION,
     CANONICAL_RUN_CONTRACT_VERSION,
+    ActionPathExercise,
     CanonicalEvent,
     CanonicalEventType,
     CanonicalRun,
@@ -60,8 +61,10 @@ from .run import (
     ToolOutcome,
     ToolOutcomeStatus,
     UsageMetrics,
+    action_path_exercise,
 )
 from .scenario import (
+    ACTION_SCENARIO_PREFIX,
     SCENARIO_CONTRACT_VERSION,
     ConversationRole,
     ConversationTurn,
@@ -133,6 +136,9 @@ __all__ = [
     "RootCauseLayer",
     "RunTermination",
     "RuntimeSpec",
+    "ACTION_SCENARIO_PREFIX",
+    "ActionPathExercise",
+    "action_path_exercise",
     "Scenario",
     "Severity",
     "SimulatedToolOutcome",

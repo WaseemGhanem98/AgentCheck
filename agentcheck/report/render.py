@@ -6,11 +6,32 @@ import statistics
 from collections import Counter
 from typing import Any, Iterable
 
-from agentcheck.domain import AgentSpec, CanonicalRun, CaseEvaluation, Finding, Scenario, Verdict
+from agentcheck.domain import (
+    AgentSpec,
+    CanonicalRun,
+    CaseEvaluation,
+    Finding,
+    Scenario,
+    Verdict,
+    action_path_exercise,
+)
 from agentcheck.generate.selection import SelectionPlan
 from agentcheck.generate.suite import FrozenSuite
 from agentcheck.privacy import redact_artifact
 from agentcheck.review.contract import HumanReview, bound_reviews_for_finding
+
+
+# Established report wording, kept stable so the breakdown reads the same as it
+# always has. Unknown origins fall back to their identifier with underscores
+# relaxed, so a new origin appears in the totals instead of silently vanishing.
+_ORIGIN_LABELS = {
+    "built_in": "built-in",
+    "schema_boundary": "schema-boundary",
+    "workflow_mutation": "workflow mutation",
+    "positive_path": "positive path",
+    "output_schema": "output schema",
+    "zero_input_invocation": "zero-input invocation",
+}
 
 
 def _escape(value: Any) -> str:
@@ -253,14 +274,15 @@ def render_report(
     ]
     origin_html = ""
     if origin_counts:
+        # Render every origin actually present rather than a fixed list. The
+        # fixed list omitted positive-path and output-schema cases, so the
+        # breakdown did not add up to the scenario count and a reader could not
+        # tell which kinds of case the run contained.
         origin_parts = [
-            f"{origin_counts.get('built_in', 0)} built-in",
-            f"{origin_counts.get('schema_boundary', 0)} schema-boundary",
-            f"{origin_counts.get('workflow_mutation', 0)} workflow mutation",
+            f"{count} {_ORIGIN_LABELS.get(origin, origin.replace('_', ' '))}"
+            for origin, count in sorted(origin_counts.items())
+            if count
         ]
-        zero_input = origin_counts.get("zero_input_invocation", 0)
-        if zero_input:
-            origin_parts.append(f"{zero_input} zero-input invocation")
         origin_html = "<p>Case origins: " + " · ".join(origin_parts) + "</p>"
     policy_html = (
         f"<p>Declared policy packs: {_escape(', '.join(policy_ids))}</p>"
@@ -275,6 +297,25 @@ def render_report(
             f"<p>Boundary kinds: {_escape(', '.join(coverage.boundary_kinds) or 'None recorded')}</p>"
             "<p>Unsupported schema features: "
             f"{_escape(', '.join(coverage.unsupported_schema_features) or 'None recorded')}</p>"
+        )
+
+    # The report is the artifact that gets shared, so it has to carry the same
+    # caveat the terminal prints. Without it a reader sees a pass rate and no
+    # sign that the agent never called the tool, which is the difference
+    # between "behaved correctly" and "was never asked to act".
+    exercise = action_path_exercise(runs)
+    exercise_html = ""
+    if exercise.total:
+        not_exercised_html = "".join(
+            f"<li><span class=\"mono\">{_escape(scenario_id)}</span> — the agent did "
+            "not call the tool, so this case's trajectory checks held vacuously and "
+            "its pass is not evidence of correct action behaviour.</li>"
+            for scenario_id in exercise.not_exercised
+        )
+        exercise_html = (
+            f"<p>Action paths exercised: {len(exercise.exercised)}/{exercise.total} "
+            "(a tool was actually called)</p>"
+            + (f"<ul>{not_exercised_html}</ul>" if not_exercised_html else "")
         )
     selection_html = ""
     if plan is not None:
@@ -330,7 +371,7 @@ def render_report(
       ('Known cost', _reported_total(cost_values, len(runs), ' USD')),
   ))}</section>
   <section class="panel"><h2>Target and AgentSpec</h2><p>Framework: {_escape(spec.identity.framework.value)} {_escape(spec.identity.framework_version.value or '')} · Model: {_escape(spec.identity.model.value or 'Unknown')}</p><p>Tools ({len(tools)}): {_escape(', '.join(tool.name for tool in tools))}</p><p>Capabilities ({len(capabilities)}): {_escape(', '.join(item.name for item in capabilities) or 'None derived')}</p><p>Unknown properties: {len(spec.unknowns)}</p>{policy_html}<h3>Instructions</h3>{instruction_html}</section>
-  <section class="panel"><h2>Coverage and reproducibility</h2><p>{len(scenarios)} valid scenarios · {len(dimensions)} distinct dimension tags</p><p>{_escape(', '.join(dimensions))}</p>{origin_html}{coverage_extra}{selection_html}<p>Every case records its generation seed and structural fingerprint. Invalid scenarios are excluded from these counts. Cases excluded by coverage selection are listed above and are not scored as passing.</p></section>
+  <section class="panel"><h2>Coverage and reproducibility</h2><p>{len(scenarios)} valid scenarios · {len(dimensions)} distinct dimension tags</p><p>{_escape(', '.join(dimensions))}</p>{origin_html}{coverage_extra}{exercise_html}{selection_html}<p>Every case records its generation seed and structural fingerprint. Invalid scenarios are excluded from these counts. Cases excluded by coverage selection are listed above and are not scored as passing.</p></section>
   <section><h2>Findings</h2>{finding_html}</section>
   <section><h2>Scenarios</h2>{''.join(cases)}</section>
 </main></body></html>"""

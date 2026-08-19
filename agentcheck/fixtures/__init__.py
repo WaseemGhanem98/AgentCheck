@@ -3,6 +3,7 @@
 from .loader import (
     load_fixture_pack,
     load_representative_inputs,
+    load_scenario_requests,
     validate_fixture_pack,
 )
 from .pack import (
@@ -19,5 +20,6 @@ __all__ = [
     "ToolInputValues",
     "load_fixture_pack",
     "load_representative_inputs",
+    "load_scenario_requests",
     "validate_fixture_pack",
 ]

@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from agentcheck.domain import (
+    action_path_exercise,
     ActionKind,
     AgentProperty,
     AgentSpec,
@@ -554,3 +555,63 @@ def test_critical_findings_require_deterministic_or_human_confirmation() -> None
         critical_basis=CriticalFindingBasis.DETERMINISTIC_EVIDENCE,
     )
     assert Finding.from_json(finding.canonical_json()) == finding
+
+
+def test_action_path_exercise_separates_real_calls_from_vacuous_passes() -> None:
+    """A pass on an action case is only behavioural evidence if a tool ran."""
+
+    now = NOW
+    called_event = CanonicalEvent(
+        event_id="event-called",
+        run_id="run-called",
+        sequence=0,
+        event_type=CanonicalEventType.TOOL_ATTEMPT,
+        timestamp=now,
+        payload={"tool_name": "send_report"},
+    )
+    called = CanonicalRun(
+        run_id="run-called",
+        scenario_id="action-send-report",
+        target_id="spec",
+        started_at=now,
+        ended_at=now,
+        termination=RunTermination.COMPLETED,
+        events=(called_event,),
+        tool_attempts=(
+            ToolAttempt(
+                attempt_id="attempt-1",
+                event_id=called_event.event_id,
+                tool_name="send_report",
+                arguments={},
+                sequence=0,
+                timestamp=now,
+            ),
+        ),
+    )
+    declined = CanonicalRun(
+        run_id="run-declined",
+        scenario_id="action-archive-report",
+        target_id="spec",
+        started_at=now,
+        ended_at=now,
+        termination=RunTermination.COMPLETED,
+    )
+    # A boundary case is not an action path, so it must not be counted either way.
+    boundary = CanonicalRun(
+        run_id="run-boundary",
+        scenario_id="boundary-send-report-missing-required",
+        target_id="spec",
+        started_at=now,
+        ended_at=now,
+        termination=RunTermination.COMPLETED,
+    )
+
+    exercise = action_path_exercise((called, declined, boundary))
+
+    assert exercise.exercised == ("action-send-report",)
+    assert exercise.not_exercised == ("action-archive-report",)
+    assert exercise.total == 2
+
+
+def test_action_path_exercise_is_empty_without_action_cases() -> None:
+    assert action_path_exercise(()).total == 0

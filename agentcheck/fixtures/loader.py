@@ -138,6 +138,15 @@ def validate_fixture_pack(pack: FixturePack, spec: AgentSpec) -> dict[str, JsonO
                     f"fixture value for {tool_name}.{where} does not satisfy the "
                     f"declared schema: {first.message}"
                 )
+        if values.user_request is not None:
+            # Already stripped and length-checked by the contract model, so a
+            # blank request fails at parse time and never reaches here.
+            request = values.user_request
+            if redact_log_text(request) != request:
+                raise ConfigurationError(
+                    f"{tool_name}.user_request looks like it contains a credential; "
+                    "fixtures are committed test data and must not contain secrets"
+                )
         resolved[tool_name] = dict(values.arguments)
     return resolved
 
@@ -153,8 +162,32 @@ def load_representative_inputs(
     return validate_fixture_pack(pack, spec)
 
 
+def load_scenario_requests(
+    root: Path, spec: AgentSpec, *, filename: str | None = None
+) -> dict[str, str]:
+    """Developer-authored request text per tool, or an empty mapping.
+
+    Kept separate from :func:`load_representative_inputs` because the two
+    answer different questions: that one supplies the values an action needs,
+    this one supplies the situation that makes acting the right response.
+    Validation is shared, so an authored request is checked against the same
+    tool contract before it can shape a scenario.
+    """
+
+    pack = load_fixture_pack(root, filename=filename)
+    if pack is None:
+        return {}
+    validate_fixture_pack(pack, spec)
+    return {
+        name: values.user_request
+        for name, values in sorted(pack.tools.items())
+        if values.user_request is not None
+    }
+
+
 __all__ = [
     "load_fixture_pack",
     "load_representative_inputs",
+    "load_scenario_requests",
     "validate_fixture_pack",
 ]

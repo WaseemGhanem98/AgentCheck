@@ -38,6 +38,16 @@ class ToolInputValues(ContractModel):
     """Representative arguments for one tool, keyed by parameter name."""
 
     arguments: JsonObject = Field(default_factory=dict)
+    # The human-facing half of the same problem. Valid argument values are not
+    # enough on their own: a request assembled from a schema reads as a data
+    # handover ("reason is ..., original_sender is ..."), and a capable model
+    # answers it without acting, which leaves the action path unexercised and
+    # every trajectory check on it vacuous. Measured on two unrelated targets.
+    # A developer knows the situation that genuinely calls for the tool, so
+    # this is where they write it. Frozen into the suite like any other input,
+    # so the run stays deterministic and replayable; a future authoring layer
+    # can emit this field rather than deciding anything at run time.
+    user_request: str | None = Field(default=None, min_length=1, max_length=8_000)
 
 
 class FixturePack(ContractModel):
