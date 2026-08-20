@@ -35,7 +35,8 @@ jobs:
   tests:
     name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 60, not 30, because this job is deliberately serial. See the Test step.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -66,7 +67,25 @@ jobs:
         run: python -m pip install -e ".[dev]"
 
       - name: Test
-        run: python -m pytest tests -q -n 2
+        # No pytest-level parallelism, on purpose, and this is not a knob to
+        # turn up for a faster build.
+        #
+        # AgentCheck runs every scenario in its own child process under a 10s
+        # wall-clock budget. That budget is a product default and the suite's
+        # ability to detect a starved scenario depends on it, so it is not
+        # something to raise to buy CI headroom. But pytest-xdist workers each
+        # spawn their own scenario children, so `-n 2` on a hosted runner means
+        # roughly four processes competing for two cores. The scenarios then
+        # lose their budget and real verdicts come back as INFRA_ERROR.
+        #
+        # That is not hypothetical: at `-n 2` this suite returned 10 failed /
+        # 920 passed on 3.11 and 3.12 while 3.10 passed, all from the same
+        # commit that passes 924/924 on a 14-core machine. Flaky-by-hardware is
+        # the worst property an evaluation tool's own CI can have.
+        #
+        # Serially, the only concurrency is AgentCheck's own max_concurrency,
+        # which each scenario's budget was measured against.
+        run: python -m pytest tests -q
 
   base-install:
     name: Base install has no framework
