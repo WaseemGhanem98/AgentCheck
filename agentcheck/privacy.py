@@ -5,7 +5,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
-from agentlens_sdk.client import DEFAULT_REDACTED_KEYS, redact_text, sanitize_value
+from agentcheck.redaction import DEFAULT_REDACTED_KEYS, redact_text, sanitize_value
 
 
 # These are evaluation resource metrics, not authentication material. AgentLens

@@ -73,6 +73,7 @@ from .base import (
     PreparedTarget,
     SupportIssue,
     ToolGatewayProtocol,
+    missing_extra_message,
 )
 from .openai_handoff_effects import (
     AgentCheckRunContext,
@@ -128,8 +129,7 @@ SUPPORTED_SDK_MINOR = (0, 20)
 def _require_sdk() -> None:
     if _SDK_IMPORT_ERROR is not None:
         raise AdapterDependencyError(
-            "OpenAI Agents SDK support requires the `agentcheck` extra "
-            "(`pip install 'agentlens[agentcheck]'`)."
+            missing_extra_message("OpenAI Agents SDK support", "openai-agents")
         ) from _SDK_IMPORT_ERROR
 
 

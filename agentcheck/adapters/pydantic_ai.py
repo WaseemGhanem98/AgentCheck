@@ -63,6 +63,7 @@ from .base import (
     PreparedTarget,
     SupportIssue,
     ToolGatewayProtocol,
+    missing_extra_message,
 )
 
 FRAMEWORK_NAME = "pydantic_ai"
@@ -97,8 +98,7 @@ except Exception as exc:  # pragma: no cover - exercised without the extra
 def _require_sdk() -> None:
     if _SDK_IMPORT_ERROR is not None:
         raise AdapterDependencyError(
-            "PydanticAI support requires the `agentcheck-pydantic-ai` extra "
-            "(`pip install 'agentlens[agentcheck-pydantic-ai]'`)."
+            missing_extra_message("PydanticAI support", "pydantic-ai")
         ) from _SDK_IMPORT_ERROR
 
 

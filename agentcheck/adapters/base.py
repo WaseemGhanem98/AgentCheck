@@ -9,6 +9,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from importlib import metadata as importlib_metadata
 from typing import TYPE_CHECKING, Any, Awaitable, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -27,6 +28,28 @@ class AdapterDependencyError(AdapterError):
 
 class AdapterRuntimeError(AdapterError):
     """Raised when the framework run fails for adapter or platform reasons."""
+
+
+def missing_extra_message(subject: str, extra: str) -> str:
+    """Name the install command that actually works for this installation.
+
+    ``agentcheck`` is published on its own, but the same package is also still
+    shipped inside the private AgentLens distribution during the split. Telling
+    a developer to install an extra of a distribution they do not have is worse
+    than saying nothing, so the providing distribution is read at runtime.
+    """
+
+    distribution = "agentcheck"
+    try:
+        providers = importlib_metadata.packages_distributions().get("agentcheck") or ()
+    except Exception:  # pragma: no cover - metadata is best-effort, never fatal
+        providers = ()
+    if providers and "agentcheck" not in providers:
+        distribution = sorted(providers)[0]
+    return (
+        f"{subject} requires the `{extra}` extra "
+        f"(`pip install '{distribution}[{extra}]'`)."
+    )
 
 
 @dataclass(frozen=True)
