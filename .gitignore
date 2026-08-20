@@ -1,0 +1,47 @@
+# Environment files (safe templates remain versioned)
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Python environments and generated packages
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+wheels/
+pip-wheel-metadata/
+
+# Python bytecode and tool caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.hypothesis/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.tox/
+.nox/
+
+# Evaluation run artifacts. These sit next to a target, contain absolute host
+# paths and captured model output, and are never committed.
+.agentcheck/
+*.log
+*.sqlite
+*.sqlite3
+*.tmp
+*.swp
+*.swo
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

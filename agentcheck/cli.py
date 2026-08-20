@@ -1,0 +1,1392 @@
+"""Command-line interface for the deterministic AgentCheck workflow."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+from collections import Counter
+from typing import Any, Mapping, Sequence
+
+from agentcheck import __version__
+from agentcheck.adapters.base import SupportIssue
+from agentcheck.application import (
+    execute_suite,
+    generate_suite,
+    inspect_target,
+    replay_suite,
+    shrink_suite,
+)
+from agentcheck.baseline.contract import DEFAULT_BASELINE_FILENAME
+from agentcheck.baseline.service import check_baseline, create_baseline, encode_comparison
+from agentcheck.config import DEFAULT_ENTRYPOINT, contained_path, entrypoint_location
+from agentcheck.fixtures import (
+    DEFAULT_FIXTURES_FILENAME,
+    FIXTURE_PACK_CONTRACT_VERSION,
+    load_representative_inputs,
+)
+from agentcheck.domain import AgentSpec, Severity, Verdict, action_path_exercise
+from agentcheck.errors import ConfigurationError, ScenarioValidationError
+from agentcheck.generate.boundaries import (
+    AUTHORED_REQUEST_TAG,
+    build_positive_path_cases,
+)
+from agentcheck.generate.mutations import DEFAULT_MAX_MUTATIONS, MAX_MUTATIONS_PER_SUITE
+from agentcheck.generate.selection import MAX_CASES
+from agentcheck.initialize import DEFAULT_ADAPTER, SUPPORTED_ADAPTERS, write_initial_config
+from agentcheck.inspect.capabilities import ExtractedCapability, extract_capabilities
+from agentcheck.privacy import redact_artifact, redact_log_text
+from agentcheck.report import render_stored_run
+from agentcheck.review import HUMAN_DECISIONS, HumanDecision
+from agentcheck.review.service import record_finding_review
+from agentcheck.shrink import (
+    DEFAULT_MAX_CANDIDATES,
+    DEFAULT_MAX_ROUNDS,
+    MAX_MAX_CANDIDATES,
+    MAX_MAX_ROUNDS,
+)
+
+
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$")
+
+
+def _run_id(value: str) -> str:
+    if _RUN_ID_RE.fullmatch(value) is None:
+        raise argparse.ArgumentTypeError(
+            "run ID must contain only letters, digits, underscores, or hyphens"
+        )
+    return value
+
+
+def _max_cases(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("max-cases must be an integer") from exc
+    if parsed < 1 or parsed > MAX_CASES:
+        raise argparse.ArgumentTypeError(
+            f"max-cases must be between 1 and {MAX_CASES}"
+        )
+    return parsed
+
+
+def _max_candidates(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("max-candidates must be an integer") from exc
+    if parsed < 1 or parsed > MAX_MAX_CANDIDATES:
+        raise argparse.ArgumentTypeError(
+            f"max-candidates must be between 1 and {MAX_MAX_CANDIDATES}"
+        )
+    return parsed
+
+
+def _max_rounds(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("max-rounds must be an integer") from exc
+    if parsed < 1 or parsed > MAX_MAX_ROUNDS:
+        raise argparse.ArgumentTypeError(
+            f"max-rounds must be between 1 and {MAX_MAX_ROUNDS}"
+        )
+    return parsed
+
+
+def _max_mutations(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("max-mutations must be an integer") from exc
+    if parsed < 1 or parsed > MAX_MUTATIONS_PER_SUITE:
+        raise argparse.ArgumentTypeError(
+            f"max-mutations must be between 1 and {MAX_MUTATIONS_PER_SUITE}"
+        )
+    return parsed
+
+
+def _seed(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("seed must be an integer") from exc
+    if parsed < 0 or parsed > 2**63 - 1:
+        raise argparse.ArgumentTypeError("seed must be between 0 and 2^63 - 1")
+    return parsed
+
+
+def _add_python_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--python",
+        dest="python_executable",
+        metavar="PATH",
+        help=(
+            "Python interpreter for the isolated worker. Defaults to the "
+            "interpreter that invoked AgentCheck. A relative path must stay "
+            "inside the target (for example .venv/bin/python). AgentCheck does "
+            "not install packages automatically."
+        ),
+    )
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="agentcheck",
+        description="Safely evaluate a trusted local AI agent with deterministic scenarios.",
+    )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    init_parser = commands.add_parser(
+        "init",
+        help="write an explicit agentcheck.json for a target directory",
+        description=(
+            "Write an explicit local AgentCheck configuration. This command never "
+            "imports or executes the target, so it is safe to run against code that "
+            "has not been reviewed yet."
+        ),
+    )
+    init_parser.add_argument("target", nargs="?", default=".")
+    init_parser.add_argument(
+        "--entrypoint",
+        default=DEFAULT_ENTRYPOINT,
+        help=(
+            "agent source inside the target: 'relative/path.py:attribute' or "
+            "the explicit factory form 'relative/path.py:attribute()'"
+        ),
+    )
+    init_parser.add_argument(
+        "--adapter",
+        default=DEFAULT_ADAPTER,
+        choices=SUPPORTED_ADAPTERS,
+        help="framework adapter used to inspect and run the target",
+    )
+    init_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="replace an existing agentcheck.json instead of refusing",
+    )
+
+    inspect_parser = commands.add_parser(
+        "inspect",
+        help="import a trusted local agent and inspect it without running a turn",
+        description=(
+            "Import the configured trusted local agent in a child process "
+            "(executing its module-level code, and calling an explicit factory "
+            "entrypoint when configured), then inspect its metadata without "
+            "running an agent turn. Inspection describes the exported object "
+            "after import; it does not prove the complete runtime application "
+            "has no later-attached capabilities."
+        ),
+    )
+    inspect_parser.add_argument("target", nargs="?", default=".")
+    inspect_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit the versioned AgentSpec as JSON",
+    )
+    _add_python_option(inspect_parser)
+
+    generate_parser = commands.add_parser(
+        "generate",
+        help="derive, lint, and freeze a deterministic suite for a trusted local agent",
+        description=(
+            "Import the configured trusted local agent in a child process "
+            "(executing its module-level code), derive compatible built-in cases "
+            "when the spec satisfies the configured suite, add schema-boundary "
+            "cases, lint them, and write a frozen suite. Workflow "
+            "mutations are off by default. Coverage selection is off unless "
+            "--max-cases is passed. The written file is inert data, not a "
+            "replay manifest, and is not a security sandbox."
+        ),
+    )
+    generate_parser.add_argument("target", nargs="?", default=".")
+    generate_parser.add_argument(
+        "--seed",
+        type=_seed,
+        help="override the configured suite seed recorded into the frozen suite",
+    )
+    generate_parser.add_argument(
+        "--out",
+        help=(
+            "relative path inside the target for the frozen suite "
+            "(defaults to suite_path or agentcheck-suite.json)"
+        ),
+    )
+    generate_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="replace an existing frozen suite instead of refusing",
+    )
+    generate_parser.add_argument(
+        "--mutations",
+        action="store_true",
+        help="include bounded workflow mutations of lint-clean built-in cases",
+    )
+    generate_parser.add_argument(
+        "--max-mutations",
+        type=_max_mutations,
+        help=(
+            "maximum mutation-derived cases to freeze (requires --mutations; "
+            f"default {DEFAULT_MAX_MUTATIONS})"
+        ),
+    )
+    generate_parser.add_argument(
+        "--policy-pack",
+        action="append",
+        dest="policy_packs",
+        metavar="NAME",
+        help=(
+            "declare a versioned policy pack by built-in name or in-target path "
+            "(repeatable)"
+        ),
+    )
+    generate_parser.add_argument(
+        "--realize",
+        action="store_true",
+        help=(
+            "opt in to consent-gated LLM rewriting of display text only; "
+            "requires llm_realization.enabled and an allowlisted provider credential"
+        ),
+    )
+    generate_parser.add_argument(
+        "--max-cases",
+        type=_max_cases,
+        help=(
+            "maximum lint-clean cases to freeze after deterministic coverage "
+            f"selection (default: keep every valid case; maximum {MAX_CASES})"
+        ),
+    )
+    _add_python_option(generate_parser)
+
+    test_parser = commands.add_parser(
+        "test",
+        help="run the deterministic Phase 1 suite in isolated child processes",
+        description=(
+            "Inspect the target, fail closed on unsupported preflight codes, then "
+            "run a compatible frozen suite or the matching built-in suite. "
+            "account_support_v1 is used only when the spec declares that suite's "
+            "required tools. A supported target with no compatible suite is not "
+            "PASS; run generate or provide a frozen suite. Network access is "
+            "disabled during evaluation so a target cannot cause external side "
+            'effects; set "allow_network": true in agentcheck.json to reach a '
+            "real provider."
+        ),
+    )
+    test_parser.add_argument("target", nargs="?", default=".")
+    test_parser.add_argument("--seed", type=_seed, help="override the configured suite seed")
+    test_parser.add_argument(
+        "--run-id",
+        type=_run_id,
+        help="set a safe artifact run ID (normally generated automatically)",
+    )
+    test_parser.add_argument(
+        "--no-store",
+        action="store_true",
+        help="skip writing the local SQLite evaluation index",
+    )
+    test_parser.add_argument(
+        "--select",
+        choices=("coverage",),
+        help=(
+            "run a deterministic coverage-maximizing subset instead of every "
+            "valid case; excluded cases are recorded and never scored as passing"
+        ),
+    )
+    _add_python_option(test_parser)
+
+    report_parser = commands.add_parser(
+        "report",
+        help="render a stored run's HTML report without rerunning cases",
+        description=(
+            "Read stored evaluation artifacts and regenerate the offline HTML "
+            "report. This command never imports the target, never spawns a worker, "
+            "and never makes a network call."
+        ),
+    )
+    report_parser.add_argument("target", nargs="?", default=".")
+    report_parser.add_argument(
+        "--run-id",
+        type=_run_id,
+        help="render this stored run ID",
+    )
+    report_parser.add_argument(
+        "--latest",
+        action="store_true",
+        help="render the most recently indexed run (default when --run-id is omitted)",
+    )
+    report_parser.add_argument(
+        "--out",
+        help="relative path inside the target for the HTML report",
+    )
+
+    replay_parser = commands.add_parser(
+        "replay",
+        help="re-execute a stored replay manifest without using disclosure artifacts",
+        description=(
+            "Load an agentcheck.replay_manifest.v1 document as untrusted input, "
+            "verify spec and source bindings (including the source file-set when "
+            "present), and re-run its scenarios through the existing isolated "
+            "ToolGateway. Frozen suites, suite.json, SQLite, "
+            "and HTML reports are not replay manifests. This command executes "
+            "trusted local agent code and is not a sandbox for hostile repositories."
+        ),
+    )
+    replay_parser.add_argument("target", nargs="?", default=".")
+    replay_parser.add_argument(
+        "--manifest",
+        required=True,
+        help="relative path inside the target to a replay manifest",
+    )
+    replay_parser.add_argument(
+        "--run-id",
+        type=_run_id,
+        help="set a safe artifact run ID for the new replay run",
+    )
+    replay_parser.add_argument(
+        "--no-store",
+        action="store_true",
+        help="skip writing the local SQLite evaluation index",
+    )
+    _add_python_option(replay_parser)
+
+    shrink_parser = commands.add_parser(
+        "shrink",
+        help="minimize a failing replay case while preserving its failure signature",
+        description=(
+            "Load an agentcheck.replay_manifest.v1 document, verify replay bindings, "
+            "and search for a smaller scenario that reproduces the same deterministic "
+            "failure signature. The result is a smaller reproducer, not a claim about "
+            "the business root cause. Frozen suites, suite.json, SQLite, and HTML "
+            "reports are not shrink inputs. This command executes trusted local agent "
+            "code and is not a sandbox."
+        ),
+    )
+    shrink_parser.add_argument("target", nargs="?", default=".")
+    shrink_parser.add_argument(
+        "--manifest",
+        required=True,
+        help="relative path inside the target to a replay manifest",
+    )
+    shrink_parser.add_argument(
+        "--scenario-id",
+        help="shrink this scenario instead of scanning for the first shrinkable FAIL",
+    )
+    shrink_parser.add_argument(
+        "--max-candidates",
+        type=_max_candidates,
+        help=(
+            "maximum candidate executions during search "
+            f"(default {DEFAULT_MAX_CANDIDATES}, maximum {MAX_MAX_CANDIDATES})"
+        ),
+    )
+    shrink_parser.add_argument(
+        "--max-rounds",
+        type=_max_rounds,
+        help=(
+            "maximum reduction dimensions to search "
+            f"(default {DEFAULT_MAX_ROUNDS}, maximum {MAX_MAX_ROUNDS})"
+        ),
+    )
+    shrink_parser.add_argument(
+        "--run-id",
+        type=_run_id,
+        help="set a safe artifact run ID for the minimized manifest",
+    )
+    shrink_parser.add_argument(
+        "--no-store",
+        action="store_true",
+        help="skip writing the local SQLite evaluation index for verification",
+    )
+    _add_python_option(shrink_parser)
+
+    review_parser = commands.add_parser(
+        "review",
+        help="record a human decision on an automated finding",
+        description=(
+            "Append an immutable human review bound to a stored finding. This "
+            "command never imports the target, never spawns a worker, never "
+            "calls ToolGateway, and never changes the automated PASS/FAIL/"
+            "INCONCLUSIVE/INFRA_ERROR result."
+        ),
+    )
+    review_parser.add_argument("target", nargs="?", default=".")
+    review_parser.add_argument(
+        "--run-id",
+        type=_run_id,
+        required=True,
+        help="stored run that owns the finding",
+    )
+    review_parser.add_argument(
+        "--finding-id",
+        required=True,
+        help="finding_id from findings.json",
+    )
+    review_parser.add_argument(
+        "--decision",
+        required=True,
+        choices=HUMAN_DECISIONS,
+        help="human decision; does not rewrite the automated verdict",
+    )
+    review_parser.add_argument(
+        "--note",
+        default="",
+        help="optional untrusted annotation (bounded and secret-screened)",
+    )
+    review_parser.add_argument(
+        "--reviewer",
+        help="optional explicit reviewer label",
+    )
+
+    fixtures_parser = commands.add_parser(
+        "fixtures",
+        help="manage optional representative test data for action-path coverage",
+        description=(
+            "Representative input values let AgentCheck generate an action-path "
+            "scenario a model will actually act on. They are committed test "
+            "data: never real customer records and never secrets. This command "
+            "never imports the target and never makes a network call."
+        ),
+    )
+    fixtures_commands = fixtures_parser.add_subparsers(
+        dest="fixtures_command",
+        required=True,
+    )
+    fixtures_init = fixtures_commands.add_parser(
+        "init",
+        help="write a reviewable template for tools lacking representative values",
+        description=(
+            "Inspect the target and write a template naming exactly the tools "
+            "and parameters whose action path is currently shallow. Existing "
+            "values are never overwritten without --force."
+        ),
+    )
+    fixtures_init.add_argument("target", nargs="?", default=".")
+    fixtures_init.add_argument(
+        "--force",
+        action="store_true",
+        help="replace an existing fixtures file instead of refusing",
+    )
+    _add_python_option(fixtures_init)
+
+    baseline_parser = commands.add_parser(
+        "baseline",
+        help="create or check a trusted evaluation baseline for CI gating",
+        description=(
+            "Snapshot automated AgentCheck results into agentcheck.baseline.v1, "
+            "or compare a later stored run against that snapshot. These commands "
+            "never import the target, never spawn a worker, never call "
+            "ToolGateway, and never make a network call. A failing run is never "
+            "implicitly accepted as a baseline. HTML, SQLite, and human reviews "
+            "are not comparison inputs."
+        ),
+    )
+    baseline_commands = baseline_parser.add_subparsers(
+        dest="baseline_command",
+        required=True,
+    )
+    create_parser = baseline_commands.add_parser(
+        "create",
+        help="write a trusted baseline from a stored run",
+        description=(
+            "Write agentcheck.baseline.v1 from stored JSON/JSONL run artifacts. "
+            "This does not bless failures automatically; creating or replacing a "
+            "baseline is always an explicit command."
+        ),
+    )
+    create_parser.add_argument("target", nargs="?", default=".")
+    create_parser.add_argument(
+        "--run-id",
+        type=_run_id,
+        help="stored run ID to snapshot",
+    )
+    create_parser.add_argument(
+        "--latest",
+        action="store_true",
+        help="snapshot the most recently indexed run (default when --run-id is omitted)",
+    )
+    create_parser.add_argument(
+        "--out",
+        help=(
+            "relative path inside the target for the baseline "
+            f"(default {DEFAULT_BASELINE_FILENAME})"
+        ),
+    )
+    create_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="replace an existing baseline instead of refusing",
+    )
+    check_parser = baseline_commands.add_parser(
+        "check",
+        help="fail CI on new authoritative regressions against a baseline",
+        description=(
+            "Compare a stored run to a trusted agentcheck.baseline.v1 document. "
+            "Exit 1 for new or changed high-confidence FAIL identities, including "
+            "authoritative FAILs that have no shrink signature. Exit 2 when a "
+            "current FAIL cannot be compared to a baseline FAIL because a stable "
+            "signature is missing on one or both sides, and for current "
+            "INFRA_ERROR. INCONCLUSIVE is not FAIL. Human reviews do not change "
+            "automated correctness."
+        ),
+    )
+    check_parser.add_argument("target", nargs="?", default=".")
+    check_parser.add_argument(
+        "--baseline",
+        required=True,
+        help="relative path inside the target to agentcheck.baseline.v1",
+    )
+    check_parser.add_argument(
+        "--run-id",
+        type=_run_id,
+        help="stored run ID to compare as current",
+    )
+    check_parser.add_argument(
+        "--latest",
+        action="store_true",
+        help="compare the most recently indexed run (default when --run-id is omitted)",
+    )
+    check_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="write agentcheck.baseline_comparison.v1 JSON to stdout",
+    )
+    return parser
+
+
+def _capability_line(extracted: ExtractedCapability) -> str:
+    capability = extracted.capability
+    markers = [capability.action_kind.value]
+    markers.append("state-changing" if capability.state_changing else "read-only")
+    if capability.destructive:
+        markers.append("destructive")
+    arguments = extracted.arguments
+    if arguments.schema_known:
+        surface = (
+            f"{len(arguments.required_parameters)} required, "
+            f"{len(arguments.optional_parameters)} optional argument(s)"
+        )
+        unknown_types = sum(
+            1 for parameter in arguments.parameters if not parameter.types_known
+        )
+        if unknown_types:
+            surface += f", {unknown_types} of unknown type"
+    else:
+        surface = "argument surface unknown"
+    return (
+        f"{extracted.tool_name}: {', '.join(markers)} "
+        f"(confidence {extracted.confidence:.2f}); {surface}"
+    )
+
+
+def _print_preflight(issues: Sequence[SupportIssue]) -> None:
+    print()
+    if not issues:
+        print("Preflight: supported")
+        return
+    print("Preflight: unsupported")
+    print("The following conditions block generate and test:")
+    for issue in issues:
+        location = f" ({issue.location})" if issue.location else ""
+        print(f"- {issue.code}{location}: {issue.message}")
+
+
+def _print_topology(topology: Mapping[str, Any] | None) -> None:
+    if not topology:
+        return
+    agents = topology.get("agents") or []
+    print()
+    print(f"Handoff topology ({len(agents)} reachable agents):")
+    for agent in agents:
+        tool_names = agent.get("tool_names") or []
+        tools = ", ".join(tool_names) if tool_names else "none"
+        notes: list[str] = []
+        if not agent.get("instructions_static", True):
+            notes.append("dynamic instructions")
+        suffix = f" [{'; '.join(notes)}]" if notes else ""
+        print(f"- {agent.get('name')} (tools: {tools}){suffix}")
+        for edge in agent.get("handoffs") or []:
+            target_name = edge.get("target_agent") or "(unresolved)"
+            codes = edge.get("issue_codes") or []
+            edge_suffix = f" [unsupported: {', '.join(codes)}]" if codes else ""
+            print(f"  -> {edge.get('tool_name')} to {target_name}{edge_suffix}")
+            assignments = edge.get("context_assignments") or []
+            for item in assignments:
+                if not isinstance(item, dict):
+                    continue
+                field = item.get("field")
+                if not isinstance(field, str) or not field:
+                    continue
+                print(f"     context assignment: {field}={item.get('value')!r}")
+
+
+def _fixtures_init_command(
+    target: str, *, force: bool, python_executable: str | None
+) -> int:
+    """Write a template naming exactly the parameters that are currently shallow.
+
+    Only tools whose action path would otherwise fall back to a generic
+    synthetic value are listed, so the developer fills in what actually
+    improves coverage rather than restating the whole tool surface.
+    """
+
+    root, config, result = inspect_target(target, python_executable=python_executable)
+    if result.infrastructure_error is not None:
+        error = result.infrastructure_error
+        print(f"AgentCheck error [{error.code}]: {error.message}", file=sys.stderr)
+        return 2
+    spec = result.require_value()
+    existing = load_representative_inputs(root, spec)
+    positive = build_positive_path_cases(
+        spec, seed=config.seed, representative_inputs=existing
+    )
+    shallow = {case.tool_name: case.shallow_parameters for case in positive if case.shallow_parameters}
+
+    destination = contained_path(root, DEFAULT_FIXTURES_FILENAME)
+    if destination.exists() and not force:
+        raise ConfigurationError(
+            f"{destination.name} already exists at {destination}; "
+            "re-run with --force to replace it"
+        )
+    if not shallow:
+        print("Every generated action path already has representative input.")
+        print("Nothing to write.")
+        return 0
+
+    document = {
+        "schema_version": FIXTURE_PACK_CONTRACT_VERSION,
+        "tools": {
+            tool: {
+                "arguments": {name: "REPLACE_ME" for name in sorted(parameters)}
+            }
+            for tool, parameters in sorted(shallow.items())
+        },
+    }
+    payload = json.dumps(document, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+    # Owner-only, matching how init writes agentcheck.json.
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(payload)
+
+    print(f"Wrote {destination}")
+    print()
+    for tool, parameters in sorted(shallow.items()):
+        print(f"  {tool}: {', '.join(sorted(parameters))}")
+    print()
+    print("Replace every REPLACE_ME with a representative test value.")
+    print("This file is committed test data: no real customer records, no secrets.")
+    print()
+    print(
+        'Each tool also accepts an optional "user_request": the situation that '
+        "makes calling it the right response, in the words a user would use. "
+        "Values alone often leave the action path unexercised, because a "
+        "request assembled from a schema reads as a data handover and an agent "
+        "can answer it without acting."
+    )
+    print()
+    print("Next steps:")
+    print(f"- agentcheck generate {root}")
+    return 0
+
+
+def _print_action_path_exercise(execution: Any) -> None:
+    """Say whether a tool was actually called, not just whether a case existed.
+
+    A pass on an action-path case means two very different things depending on
+    this: the agent called the tool and behaved correctly, or the agent never
+    called it and the trajectory checks held vacuously. Without this line a
+    reader cannot tell them apart.
+    """
+
+    exercise = action_path_exercise(getattr(execution, "runs", ()) or ())
+    if exercise.total == 0:
+        return
+    print()
+    print(
+        f"Action paths exercised: {len(exercise.exercised)}/{exercise.total} "
+        "(a tool was actually called)"
+    )
+    for scenario_id in exercise.not_exercised:
+        print(
+            f"  not exercised: {scenario_id} - the agent did not call the tool, "
+            "so trajectory checks held vacuously"
+        )
+    authored = {
+        scenario.scenario_id
+        for scenario in getattr(execution, "scenarios", ()) or ()
+        if AUTHORED_REQUEST_TAG in scenario.dimension_tags
+    }
+    if any(item not in authored for item in exercise.not_exercised):
+        # Valid arguments are not the same as a reason to act. The generated
+        # request states the tool's declared purpose and hands over the values,
+        # which reads as a data handover rather than a situation, and a capable
+        # agent can answer it without acting. Naming the fix here is the only
+        # place the reader is already looking at the problem.
+        print(
+            '  To exercise these, add a "user_request" for the tool in '
+            "agentcheck-fixtures.json describing a realistic situation that "
+            "calls for the action. Declining a request remains a valid agent "
+            "choice, so AgentCheck never counts a missing call as a failure."
+        )
+    if any(item in authored for item in exercise.not_exercised):
+        # Already given a situation a developer wrote and still no call. That
+        # is worth saying plainly, because the usual explanation is not a bad
+        # request: the surrounding application, rather than the agent, performs
+        # the action, and the tool is attached to the agent without being the
+        # path production actually uses.
+        print(
+            "  These already carry an authored request and the agent still did "
+            "not call the tool. That is a legitimate answer if the surrounding "
+            "application performs the action itself, in which case this tool is "
+            "not reachable through the agent and its action path cannot be "
+            "covered here."
+        )
+
+
+def _print_action_path_coverage(coverage: Any, target: Any) -> None:
+    """Say plainly which action paths a model can realistically act on.
+
+    A generated positive case is not the same as one a model will act on. When
+    the request carries a generic synthetic string the agent may reasonably
+    decline, so a pass proves less than it appears to. Reporting that is the
+    difference between "the agent behaved correctly after calling the tool" and
+    "the agent never called the tool".
+    """
+
+    representative = coverage.action_paths_representative
+    shallow = coverage.action_paths_shallow
+    if not representative and not shallow:
+        return
+    print()
+    print("Action-path coverage:")
+    for name in representative:
+        print(f"  [ok]      {name} - representative input available")
+    for name in shallow:
+        missing = ", ".join(
+            parameter.split(".", 1)[1]
+            for parameter in coverage.shallow_action_parameters
+            if parameter.startswith(f"{name}.")
+        )
+        print(f"  [shallow] {name} - no representative value for {missing}")
+    if shallow:
+        print()
+        print(
+            "  A model may decline to act on placeholder values, so these paths "
+            "may go untested."
+        )
+        print(f"  Add representative test data:  agentcheck fixtures init {target}")
+
+
+def _print_inspection(
+    spec: AgentSpec,
+    *,
+    preflight_issues: Sequence[SupportIssue] = (),
+    topology: Mapping[str, Any] | None = None,
+) -> None:
+    tools = [item.value for item in spec.tools.items]
+    capabilities = [item.value for item in spec.capabilities.items]
+    state_changing = sum(item.state_changing for item in tools)
+    destructive = sum(item.destructive for item in tools)
+    print(f"Agent: {spec.identity.name.value}")
+    print(
+        "Framework: "
+        f"{spec.identity.framework.value} "
+        f"{spec.identity.framework_version.value or '(unknown version)'}"
+    )
+    print(f"Model: {spec.identity.model.value or '(unknown)'}")
+    print()
+    print("Detected:")
+    print(f"- {len(tools)} tools")
+    print(f"- {len(capabilities)} capabilities")
+    print(f"- {state_changing} state-changing actions")
+    print(f"- {destructive} destructive actions")
+    if tools:
+        print()
+        print("Tools:")
+        for tool in tools:
+            markers = []
+            if tool.state_changing:
+                markers.append("state-changing")
+            if tool.destructive:
+                markers.append("destructive")
+            suffix = f" ({', '.join(markers)})" if markers else ""
+            print(f"✓ {tool.name}{suffix}")
+        print()
+        print("Capabilities (action kind and risk are inferred, not authoritative):")
+        for extracted in extract_capabilities(tools):
+            print(f"- {_capability_line(extracted)}")
+    if spec.policies.items:
+        print()
+        print("Declared policy packs:")
+        for item in spec.policies.items:
+            version = item.value.version or "unknown"
+            print(f"- {item.value.policy_id} (v{version})")
+    if spec.unknowns:
+        print()
+        print(f"Unknown properties: {len(spec.unknowns)}")
+    _print_topology(topology)
+    _print_preflight(preflight_issues)
+    print()
+    print("Inspection scope:")
+    print("- Describes the exported object after import, not the complete runtime application.")
+    print(
+        "- Tools, MCP servers, or other capabilities assigned later "
+        "(for example in run()) are not visible and are not proven absent."
+    )
+    print(
+        "- Import executes module-level Python in a child process with a "
+        "wall-clock timeout; this is process isolation, not a security sandbox."
+    )
+
+
+def _json_spec(spec: AgentSpec) -> str:
+    payload = redact_artifact(spec.model_dump(mode="json", exclude_none=False))
+    return json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2, sort_keys=True)
+
+
+def _init_command(target: str, *, entrypoint: str, adapter: str, force: bool) -> int:
+    config_path = write_initial_config(
+        target,
+        adapter=adapter,
+        entrypoint=entrypoint,
+        force=force,
+    )
+    root = config_path.parent
+    print("AgentCheck configuration written.")
+    print()
+    print(f"Config:     {config_path}")
+    print(f"Adapter:    {adapter}")
+    print(f"Entrypoint: {entrypoint.strip()}")
+    source, _ = entrypoint_location(root, entrypoint.strip())
+    if not source.is_file():
+        print()
+        print(f"Note: the entrypoint source does not exist yet: {source}")
+        print("Create it, or re-run init with --entrypoint and --force.")
+    print()
+    print("Next steps:")
+    print(f"- agentcheck inspect {root}")
+    print(f"- agentcheck generate {root}")
+    print(f"- agentcheck test {root}")
+    return 0
+
+
+def _generate_command(
+    target: str,
+    *,
+    seed: int | None,
+    out: str | None,
+    force: bool,
+    include_mutations: bool,
+    max_mutations: int | None,
+    policy_packs: list[str] | None,
+    max_cases: int | None,
+    realize: bool,
+    python_executable: str | None,
+) -> int:
+    if max_mutations is not None and not include_mutations:
+        raise ConfigurationError("--max-mutations requires --mutations")
+    print("Inspecting agent...")
+    print()
+    generation = generate_suite(
+        target,
+        seed=seed,
+        out=out,
+        force=force,
+        include_mutations=include_mutations,
+        max_mutations=max_mutations,
+        policy_packs=policy_packs,
+        max_cases=max_cases,
+        realize=realize,
+        python_executable=python_executable,
+    )
+    _print_inspection(generation.spec)
+    print()
+    print("Frozen suite written.")
+    print()
+    print(f"Suite:        {generation.suite_path}")
+    print(f"Suite ID:     {generation.suite.suite_id}")
+    print(f"Spec ID:      {generation.suite.spec_id}")
+    print(f"Seed:         {generation.suite.seed}")
+    print(f"Cases:        {len(generation.suite.cases)}")
+    mutation_cases = sum(
+        1
+        for case in generation.suite.cases
+        if case.lineage.origin.value == "workflow_mutation"
+    )
+    if include_mutations:
+        print(f"Mutations:    {mutation_cases}")
+    print(f"Rejected:     {len(generation.suite.rejected)}")
+    if generation.suite.selection is not None:
+        print(f"Selected:     {len(generation.suite.selection.selected_ids)}")
+        print(f"Unselected:   {len(generation.suite.selection.excluded_ids)}")
+    realized = sum(1 for case in generation.suite.cases if case.realization is not None)
+    if realized:
+        print(f"Realized:     {realized} display overlay(s)")
+    print(f"Fingerprint:  {generation.suite.fingerprint}")
+    _print_action_path_coverage(generation.suite.coverage, generation.target_root)
+    print()
+    print("Next steps:")
+    print(f"- agentcheck test {generation.target_root}")
+    return 0
+
+
+def _inspect_command(
+    target: str, *, as_json: bool, python_executable: str | None
+) -> int:
+    if not as_json:
+        print("Inspecting agent...")
+        print()
+    _, _, result = inspect_target(target, python_executable=python_executable)
+    if result.infrastructure_error is not None:
+        error = result.infrastructure_error
+        print(
+            f"AgentCheck error [{error.code}]: {error.message}",
+            file=sys.stderr,
+        )
+        return 2
+    spec = result.require_value()
+    if as_json:
+        print(_json_spec(spec))
+    else:
+        _print_inspection(
+            spec,
+            preflight_issues=result.preflight_issues,
+            topology=result.topology,
+        )
+    return 0
+
+
+def _test_command(
+    target: str,
+    *,
+    seed: int | None,
+    run_id: str | None,
+    persist_store: bool,
+    select: str | None,
+    python_executable: str | None,
+) -> int:
+    print("Inspecting agent...")
+    print()
+    execution = execute_suite(
+        target,
+        seed=seed,
+        run_id=run_id,
+        persist_store=persist_store,
+        select=select,
+        python_executable=python_executable,
+    )
+    if not execution.scenarios:
+        raise ScenarioValidationError(
+            "No valid scenarios remain after linting; no agent verdict was produced."
+        )
+    _print_inspection(execution.spec)
+    print()
+    if execution.frozen_suite is not None:
+        print("Using frozen suite...")
+        print(f"Suite ID: {execution.frozen_suite.suite_id}")
+        print(f"Seed:     {execution.frozen_suite.seed}")
+    else:
+        print("Building deterministic test suite...")
+    print(f"Generated: {len(execution.scenarios)} valid scenarios")
+    if execution.invalid_scenarios:
+        print(
+            f"Excluded: {len(execution.invalid_scenarios)} invalid scenario(s); "
+            "these do not affect results"
+        )
+    if execution.selection is not None and execution.selection.excluded_ids:
+        print(
+            f"Excluded by selection: {len(execution.selection.excluded_ids)} "
+            "valid scenario(s); these are not scored"
+        )
+    print()
+    print(f"Running {len(execution.scenarios)} scenarios in isolated child processes...")
+    print()
+    evaluation_by_id = {item.scenario_id: item for item in execution.evaluations}
+    for scenario in execution.scenarios:
+        evaluation = evaluation_by_id[scenario.scenario_id]
+        print(f"{evaluation.verdict.value:<12} {scenario.title}")
+
+    counts: Counter[Verdict] = execution.counts
+    pass_rate = execution.observed_pass_rate
+    print()
+    print(
+        "Observed suite pass rate: "
+        f"{pass_rate * 100:.1f}%" if pass_rate is not None else "Observed suite pass rate: N/A"
+    )
+    print()
+    print(f"Passed:        {counts[Verdict.PASS]}")
+    print(f"Failed:        {counts[Verdict.FAIL]}")
+    print(f"Inconclusive:  {counts[Verdict.INCONCLUSIVE]}")
+    print(f"Infra errors:  {counts[Verdict.INFRA_ERROR]}")
+    _print_action_path_exercise(execution)
+
+    severity_counts = Counter(item.severity for item in execution.findings)
+    print()
+    print(f"High-confidence failures discovered: {counts[Verdict.FAIL]}")
+    print(f"High-severity findings: {severity_counts[Severity.HIGH]}")
+    print(f"Medium findings:        {severity_counts[Severity.MEDIUM]}")
+    print()
+    print("Report:")
+    print(execution.report_path)
+    if execution.replay_manifest_path is not None:
+        print("Replay manifest:")
+        print(execution.replay_manifest_path)
+
+    if counts[Verdict.INFRA_ERROR]:
+        return 2
+    if counts[Verdict.FAIL]:
+        return 1
+    if counts[Verdict.INCONCLUSIVE]:
+        return 3
+    return 0
+
+
+def _report_command(
+    target: str,
+    *,
+    run_id: str | None,
+    latest: bool,
+    out: str | None,
+) -> int:
+    generated = render_stored_run(target, run_id=run_id, latest=latest, out=out)
+    print("Regenerating report from stored artifacts...")
+    print()
+    print(f"Run ID: {generated.run_id}")
+    print("Report:")
+    print(generated.report_path)
+    return 0
+
+
+def _replay_command(
+    target: str,
+    *,
+    manifest: str,
+    run_id: str | None,
+    persist_store: bool,
+    python_executable: str | None,
+) -> int:
+    print("Loading replay manifest...")
+    print()
+    execution = replay_suite(
+        target,
+        manifest,
+        run_id=run_id,
+        persist_store=persist_store,
+        python_executable=python_executable,
+    )
+    _print_inspection(execution.spec)
+    print()
+    print("Replaying stored scenarios...")
+    print(f"Manifest seed: {execution.seed}")
+    print(f"Generated: {len(execution.scenarios)} valid scenarios")
+    print()
+    print(f"Running {len(execution.scenarios)} scenarios in isolated child processes...")
+    print()
+    evaluation_by_id = {item.scenario_id: item for item in execution.evaluations}
+    for scenario in execution.scenarios:
+        evaluation = evaluation_by_id[scenario.scenario_id]
+        print(f"{evaluation.verdict.value:<12} {scenario.title}")
+
+    counts: Counter[Verdict] = execution.counts
+    pass_rate = execution.observed_pass_rate
+    print()
+    print(
+        "Observed suite pass rate: "
+        f"{pass_rate * 100:.1f}%" if pass_rate is not None else "Observed suite pass rate: N/A"
+    )
+    print()
+    print(f"Passed:        {counts[Verdict.PASS]}")
+    print(f"Failed:        {counts[Verdict.FAIL]}")
+    print(f"Inconclusive:  {counts[Verdict.INCONCLUSIVE]}")
+    print(f"Infra errors:  {counts[Verdict.INFRA_ERROR]}")
+    print()
+    print("Report:")
+    print(execution.report_path)
+    if execution.replay_manifest_path is not None:
+        print("Replay manifest:")
+        print(execution.replay_manifest_path)
+
+    if counts[Verdict.INFRA_ERROR]:
+        return 2
+    if counts[Verdict.FAIL]:
+        return 1
+    if counts[Verdict.INCONCLUSIVE]:
+        return 3
+    return 0
+
+
+def _shrink_command(
+    target: str,
+    *,
+    manifest: str,
+    scenario_id: str | None,
+    run_id: str | None,
+    max_candidates: int | None,
+    max_rounds: int | None,
+    persist_store: bool,
+    python_executable: str | None,
+) -> int:
+    print("Loading replay manifest...")
+    print()
+    execution = shrink_suite(
+        target,
+        manifest,
+        scenario_id=scenario_id,
+        run_id=run_id,
+        max_candidates=max_candidates or DEFAULT_MAX_CANDIDATES,
+        max_rounds=max_rounds or DEFAULT_MAX_ROUNDS,
+        persist_store=persist_store,
+        python_executable=python_executable,
+    )
+    original = execution.result.original_complexity
+    minimized = execution.result.minimized_complexity
+    signature = execution.result.failure_signature
+    print(f"Source manifest: {execution.source_manifest_path}")
+    print(f"Scenario: {execution.original_scenario.scenario_id}")
+    print(
+        "Original complexity: "
+        f"turns={original.conversation_turns} "
+        f"fixtures={original.tool_fixtures} "
+        f"faults={original.injected_faults} "
+        f"world={original.world_state_entries} "
+        f"total={original.total()}"
+    )
+    print(
+        "Minimized complexity: "
+        f"turns={minimized.conversation_turns} "
+        f"fixtures={minimized.tool_fixtures} "
+        f"faults={minimized.injected_faults} "
+        f"world={minimized.world_state_entries} "
+        f"total={minimized.total()}"
+    )
+    print(
+        "Failure signature: "
+        f"{signature.fingerprint} "
+        f"({len(signature.failed_assertions)} failed assertion(s))"
+    )
+    print(f"Candidate executions: {execution.result.candidate_executions}")
+    print(f"Accepted reductions: {execution.result.accepted_reductions}")
+    print(f"Budget exhausted: {'yes' if execution.result.budget_exhausted else 'no'}")
+    print(f"Minimality: {execution.result.minimality}")
+    print("Requires human review: true")
+    print()
+    print(
+        "This smaller case reproduces the same deterministic failure signature. "
+        "It is not a claim about the business root cause."
+    )
+    print()
+    print("Minimized replay manifest:")
+    print(execution.minimized_manifest_path)
+    print("Shrink result:")
+    print(execution.result_path)
+    return 0
+
+
+def _review_command(
+    target: str,
+    *,
+    run_id: str,
+    finding_id: str,
+    decision: HumanDecision,
+    note: str,
+    reviewer: str | None,
+) -> int:
+    recorded = record_finding_review(
+        target,
+        run_id=run_id,
+        finding_id=finding_id,
+        decision=decision,
+        note=note,
+        reviewer=reviewer,
+    )
+    review = recorded.review
+    print("Recording human review...")
+    print()
+    print(f"Run ID: {review.run_id}")
+    print(f"Finding: {review.finding_id}")
+    print(f"Automated verdict: {review.automated_verdict}")
+    print(f"Human decision: {review.decision}")
+    if review.note:
+        print(f"Note: {redact_log_text(review.note)}")
+    if review.reviewer:
+        print(f"Reviewer: {review.reviewer}")
+    print()
+    print("Review record:")
+    print(recorded.path)
+    print()
+    print(
+        "The automated finding is unchanged. Re-run agentcheck report to include "
+        "this annotation in HTML."
+    )
+    return 0
+
+
+def _baseline_create_command(
+    target: str,
+    *,
+    run_id: str | None,
+    latest: bool,
+    out: str | None,
+    force: bool,
+) -> int:
+    created = create_baseline(
+        target,
+        run_id=run_id,
+        latest=latest,
+        out=out,
+        force=force,
+    )
+    print("Writing evaluation baseline...")
+    print()
+    print(f"Source run: {created.baseline.created_from_run_id}")
+    print(f"Baseline ID: {created.baseline.baseline_id}")
+    print(f"Scenarios: {len(created.baseline.cases)}")
+    print(
+        "Known failures: "
+        f"{sum(1 for item in created.baseline.cases if item.verdict == 'FAIL')}"
+    )
+    print()
+    print("Baseline:")
+    print(created.path)
+    print()
+    print(
+        "This snapshot does not bless failures. Commit it only when you intend "
+        "those identities to be the trusted CI baseline."
+    )
+    return 0
+
+
+def _baseline_check_command(
+    target: str,
+    *,
+    baseline: str,
+    run_id: str | None,
+    latest: bool,
+    as_json: bool,
+) -> int:
+    checked = check_baseline(
+        target,
+        baseline_path=baseline,
+        run_id=run_id,
+        latest=latest,
+    )
+    if as_json:
+        print(checked.summary, end="", file=sys.stderr)
+        print(encode_comparison(checked.comparison))
+    else:
+        print(checked.summary, end="")
+    return checked.exit_code
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        if args.command == "init":
+            return _init_command(
+                args.target,
+                entrypoint=args.entrypoint,
+                adapter=args.adapter,
+                force=args.force,
+            )
+        if args.command == "inspect":
+            return _inspect_command(
+                args.target,
+                as_json=args.json,
+                python_executable=args.python_executable,
+            )
+        if args.command == "generate":
+            return _generate_command(
+                args.target,
+                seed=args.seed,
+                out=args.out,
+                force=args.force,
+                include_mutations=args.mutations,
+                max_mutations=args.max_mutations,
+                policy_packs=args.policy_packs,
+                max_cases=args.max_cases,
+                realize=args.realize,
+                python_executable=args.python_executable,
+            )
+        if args.command == "test":
+            return _test_command(
+                args.target,
+                seed=args.seed,
+                run_id=args.run_id,
+                persist_store=not args.no_store,
+                select=args.select,
+                python_executable=args.python_executable,
+            )
+        if args.command == "report":
+            return _report_command(
+                args.target,
+                run_id=args.run_id,
+                latest=args.latest,
+                out=args.out,
+            )
+        if args.command == "replay":
+            return _replay_command(
+                args.target,
+                manifest=args.manifest,
+                run_id=args.run_id,
+                persist_store=not args.no_store,
+                python_executable=args.python_executable,
+            )
+        if args.command == "shrink":
+            return _shrink_command(
+                args.target,
+                manifest=args.manifest,
+                scenario_id=args.scenario_id,
+                run_id=args.run_id,
+                max_candidates=args.max_candidates,
+                max_rounds=args.max_rounds,
+                persist_store=not args.no_store,
+                python_executable=args.python_executable,
+            )
+        if args.command == "review":
+            return _review_command(
+                args.target,
+                run_id=args.run_id,
+                finding_id=args.finding_id,
+                decision=args.decision,
+                note=args.note,
+                reviewer=args.reviewer,
+            )
+        if args.command == "fixtures":
+            if args.fixtures_command == "init":
+                return _fixtures_init_command(
+                    args.target,
+                    force=args.force,
+                    python_executable=args.python_executable,
+                )
+        if args.command == "baseline":
+            if args.baseline_command == "create":
+                return _baseline_create_command(
+                    args.target,
+                    run_id=args.run_id,
+                    latest=args.latest,
+                    out=args.out,
+                    force=args.force,
+                )
+            if args.baseline_command == "check":
+                return _baseline_check_command(
+                    args.target,
+                    baseline=args.baseline,
+                    run_id=args.run_id,
+                    latest=args.latest,
+                    as_json=args.json,
+                )
+    except KeyboardInterrupt:
+        print("AgentCheck interrupted.", file=sys.stderr)
+        return 130
+    except Exception as exc:
+        message = redact_log_text(str(exc)) or type(exc).__name__
+        print(f"AgentCheck error: {message}", file=sys.stderr)
+        return 2
+    return 2
+
+
+if __name__ == "__main__":  # pragma: no cover - console script is the primary path
+    raise SystemExit(main())

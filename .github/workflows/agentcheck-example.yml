@@ -1,0 +1,95 @@
+# Example AgentCheck regression gate.
+#
+# Copy this workflow into a repository that has an AgentCheck target, then:
+#   1. Set AGENTCHECK_TARGET to that directory (often ".").
+#   2. Commit a trusted baseline produced by an explicit command, not by a
+#      failing CI run:
+#         agentcheck test "$AGENTCHECK_TARGET" --no-store
+#         agentcheck baseline create "$AGENTCHECK_TARGET" --latest --out agentcheck-baseline.json
+#   3. Enable pull_request/push triggers if you want this on every change.
+#
+# This workflow does not call a hosted AgentCheck service, does not use the
+# GitHub API, and does not supply provider credentials. It fails only on new
+# or changed authoritative FAIL identities, not on historical failures and
+# not on INCONCLUSIVE.
+#
+# This repository is not itself an AgentCheck target at its root. The default
+# below points at the bundled deterministic example. There is no committed
+# example baseline here; workflow_dispatch will exit 2 until you create one
+# locally or in a consuming project.
+
+name: AgentCheck
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+  AGENTCHECK_TARGET: examples/evaluation/account_agent
+  AGENTCHECK_BASELINE: agentcheck-baseline.json
+
+jobs:
+  regression-gate:
+    name: Compare against a trusted baseline
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install AgentCheck
+        run: |
+          python -m pip install --upgrade "pip==26.1.2" "setuptools==83.0.0"
+          python -m pip install ".[openai-agents]"
+
+      - name: Run deterministic AgentCheck tests
+        run: |
+          set +e
+          agentcheck test "$AGENTCHECK_TARGET" --no-store --run-id "ci-${{ github.run_id }}"
+          status=$?
+          set -e
+          # Historical FAILs (1) and INCONCLUSIVE (3) are not release blockers.
+          # The baseline check decides whether any FAIL is new. Infrastructure (2)
+          # still fails the job.
+          if [ "$status" -eq 2 ] || [ "$status" -eq 130 ]; then
+            exit "$status"
+          fi
+          if [ "$status" -gt 3 ]; then
+            exit "$status"
+          fi
+
+      - name: Require a committed baseline
+        run: |
+          baseline="$AGENTCHECK_TARGET/$AGENTCHECK_BASELINE"
+          if [ ! -f "$baseline" ]; then
+            echo "No trusted baseline at $baseline"
+            echo "Create one explicitly with:"
+            echo "  agentcheck baseline create \"$AGENTCHECK_TARGET\" --latest --out $AGENTCHECK_BASELINE"
+            echo "A failing test run is never an implicit baseline."
+            exit 2
+          fi
+
+      - name: Fail on new authoritative regressions
+        run: |
+          agentcheck baseline check "$AGENTCHECK_TARGET" \
+            --baseline "$AGENTCHECK_BASELINE" \
+            --run-id "ci-${{ github.run_id }}" \
+            --json
