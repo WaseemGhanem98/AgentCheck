@@ -92,6 +92,11 @@ BUILT_IN_FINGERPRINTS_SEED_7 = {
 NO_FOLLOWUP_SUITE_FINGERPRINT = (
     "sha256:18c309ac4919d4b4db082dd2bd8dac4db3a2f60204bcf3dee34f99e9b6ba3f64"
 )
+# Likewise for a scenario embedded in a parent contract: a replay manifest over
+# the built-in suite, digested by the tree before ``followup_turns`` existed.
+NO_FOLLOWUP_MANIFEST_FINGERPRINT = (
+    "sha256:b9ffc3b8c9a8930603bce0124d485bfa662e348fc536d749316119a716d6ec61"
+)
 
 
 # --- a target whose original handlers are tripwires --------------------------
@@ -869,26 +874,34 @@ def test_a_generated_suite_with_no_followup_is_fingerprint_identical() -> None:
     )
 
 
-def test_committed_non_interactive_replay_manifests_still_load() -> None:
-    from agentcheck.replay import load_replay_manifest_path
+def test_a_nested_non_interactive_document_keeps_its_digest() -> None:
+    """A scenario nested inside another contract must serialize unchanged too.
 
-    directory = (
-        Path(__file__).parents[2]
-        / "examples"
-        / "evaluation"
-        / "account_agent"
-        / ".agentcheck"
-        / "replay"
+    The manifest digest covers every embedded scenario, so this catches an
+    encoding change the per-scenario fingerprints above could not: one that
+    only shows up when a ``Scenario`` is dumped as part of a parent document.
+    """
+
+    from agentcheck.replay.manifest import ReplayManifest, SourceBinding, SpecBinding
+
+    manifest = ReplayManifest(
+        created_from_run_id="compat-pin",
+        agentcheck_version="0.1.0",
+        seed=7,
+        spec_binding=SpecBinding(
+            spec_id="agentspec-compat",
+            adapter="openai_agents",
+            entrypoint="agent.py:agent",
+        ),
+        source_binding=SourceBinding(
+            entrypoint_digest="sha256:" + "0" * 64,
+            framework="openai_agents",
+        ),
+        cases=build_account_support_suite(seed=7),
     )
-    manifests = sorted(directory.glob("*.json"))
-    assert manifests
 
-    for path in manifests:
-        # Loading verifies every scenario fingerprint and the manifest digest
-        # over the full serialized document, so a changed Scenario encoding
-        # would fail here rather than silently.
-        manifest = load_replay_manifest_path(path)
-        assert all(not case.followup_turns for case in manifest.cases)
+    assert manifest.fingerprint == NO_FOLLOWUP_MANIFEST_FINGERPRINT
+    assert all(not case.followup_turns for case in manifest.cases)
 
 
 def test_identical_staged_definitions_fingerprint_identically() -> None:
