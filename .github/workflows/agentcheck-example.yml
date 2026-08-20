@@ -18,6 +18,12 @@
 # example baseline here; workflow_dispatch will exit 2 until you create one
 # locally or in a consuming project.
 
+# Runner note: this workflow is deliberately GitHub-hosted, unlike ci.yml.
+# It is a template meant to be copied into a project that uses AgentCheck, so
+# pointing it at a self-hosted label would hand every reader a workflow that
+# runs on exactly one machine. It is workflow_dispatch only, so it costs
+# nothing until someone triggers it. See docs/ci-trust-model.md.
+
 name: AgentCheck
 
 on:
