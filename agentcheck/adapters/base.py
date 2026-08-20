@@ -300,8 +300,26 @@ class FrameworkAdapter(ABC):
         world_state: Any = None,
         event_sink: EventSinkProtocol | None = None,
         source: str | None = None,
+        controlled_model: bool = False,
     ) -> PreparedTarget:
-        """Return a sanitized runtime target or fail before model execution."""
+        """Return a sanitized runtime target or fail before model execution.
+
+        ``controlled_model`` substitutes a deterministic offline model for the
+        target's provider. The target agent is otherwise unchanged.
+        """
+
+    def describe_topology(
+        self, target: Any, *, source: str | None = None
+    ) -> dict[str, Any] | None:
+        """Optional multi-agent topology, as additive inspect diagnostics.
+
+        Not abstract: a framework whose targets are a single agent has no
+        topology to describe, and returning ``None`` is the honest answer rather
+        than an empty graph.
+        """
+
+        del target, source
+        return None
 
     @abstractmethod
     async def run(

@@ -52,7 +52,7 @@ class AgentCheckConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
     schema_version: Literal["agentcheck.config.v1"] = "agentcheck.config.v1"
-    adapter: Literal["openai_agents"] = "openai_agents"
+    adapter: Literal["openai_agents", "pydantic_ai"] = "openai_agents"
     entrypoint: str = DEFAULT_ENTRYPOINT
     suite: Literal["account_support_v1"] = "account_support_v1"
     seed: int = Field(default=1729, ge=0, le=2**63 - 1)

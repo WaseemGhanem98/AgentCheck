@@ -18,6 +18,7 @@ from .base import (
     format_support_issues,
 )
 from .openai_agents import OpenAIAgentsAdapter
+from .pydantic_ai import PydanticAIAdapter
 
 __all__ = [
     "AdapterDependencyError",
@@ -28,6 +29,7 @@ __all__ = [
     "GatewayRequest",
     "OpenAIAgentsAdapter",
     "PreflightReport",
+    "PydanticAIAdapter",
     "PreparedTarget",
     "SupportIssue",
     "ToolGatewayProtocol",

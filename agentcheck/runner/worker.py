@@ -12,7 +12,12 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from agentcheck.adapters import OpenAIAgentsAdapter, encode_preflight_report
+from agentcheck.adapters import (
+    FrameworkAdapter,
+    OpenAIAgentsAdapter,
+    PydanticAIAdapter,
+    encode_preflight_report,
+)
 from agentcheck.config import AgentCheckConfig, resolve_entrypoint
 from agentcheck.domain import (
     FaultType,
@@ -145,10 +150,27 @@ def _read_request(path: Path) -> dict[str, Any]:
     return raw
 
 
+_ADAPTERS: dict[str, type[FrameworkAdapter]] = {
+    "openai_agents": OpenAIAgentsAdapter,
+    "pydantic_ai": PydanticAIAdapter,
+}
+
+
+def _adapter_for(config: AgentCheckConfig) -> FrameworkAdapter:
+    """Resolve the configured adapter.
+
+    The only place the framework name is dispatched on. Everything downstream
+    works through the FrameworkAdapter contract.
+    """
+
+    factory = _ADAPTERS.get(config.adapter)
+    if factory is None:  # pragma: no cover - config narrows this
+        raise ValueError(f"unsupported adapter {config.adapter!r}")
+    return factory()
+
+
 def _load_agent(root: Path, config: AgentCheckConfig) -> tuple[Any, str]:
-    if (
-        config.adapter != "openai_agents"
-    ):  # pragma: no cover - config currently narrows this
+    if config.adapter not in _ADAPTERS:  # pragma: no cover - config narrows this
         raise ValueError(f"unsupported adapter {config.adapter!r}")
     resolve_entrypoint(root, config.entrypoint)
     # AgentCheck is already imported via the parent bootstrap. Add only the
@@ -212,7 +234,7 @@ def _inspect(
     root: Path, config: AgentCheckConfig
 ) -> tuple[Any, dict[str, Any], dict[str, Any] | None]:
     target, source = _load_agent(root, config)
-    adapter = OpenAIAgentsAdapter()
+    adapter = _adapter_for(config)
     spec = adapter.inspect(target, source=source)
     preflight = encode_preflight_report(adapter.preflight(target))
     topology = adapter.describe_topology(target, source=source)
@@ -221,7 +243,7 @@ def _inspect(
 
 def _run(root: Path, config: AgentCheckConfig, scenario: Scenario, run_id: str) -> Any:
     target, source = _load_agent(root, config)
-    adapter = OpenAIAgentsAdapter()
+    adapter = _adapter_for(config)
     spec = adapter.inspect(target, source=source)
     tools = tuple(item.value for item in spec.tools.items)
     world = WorldSimulator(scenario.initial_world_state)
