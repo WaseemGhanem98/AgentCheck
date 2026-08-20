@@ -1,0 +1,16 @@
+include LICENSE
+include README.md
+include CONTRIBUTING.md
+include SECURITY.md
+include AGENTS.md
+recursive-include tests *.py
+recursive-include examples *.py *.json *.md
+recursive-include scripts *.py
+recursive-include .github *.yml
+
+# Evaluation runs write under .agentcheck/ next to the target. Those are local
+# artifacts with absolute host paths in them and must never be redistributed.
+prune **/.agentcheck
+global-exclude *.pyc
+global-exclude __pycache__
+global-exclude .env

@@ -1,0 +1,180 @@
+# Public-repository CI.
+#
+# SECURITY: every job here runs on GitHub-hosted ephemeral runners. This
+# repository must never attach a self-hosted runner to a workflow triggered by
+# `pull_request`, because that trigger runs code from a contributor's fork. A
+# self-hosted runner is somebody's machine; giving arbitrary pull requests
+# execution on it is a workstation compromise, not a CI configuration choice.
+#
+# `pull_request` (not `pull_request_target`) is also deliberate: fork PRs get a
+# read-only GITHUB_TOKEN and no access to repository secrets. `pull_request_target`
+# would run untrusted code with the base repository's token and secrets.
+#
+# No job here needs a secret, and none makes a provider call.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+jobs:
+  tests:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Verify no provider credential reached this job
+        run: |
+          for name in OPENAI_API_KEY ANTHROPIC_API_KEY GOOGLE_API_KEY; do
+            if [ -n "${!name:-}" ]; then
+              echo "$name is set in CI; evaluation tests must never spend money"
+              exit 1
+            fi
+          done
+          echo "no provider credentials present"
+
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+
+      - name: Test
+        run: python -m pytest tests -q -n 2
+
+  base-install:
+    name: Base install has no framework
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install base only
+        run: python -m pip install .
+
+      - name: A base install must import and run without any framework
+        run: |
+          python - <<'PY'
+          import importlib.util, subprocess, sys
+          for framework in ("agents", "pydantic_ai"):
+              assert importlib.util.find_spec(framework) is None, (
+                  f"{framework} must not be a base dependency"
+              )
+          import agentcheck
+          subprocess.run(["agentcheck", "--help"], check=True)
+          PY
+
+      - name: A missing extra must be actionable, not a traceback
+        run: |
+          python - <<'PY'
+          from agentcheck.adapters import AdapterDependencyError
+          from agentcheck.adapters.openai_agents import _require_sdk as openai_sdk
+          from agentcheck.adapters.pydantic_ai import _require_sdk as pydantic_sdk
+
+          for require in (openai_sdk, pydantic_sdk):
+              try:
+                  require()
+              except AdapterDependencyError as exc:
+                  assert "pip install" in str(exc), exc
+                  print("ok:", exc)
+              else:
+                  raise AssertionError(f"{require} should have refused")
+          PY
+
+  extras:
+    name: Extra ${{ matrix.extra }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        extra: ["openai-agents", "pydantic-ai", "all"]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install extra
+        run: python -m pip install ".[${{ matrix.extra }}]" pytest pytest-xdist
+
+      - name: Adapter tests for this extra
+        run: |
+          case "${{ matrix.extra }}" in
+            openai-agents) python -m pytest tests/agentcheck/test_openai_adapter.py -q ;;
+            pydantic-ai)   python -m pytest tests/agentcheck/test_pydantic_ai_adapter.py -q ;;
+            all)           python -m pytest tests/agentcheck/test_openai_adapter.py \
+                                            tests/agentcheck/test_pydantic_ai_adapter.py -q ;;
+          esac
+
+  quality:
+    name: Quality, packaging, and secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+
+      - name: Ruff
+        run: python -m ruff check agentcheck tests
+
+      - name: Mypy
+        run: python -m mypy agentcheck
+
+      - name: Secret scan
+        run: python scripts/check_no_secrets.py
+
+      - name: Build wheel and sdist
+        run: python -m build
+
+      - name: Audit artifact contents
+        run: python scripts/check_distribution.py
+
+      - name: Wheel install smoke test
+        run: |
+          python -m venv /tmp/smoke
+          /tmp/smoke/bin/python -m pip install --quiet dist/*.whl
+          cd /tmp
+          /tmp/smoke/bin/python -c "import agentcheck; print(agentcheck.__version__)"
+          /tmp/smoke/bin/agentcheck --help > /dev/null
+          echo "wheel install smoke passed"
