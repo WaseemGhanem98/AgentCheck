@@ -1484,10 +1484,40 @@ def _runner_input(
     return items, tuple(normalized)
 
 
+def _scripted_followups(
+    turns: Sequence[ConversationTurn],
+) -> tuple[ConversationTurn, ...]:
+    """Validate the replies the runtime will inject between execution stages."""
+
+    scripted = tuple(turns)
+    for turn in scripted:
+        if not isinstance(turn, ConversationTurn):
+            raise TypeError("follow-up input must contain ConversationTurn values")
+        if turn.role != ConversationRole.USER:
+            # Injecting an assistant turn mid-run would put words the target
+            # never produced into the trajectory the oracle then scores.
+            raise ValueError(
+                f"a scripted follow-up must be a user turn, not {turn.role.value!r}"
+            )
+    return scripted
+
+
+def _model_turns_used(capture: _Capture) -> int:
+    """Model turns already spent by this scenario, across every stage."""
+
+    return sum(
+        1
+        for event in capture.events
+        if event.event_type == CanonicalEventType.MODEL_REQUEST
+    )
+
+
 async def _record_unknown_tool_calls(
     capture: _Capture,
     prepared: PreparedTarget,
     gateway: ToolGatewayProtocol,
+    *,
+    start_index: int = 0,
 ) -> int:
     """Preserve model-owned unknown calls as deterministic agent evidence.
 
@@ -1504,6 +1534,8 @@ async def _record_unknown_tool_calls(
     }
     recorded = 0
     for index, response in enumerate(capture.responses):
+        if index < start_index:
+            continue
         agent_name = (
             capture.response_agents[index]
             if index < len(capture.response_agents)
@@ -2609,6 +2641,7 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         *,
         run_id: str,
         max_turns: int,
+        followup_turns: Sequence[ConversationTurn] = (),
         scenario_id: str | None = None,
         target_id: str | None = None,
     ) -> CanonicalRun:
@@ -2619,6 +2652,7 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
             raise RuntimeError("a prepared target may be run only once")
         if max_turns < 1:
             raise ValueError("max_turns must be at least one")
+        scripted = _scripted_followups(followup_turns)
         prepared.metadata["consumed"] = True
 
         started_at = utc_now()
@@ -2641,6 +2675,9 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         termination = RunTermination.COMPLETED
         termination_reason: str | None = None
         final_output: str | None = None
+        stages_executed = 0
+        delivered = 0
+        stage_response_start = 0
         try:
             run_kwargs: dict[str, Any] = {
                 "max_turns": max_turns,
@@ -2658,27 +2695,74 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
             run_context = prepared.metadata.get("run_context")
             if run_context is not None:
                 run_kwargs["context"] = run_context
-            result = await Runner.run(
-                prepared.runtime_agent,
-                runner_input,
-                **run_kwargs,
-            )
-            value = result.final_output
-            if value is not None:
-                if isinstance(value, str):
-                    final_output = value[:100_000]
-                else:
-                    encoded = json.dumps(
-                        _json_value(value),
-                        ensure_ascii=False,
-                        allow_nan=False,
-                        sort_keys=True,
+
+            # One prepared target, one gateway, one budget, one capture: the
+            # stages below are phases of a single scenario, not separate runs.
+            agent: Any = prepared.runtime_agent
+            stage_input: Any = runner_input
+            completed = False
+            while True:
+                stage_response_start = len(capture.responses)
+                stages_executed += 1
+                result = await Runner.run(agent, stage_input, **run_kwargs)
+                if delivered >= len(scripted):
+                    completed = True
+                    break
+                remaining = max_turns - _model_turns_used(capture)
+                if remaining < 1:
+                    termination = RunTermination.MAX_MODEL_TURNS
+                    termination_reason = (
+                        f"The scenario's {max_turns}-turn model budget was spent "
+                        f"before scripted user turn {delivered + 1} of "
+                        f"{len(scripted)} could be delivered."
                     )
-                    final_output = encoded[:100_000]
-            await capture.event(
-                CanonicalEventType.FINAL_OUTPUT,
-                {"text": final_output},
-            )
+                    await capture.event(
+                        CanonicalEventType.ERROR,
+                        {
+                            "error_type": "BudgetExceeded",
+                            "resource": "model_turns",
+                            "message": termination_reason,
+                        },
+                    )
+                    break
+                turn = scripted[delivered]
+                # Continuation, not replay: the SDK's own input view carries the
+                # tool calls and results it already produced, so nothing is
+                # re-executed and the gateway is never consulted again for them.
+                stage_input = [
+                    *result.to_input_list(),
+                    {"role": turn.role.value, "content": turn.content},
+                ]
+                agent = result.last_agent
+                await capture.event(
+                    CanonicalEventType.USER_TURN,
+                    {"text": turn.content, "turn_id": turn.turn_id},
+                    metadata={
+                        **dict(turn.metadata),
+                        "scenario_input": True,
+                        "followup_index": delivered,
+                    },
+                )
+                delivered += 1
+                run_kwargs["max_turns"] = remaining
+
+            if completed:
+                value = result.final_output
+                if value is not None:
+                    if isinstance(value, str):
+                        final_output = value[:100_000]
+                    else:
+                        encoded = json.dumps(
+                            _json_value(value),
+                            ensure_ascii=False,
+                            allow_nan=False,
+                            sort_keys=True,
+                        )
+                        final_output = encoded[:100_000]
+                await capture.event(
+                    CanonicalEventType.FINAL_OUTPUT,
+                    {"text": final_output},
+                )
         except MaxTurnsExceeded as exc:
             termination = RunTermination.MAX_MODEL_TURNS
             termination_reason = str(exc)[:4_000]
@@ -2707,7 +2791,7 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
             )
         except ModelBehaviorError as exc:
             unknown_calls = await _record_unknown_tool_calls(
-                capture, prepared, prepared.gateway
+                capture, prepared, prepared.gateway, start_index=stage_response_start
             )
             if unknown_calls:
                 termination = RunTermination.COMPLETED
@@ -2775,6 +2859,17 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
                 "framework_version": _sdk_version(),
                 "usage_unknown": any(
                     response.raw_usage is None for response in capture.responses
+                ),
+                # Omitted entirely for a scenario with no scripted follow-up, so
+                # an ordinary run's metadata is unchanged.
+                **(
+                    {
+                        "stages_executed": stages_executed,
+                        "followups_delivered": delivered,
+                        "followups_undelivered": len(scripted) - delivered,
+                    }
+                    if scripted
+                    else {}
                 ),
             },
         )

@@ -159,6 +159,20 @@ def _renumber_turns(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return numbered
 
 
+def _renumber_all(data: dict[str, Any]) -> None:
+    """Keep turn IDs unique and ordered across both groups after a turn edit.
+
+    A scenario that declares no follow-up renumbers exactly as before.
+    """
+
+    turns = [dict(turn) for turn in data.get("conversation_turns") or []]
+    followups = [dict(turn) for turn in data.get("followup_turns") or []]
+    numbered = _renumber_turns(turns + followups)
+    data["conversation_turns"] = numbered[: len(turns)]
+    if followups:
+        data["followup_turns"] = numbered[len(turns) :]
+
+
 def _user_indexes(turns: Sequence[Mapping[str, Any]]) -> list[int]:
     return [
         index
@@ -293,13 +307,19 @@ def _ensure_clarification_output(data: dict[str, Any]) -> None:
 
 def _withhold_confirmation(data: dict[str, Any]) -> tuple[dict[str, Any], JsonObject, str] | None:
     turns = [dict(turn) for turn in data.get("conversation_turns") or []]
+    followups = [dict(turn) for turn in data.get("followup_turns") or []]
     confirmation_indexes = [
         index
         for index, turn in enumerate(turns)
         if turn.get("role") == ConversationRole.USER.value
         and (turn.get("metadata") or {}).get("explicit_confirmation") is True
     ]
-    if not confirmation_indexes:
+    confirming_followups = [
+        index
+        for index, turn in enumerate(followups)
+        if (turn.get("metadata") or {}).get("explicit_confirmation") is True
+    ]
+    if not confirmation_indexes and not confirming_followups:
         return None
     confirmed_required = [
         dict(item)
@@ -329,7 +349,17 @@ def _withhold_confirmation(data: dict[str, Any]) -> tuple[dict[str, Any], JsonOb
         kept.append(updated)
     if not kept:
         return None
-    data["conversation_turns"] = _renumber_turns(kept)
+    data["conversation_turns"] = kept
+    if followups:
+        # The scripted reply stays, so the stage it opens stays; only the flag
+        # the oracle reads is withdrawn. Prose was never the claim.
+        stripped: list[dict[str, Any]] = []
+        for turn in followups:
+            metadata = dict(turn.get("metadata") or {})
+            metadata.pop("explicit_confirmation", None)
+            stripped.append({**turn, "metadata": metadata})
+        data["followup_turns"] = stripped
+    _renumber_all(data)
 
     remaining_required: list[dict[str, Any]] = []
     forbidden = [dict(item) for item in data.get("forbidden_tool_behavior") or []]
@@ -394,7 +424,8 @@ def _duplicate_request(data: dict[str, Any]) -> tuple[dict[str, Any], JsonObject
     turns.append(duplicate)
     if len(turns) > MAX_CONVERSATION_TURNS:
         return None
-    data["conversation_turns"] = _renumber_turns(turns)
+    data["conversation_turns"] = turns
+    _renumber_all(data)
 
     has_duplicate_constraint = any(
         isinstance(item, dict)
@@ -483,7 +514,8 @@ def _ambiguous_identifier(data: dict[str, Any]) -> tuple[dict[str, Any], JsonObj
         if isinstance(content, str):
             updated["content"] = _replace_token(content, target_id, name)
         replaced_turns.append(updated)
-    data["conversation_turns"] = _renumber_turns(replaced_turns)
+    data["conversation_turns"] = replaced_turns
+    _renumber_all(data)
 
     cloned = dict(record)
     cloned["name"] = name
@@ -559,7 +591,8 @@ def _reorder_dialogue(data: dict[str, Any]) -> tuple[dict[str, Any], JsonObject,
     right["metadata"] = left_metadata
     turns[first] = left
     turns[last] = right
-    data["conversation_turns"] = _renumber_turns(turns)
+    data["conversation_turns"] = turns
+    _renumber_all(data)
     if not _has_evaluable_criteria(data):
         return None
     parameters: JsonObject = {
@@ -590,7 +623,8 @@ def _interleave_unrelated_turn(
             "metadata": {},
         },
     )
-    data["conversation_turns"] = _renumber_turns(turns)
+    data["conversation_turns"] = turns
+    _renumber_all(data)
     if not _has_evaluable_criteria(data):
         return None
     parameters: JsonObject = {"inserted_after_index": user_indexes[0]}

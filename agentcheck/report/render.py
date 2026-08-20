@@ -223,6 +223,17 @@ def render_report(
             suggested.summary for item in related for suggested in item.suggested_fixes
         ) or "No fix suggested."
         conversation = _json([turn.model_dump(mode="json") for turn in scenario.conversation_turns])
+        followups_html = ""
+        if scenario.followup_turns:
+            followups = _json(
+                [turn.model_dump(mode="json") for turn in scenario.followup_turns]
+            )
+            followups_html = (
+                "<section><h4>Scripted replies</h4>"
+                "<p>Withheld until the agent had answered; the observable trace "
+                "below shows where each one was delivered.</p>"
+                f"<pre>{followups}</pre></section>"
+            )
         lineage = lineage_by_id.get(scenario.scenario_id)
         lineage_html = ""
         if lineage is not None:
@@ -253,6 +264,7 @@ def render_report(
               <summary><span class="badge verdict-{_escape(verdict.lower())}">{_escape(verdict)}</span> {_escape(scenario.title)} <span class="mono">{_escape(scenario.scenario_id)}</span></summary>
               <div class="case-grid">
                 <section><h4>Conversation</h4><pre>{conversation}</pre></section>
+                {followups_html}
                 <section><h4>Assertions</h4><ul>{assertions}</ul></section>
                 <section><h4>Evidence</h4>{evidence or '<p class="muted">No evidence packet.</p>'}</section>
                 <section><h4>Initial state</h4><pre>{initial}</pre></section>

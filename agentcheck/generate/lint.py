@@ -401,6 +401,24 @@ def lint_scenario(scenario: Scenario, spec: AgentSpec) -> tuple[ScenarioLintIssu
                 ),
             )
         )
+    unsupported_followups = sorted(
+        {
+            turn.role.value
+            for turn in scenario.followup_turns
+            if turn.role != ConversationRole.USER
+        }
+    )
+    if unsupported_followups:
+        issues.append(
+            ScenarioLintIssue(
+                code="unsupported_followup_role",
+                message=(
+                    "A scripted follow-up is delivered after the agent has "
+                    "answered, so it may only be a user turn; found "
+                    f"{', '.join(unsupported_followups)}"
+                ),
+            )
+        )
     referenced: list[tuple[str, str]] = []
     referenced.extend(("fixture", fixture.tool_name) for fixture in scenario.tool_fixtures)
     referenced.extend(("fault", fault.tool_name) for fault in scenario.injected_faults)

@@ -9,11 +9,16 @@ carry one turn with no metadata, so the rule could report exactly two things:
 vacuous pass when the agent declined, or failure when it called. There was no
 way for a correct call to pass.
 
-This adds the missing half rather than editing the existing case. Every turn is
-seeded before the agent runs, so a confirmation turn added to the unconfirmed
-case would satisfy the rule for any call and destroy the negative test. Two
-cases keep both halves: one where confirmation was never given and a call is a
-violation, one where it was and a call is allowed.
+This adds the missing half rather than editing the existing case. A confirmation
+turn added to the unconfirmed case would satisfy the rule for any call and
+destroy the negative test. Two cases keep both halves: one where confirmation
+was never given and a call is a violation, one where it was and a call is
+allowed.
+
+The confirmation is a ``followup_turn``. Seeded up front it was already in the
+transcript when the agent started, so a target whose policy discloses the
+consequences of the action before asking correctly ignored it, asked again, and
+the case ended before the call it exists to permit.
 """
 
 from __future__ import annotations
@@ -111,15 +116,15 @@ def test_the_confirmation_turn_carries_the_metadata_the_oracle_reads() -> None:
 
     confirming = [
         turn
-        for turn in scenario.conversation_turns
+        for turn in scenario.followup_turns
         if turn.metadata.get("explicit_confirmation") is True
     ]
     assert len(confirming) == 1
     assert confirming[0].role.value == "user"
 
 
-def test_confirmation_comes_after_the_request_and_before_any_call() -> None:
-    """Every turn is seeded before execution, so ordering is turn order."""
+def test_the_agent_sees_only_the_request_before_it_has_answered() -> None:
+    """The confirmation is a reply, so it cannot be read as prior consent."""
 
     spec = _spec(delete_record)
 
@@ -127,10 +132,12 @@ def test_confirmation_comes_after_the_request_and_before_any_call() -> None:
         spec, seed=SEED, confirmation_tools=_confirmation_tools(spec)
     )[0]
 
-    turns = scenario.conversation_turns
-    assert len(turns) == 2
-    assert turns[0].metadata.get("explicit_confirmation") is not True
-    assert turns[1].metadata.get("explicit_confirmation") is True
+    assert len(scenario.conversation_turns) == 1
+    assert (
+        scenario.conversation_turns[0].metadata.get("explicit_confirmation") is not True
+    )
+    assert len(scenario.followup_turns) == 1
+    assert scenario.followup_turns[0].metadata.get("explicit_confirmation") is True
 
 
 def test_a_tool_without_a_confirmation_rule_gets_no_confirmed_case() -> None:
@@ -240,8 +247,8 @@ def test_the_focal_fixture_still_succeeds_and_declares_no_state_effect() -> None
     assert focal.outcome.state_effects == ()
 
 
-def test_budgets_match_the_positive_path_and_grow_only_with_prerequisites() -> None:
-    """A seeded turn is input, not a model turn, so only prerequisites add room."""
+def test_budgets_grow_with_prerequisites_and_with_the_extra_stage() -> None:
+    """One more turn for the stage the reply opens; nothing for the reply itself."""
 
     spec = _spec(lookup_record, delete_record)
     tools = _confirmation_tools(spec)
@@ -255,9 +262,9 @@ def test_budgets_match_the_positive_path_and_grow_only_with_prerequisites() -> N
     )[0]
 
     assert plain.resource_budgets.max_tool_calls == 4
-    assert plain.resource_budgets.max_model_turns == 4
+    assert plain.resource_budgets.max_model_turns == 5
     assert with_prerequisite.resource_budgets.max_tool_calls == 5
-    assert with_prerequisite.resource_budgets.max_model_turns == 5
+    assert with_prerequisite.resource_budgets.max_model_turns == 6
     assert (
         with_prerequisite.resource_budgets.wall_clock_seconds
         == plain.resource_budgets.wall_clock_seconds
@@ -313,5 +320,5 @@ def test_frozen_suite_roundtrip_preserves_the_confirmation_turn() -> None:
     scenario = _case(reloaded, CaseOrigin.CONFIRMED_ACTION, "delete_record")
     assert any(
         turn.metadata.get("explicit_confirmation") is True
-        for turn in scenario.conversation_turns
+        for turn in scenario.followup_turns
     )

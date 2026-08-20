@@ -243,6 +243,7 @@ def _run(root: Path, config: AgentCheckConfig, scenario: Scenario, run_id: str) 
         adapter.run(
             prepared,
             scenario.conversation_turns,
+            followup_turns=scenario.followup_turns,
             run_id=run_id,
             max_turns=scenario.resource_budgets.max_model_turns,
             scenario_id=scenario.scenario_id,

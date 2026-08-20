@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import hmac
 from enum import Enum
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, field_validator, model_serializer, model_validator
 
 from .base import ContractModel, JsonObject, JsonValue, canonical_hash
 
@@ -20,6 +20,11 @@ SCENARIO_CONTRACT_VERSION: Literal["agentcheck.scenario.v1"] = (
 # and every reader of a finished run can recognise. Kept here, next to the
 # scenario contract, so the two never drift apart.
 ACTION_SCENARIO_PREFIX = "action-"
+
+# Each follow-up opens another agent execution stage inside one scenario, so the
+# count is bounded for the same reason every other collection here is: a case
+# must not be able to ask for unbounded work.
+MAX_FOLLOWUP_TURNS = 8
 
 
 class ConversationRole(str, Enum):
@@ -222,6 +227,16 @@ class Scenario(ContractModel):
     title: str = Field(min_length=1, max_length=500)
     description: str | None = Field(default=None, max_length=8_000)
     conversation_turns: tuple[ConversationTurn, ...] = Field(min_length=1)
+    # Scripted replies the runtime withholds until the agent has answered, one
+    # per completed execution stage. ``conversation_turns`` keeps its meaning
+    # exactly: everything the agent may see before it has said anything. A
+    # policy that discloses consequences and only then asks for confirmation
+    # cannot be expressed by seeding that confirmation up front -- a correct
+    # agent ignores it and asks again, and the case ends before the action it
+    # was written to observe.
+    followup_turns: tuple[ConversationTurn, ...] = Field(
+        default=(), max_length=MAX_FOLLOWUP_TURNS
+    )
     initial_world_state: JsonObject = Field(default_factory=dict)
     tool_fixtures: tuple[ToolFixture, ...] = ()
     injected_faults: tuple[InjectedFault, ...] = ()
@@ -236,6 +251,20 @@ class Scenario(ContractModel):
     oracle_provenance: tuple[OracleProvenance, ...] = Field(min_length=1)
     generation_seed: int = Field(ge=0)
     fingerprint: str = ""
+
+    @model_serializer(mode="wrap")
+    def omit_idle_followup_turns(self, serializer: Any) -> dict[str, Any]:
+        """Keep a scenario that declares no follow-up byte-identical to a v1 dump.
+
+        The fingerprint is a hash of this document, so a field that always
+        appeared would move every existing scenario, suite, and manifest for a
+        feature they do not use.
+        """
+
+        data = serializer(self)
+        if not data.get("followup_turns"):
+            data.pop("followup_turns", None)
+        return data
 
     @field_validator("dimension_tags")
     @classmethod
@@ -275,6 +304,28 @@ class Scenario(ContractModel):
         unknown = referenced_oracles.difference(oracle_ids)
         if unknown:
             raise ValueError(f"scenario criteria reference unknown oracles: {sorted(unknown)}")
+
+        if self.followup_turns:
+            non_user = sorted(
+                {
+                    turn.role.value
+                    for turn in self.followup_turns
+                    if turn.role != ConversationRole.USER
+                }
+            )
+            if non_user:
+                # An assistant turn injected mid-run would be AgentCheck writing
+                # the agent's side of the transcript the oracle then scores.
+                raise ValueError(
+                    "follow-up turns must be user turns; found "
+                    f"{', '.join(non_user)}"
+                )
+            turn_ids = [
+                turn.turn_id
+                for turn in (*self.conversation_turns, *self.followup_turns)
+            ]
+            if len(turn_ids) != len(set(turn_ids)):
+                raise ValueError("conversation and follow-up turn IDs must be unique")
 
         for constraint in self.required_tool_behavior:
             if constraint.min_calls < 1:

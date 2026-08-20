@@ -311,7 +311,14 @@ class FrameworkAdapter(ABC):
         *,
         run_id: str,
         max_turns: int,
+        followup_turns: Sequence["ConversationTurn"] = (),
         scenario_id: str | None = None,
         target_id: str | None = None,
     ) -> "CanonicalRun":
-        """Execute one prepared target and normalize its observable behavior."""
+        """Execute one prepared target and normalize its observable behavior.
+
+        ``followup_turns`` are scripted user replies the adapter withholds until
+        the agent has finished answering, delivering one per completed execution
+        stage. The whole scenario stays one prepared target, one gateway, one
+        budget, and one ``CanonicalRun``; stages are not independent runs.
+        """
