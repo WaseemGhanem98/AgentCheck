@@ -423,6 +423,7 @@ def build_frozen_suite(
     realizer: Any | None = None,
     representative_inputs: Mapping[str, Mapping[str, Any]] | None = None,
     scenario_requests: Mapping[str, str] | None = None,
+    prerequisite_outcomes: Mapping[str, Any] | None = None,
 ) -> FrozenSuite:
     """Derive, deduplicate, lint, and freeze every supported case for a target."""
 
@@ -458,6 +459,7 @@ def build_frozen_suite(
         seed=seed,
         representative_inputs=representative_inputs,
         scenario_requests=scenario_requests,
+        prerequisite_outcomes=prerequisite_outcomes,
     ):
         if positive.representative:
             representative_tools.append(positive.tool_name)
@@ -479,6 +481,7 @@ def build_frozen_suite(
         seed=seed,
         representative_inputs=representative_inputs,
         scenario_requests=scenario_requests,
+        prerequisite_outcomes=prerequisite_outcomes,
     )
     for scenario in outcome_variant_cases:
         candidates.append(

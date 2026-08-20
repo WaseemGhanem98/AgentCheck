@@ -24,7 +24,7 @@ from typing import Literal
 
 from pydantic import Field
 
-from agentcheck.domain import ContractModel, JsonObject
+from agentcheck.domain import ContractModel, JsonObject, JsonValue
 
 
 FIXTURE_PACK_CONTRACT_VERSION: Literal["agentcheck.fixtures.v1"] = (
@@ -50,16 +50,38 @@ class ToolInputValues(ContractModel):
     user_request: str | None = Field(default=None, min_length=1, max_length=8_000)
 
 
+class PrerequisiteOutcome(ContractModel):
+    """What a gating tool returns when it is called on the way to an action."""
+
+    # Optional: a tool whose result the agent only needs to have *succeeded*
+    # gets the same generic acknowledgement every other generated fixture uses.
+    # A tool whose returned value the next call depends on -- an identifier
+    # looked up before it can be acted on -- needs a real value here, and only
+    # the developer knows what that looks like.
+    result: JsonValue = None
+
+
 class FixturePack(ContractModel):
     """Representative input values for a target. Unknown fields are rejected."""
 
     schema_version: Literal["agentcheck.fixtures.v1"] = FIXTURE_PACK_CONTRACT_VERSION
     tools: dict[str, ToolInputValues] = Field(default_factory=dict)
+    # Separate from ``tools`` on purpose, and the separation is the same one
+    # this module's docstring draws: ``tools`` shapes the request, this shapes a
+    # reply. It is also a different claim about a different tool. An entry here
+    # says "this tool may legitimately be called on the way to some *other*
+    # tool's action", which is exactly the thing that cannot be inferred:
+    # classification is lexical and already over-reaches, so a heuristic
+    # excluded the lookup that gated the action on a real target. Naming them is
+    # narrow, general, and fails closed -- an undeclared tool still has no
+    # fixture, and an in-contract call to it still stops the case.
+    prerequisites: dict[str, PrerequisiteOutcome] = Field(default_factory=dict)
 
 
 __all__ = [
     "DEFAULT_FIXTURES_FILENAME",
     "FIXTURE_PACK_CONTRACT_VERSION",
     "FixturePack",
+    "PrerequisiteOutcome",
     "ToolInputValues",
 ]

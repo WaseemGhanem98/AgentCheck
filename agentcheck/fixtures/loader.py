@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from agentcheck.config import contained_path
-from agentcheck.domain import AgentSpec, JsonObject
+from agentcheck.domain import AgentSpec, JsonObject, JsonValue
 from agentcheck.errors import ConfigurationError
 from agentcheck.privacy import redact_log_text
 from agentcheck.schema_safety import UnsafeSchemaReference, offline_validator
@@ -148,7 +148,48 @@ def validate_fixture_pack(pack: FixturePack, spec: AgentSpec) -> dict[str, JsonO
                     "fixtures are committed test data and must not contain secrets"
                 )
         resolved[tool_name] = dict(values.arguments)
+    _validate_prerequisites(pack, definitions)
     return resolved
+
+
+def _validate_prerequisites(
+    pack: FixturePack, definitions: Mapping[str, Any]
+) -> None:
+    """Reject a prerequisite that names a tool this target does not declare.
+
+    Same fail-closed rule as the input values above: a stale entry is reported
+    rather than silently widening what a scenario simulates.
+    """
+
+    for tool_name in sorted(pack.prerequisites):
+        if tool_name not in definitions:
+            known = ", ".join(sorted(definitions)) or "(none)"
+            raise ConfigurationError(
+                f"prerequisite names unknown tool {tool_name!r}; this target "
+                f"declares: {known}"
+            )
+        result = pack.prerequisites[tool_name].result
+        _reject_credential_text(tool_name, result)
+
+
+def _reject_credential_text(tool_name: str, value: Any) -> None:
+    """Committed test data, so a simulated reply may not carry a secret either."""
+
+    if isinstance(value, str):
+        if redact_log_text(value) != value:
+            raise ConfigurationError(
+                f"prerequisite result for {tool_name} looks like it contains a "
+                "credential; fixtures are committed test data and must not "
+                "contain secrets"
+            )
+        return
+    if isinstance(value, Mapping):
+        for item in value.values():
+            _reject_credential_text(tool_name, item)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _reject_credential_text(tool_name, item)
 
 
 def load_representative_inputs(
@@ -185,8 +226,29 @@ def load_scenario_requests(
     }
 
 
+def load_prerequisite_outcomes(
+    root: Path, spec: AgentSpec, *, filename: str | None = None
+) -> dict[str, JsonValue]:
+    """Simulated replies for tools a developer declared as gating an action.
+
+    Kept separate from the two loaders above for the same reason they are
+    separate from each other: this one answers "which other tools may be called
+    on the way", which is a claim about tool relationships rather than about any
+    single tool's inputs.
+    """
+
+    pack = load_fixture_pack(root, filename=filename)
+    if pack is None:
+        return {}
+    validate_fixture_pack(pack, spec)
+    return {
+        name: pack.prerequisites[name].result for name in sorted(pack.prerequisites)
+    }
+
+
 __all__ = [
     "load_fixture_pack",
+    "load_prerequisite_outcomes",
     "load_representative_inputs",
     "load_scenario_requests",
     "validate_fixture_pack",

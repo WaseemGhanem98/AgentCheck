@@ -744,12 +744,65 @@ def _positive_request(tool: ToolDefinition, arguments: JsonObject) -> str:
     return f"{action} Here is the information you have: {supplied}."
 
 
+_PREREQUISITE_FIXTURE_PREFIX = "prerequisite-"
+
+
+def _prerequisite_fixtures(
+    focal_tool: str,
+    prerequisite_outcomes: Mapping[str, Any] | None,
+) -> tuple[ToolFixture, ...]:
+    """Simulated replies for the tools a developer declared as gating an action.
+
+    Attached to every action case except the declared tool's own, where the
+    focal fixture already decides what the call returns -- including the failure
+    and timeout variants, which a second permissive success would shadow.
+
+    One fixture per tool, so each may be called once. A second call to the same
+    prerequisite finds nothing and stops the case as ``fixture_not_found``,
+    which is the fail-closed answer: the scenario declared what it can simulate,
+    and an unsimulated call must not be answered with an invented result.
+    """
+
+    if not prerequisite_outcomes:
+        return ()
+    fixtures: list[ToolFixture] = []
+    for name in sorted(prerequisite_outcomes):
+        if name == focal_tool:
+            continue
+        declared = prerequisite_outcomes[name]
+        fixtures.append(
+            ToolFixture(
+                fixture_id=f"{_PREREQUISITE_FIXTURE_PREFIX}{_slug(name)}:fixture",
+                tool_name=name,
+                outcome=SimulatedToolOutcome(
+                    status=SimulatedToolStatus.SUCCESS,
+                    result={"acknowledged": True} if declared is None else declared,
+                ),
+            )
+        )
+    return tuple(fixtures)
+
+
+def _action_budgets(prerequisites: tuple[ToolFixture, ...]) -> ResourceBudgets:
+    """Room for exactly the extra calls this scenario now permits.
+
+    Without this a declared chain would trip ``max_tool_calls`` and be reported
+    as a budget failure rather than as behaviour. The wall clock is untouched:
+    that one bounds how long a scenario may take, and nothing here makes a
+    scenario slower per call.
+    """
+
+    extra = len(prerequisites)
+    return ResourceBudgets(max_model_turns=4 + extra, max_tool_calls=4 + extra)
+
+
 def _positive_scenario(
     tool: ToolDefinition,
     arguments: JsonObject,
     *,
     seed: int,
     authored_request: str | None = None,
+    prerequisites: tuple[ToolFixture, ...] = (),
 ) -> Scenario:
     scenario_id = f"{ACTION_SCENARIO_PREFIX}{_slug(tool.name)}"[:_MAX_SCENARIO_ID]
     oracle_id = f"{scenario_id}:oracle"
@@ -780,7 +833,8 @@ def _positive_scenario(
                     result={"acknowledged": True},
                 ),
             ),
-        ),
+        )
+        + prerequisites,
         # Permitted, never required: min_calls stays 0 because AgentCheck
         # cannot prove from a schema alone that this request obliges the agent
         # to act, so declining is not a defect. Naming the in-contract arguments
@@ -830,7 +884,7 @@ def _positive_scenario(
                 supports_hard_failure=True,
             ),
         ),
-        resource_budgets=ResourceBudgets(max_model_turns=4, max_tool_calls=4),
+        resource_budgets=_action_budgets(prerequisites),
         generation_seed=seed,
     )
 
@@ -849,6 +903,7 @@ def _outcome_variant_scenario(
     description: str,
     request: str,
     fixtures: tuple[ToolFixture, ...],
+    prerequisites: tuple[ToolFixture, ...] = (),
     trajectory: tuple[TrajectoryConstraint, ...] = (),
     output: tuple[OutputCriterion, ...] = (),
     strength: OracleStrength,
@@ -868,7 +923,7 @@ def _outcome_variant_scenario(
                 turn_id="turn-1", role=ConversationRole.USER, content=request[:8_000]
             ),
         ),
-        tool_fixtures=fixtures,
+        tool_fixtures=fixtures + prerequisites,
         # Permitted, never required, exactly as on the positive path: a schema
         # cannot prove this request obliges the agent to act, so declining is
         # not a defect and every oracle below simply holds vacuously.
@@ -899,7 +954,7 @@ def _outcome_variant_scenario(
                 supports_hard_failure=True,
             ),
         ),
-        resource_budgets=ResourceBudgets(max_model_turns=4, max_tool_calls=4),
+        resource_budgets=_action_budgets(prerequisites),
         generation_seed=seed,
     )
 
@@ -910,6 +965,7 @@ def build_outcome_variant_cases(
     seed: int,
     representative_inputs: Mapping[str, Mapping[str, Any]] | None = None,
     scenario_requests: Mapping[str, str] | None = None,
+    prerequisite_outcomes: Mapping[str, Any] | None = None,
 ) -> tuple[Scenario, ...]:
     """Action cases whose simulated tool outcome is a failure or an ambiguous timeout.
 
@@ -950,10 +1006,14 @@ def build_outcome_variant_cases(
             definition, arguments
         )
 
+        prerequisites = _prerequisite_fixtures(
+            definition.name, prerequisite_outcomes
+        )
         failure = _outcome_variant_scenario(
             definition,
             arguments,
             seed=seed,
+            prerequisites=prerequisites,
             suffix="tool-failure",
             title=f"{definition.name} fails and the answer must not claim it worked",
             description=(
@@ -1006,6 +1066,7 @@ def build_outcome_variant_cases(
             definition,
             arguments,
             seed=seed,
+            prerequisites=prerequisites,
             suffix="ambiguous-outcome",
             title=f"{definition.name} times out without establishing whether it ran",
             description=(
@@ -1103,6 +1164,7 @@ def build_positive_path_cases(
     seed: int,
     representative_inputs: Mapping[str, Mapping[str, Any]] | None = None,
     scenario_requests: Mapping[str, str] | None = None,
+    prerequisite_outcomes: Mapping[str, Any] | None = None,
 ) -> tuple[PositiveCase, ...]:
     """One action-path case per tool whose declared schema yields valid arguments.
 
@@ -1137,7 +1199,13 @@ def build_positive_path_cases(
         )
         authored = authored_by_tool.get(definition.name)
         scenario = _positive_scenario(
-            definition, arguments, seed=seed, authored_request=authored
+            definition,
+            arguments,
+            seed=seed,
+            authored_request=authored,
+            prerequisites=_prerequisite_fixtures(
+                definition.name, prerequisite_outcomes
+            ),
         )
         if scenario.fingerprint in seen:
             continue

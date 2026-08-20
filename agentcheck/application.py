@@ -31,7 +31,11 @@ from agentcheck.domain import (
 )
 from agentcheck import __version__
 from agentcheck.evaluate import evaluate_run, infrastructure_evaluation
-from agentcheck.fixtures import load_representative_inputs, load_scenario_requests
+from agentcheck.fixtures import (
+    load_prerequisite_outcomes,
+    load_representative_inputs,
+    load_scenario_requests,
+)
 from agentcheck.errors import (
     ConfigurationError,
     IncompatibleSuiteError,
@@ -266,6 +270,7 @@ def generate_suite(
             active_realizer = realizer
     representative_inputs = load_representative_inputs(root, spec)
     scenario_requests = load_scenario_requests(root, spec)
+    prerequisite_outcomes = load_prerequisite_outcomes(root, spec)
     suite = build_frozen_suite(
         spec,
         config,
@@ -277,6 +282,7 @@ def generate_suite(
         realizer=active_realizer,
         representative_inputs=representative_inputs,
         scenario_requests=scenario_requests,
+        prerequisite_outcomes=prerequisite_outcomes,
     )
     write_frozen_suite(destination, suite, force=force)
     return SuiteGeneration(
