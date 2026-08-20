@@ -32,8 +32,16 @@ def _target(tmp_path: Path, *, with_agent: bool = True) -> Path:
 
 
 def test_supported_adapters_track_the_config_contract() -> None:
-    assert SUPPORTED_ADAPTERS == ("openai_agents",)
+    """Pinned on purpose: adding an adapter should be a deliberate decision.
+
+    The tuple is derived from the config Literal, so this fails whenever the
+    supported set changes rather than letting it drift silently.
+    """
+
+    assert SUPPORTED_ADAPTERS == ("openai_agents", "pydantic_ai")
     assert DEFAULT_ADAPTER in SUPPORTED_ADAPTERS
+    # The default is unchanged, so an existing config keeps its meaning.
+    assert DEFAULT_ADAPTER == "openai_agents"
     assert AgentCheckConfig().adapter == DEFAULT_ADAPTER
 
 
