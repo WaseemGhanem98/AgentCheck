@@ -192,9 +192,19 @@ def policy_oracle(
 
 
 def _referenced_tools(data: Mapping[str, Any]) -> set[str]:
+    """Tools this scenario makes a claim about, which is what a rule may attach to.
+
+    Fixtures are deliberately not a reference. A fixture says what a tool returns
+    if it is called, not that the case is about that tool, and since a scenario
+    may now carry fixtures for prerequisite tools, counting them attached a
+    prerequisite's rules to a case focused on something else -- letting a verdict
+    about the focal action be decided by a tool that was only there to get to it.
+    Every generated and built-in scenario names its focal tool in a behaviour or
+    trajectory group as well, so nothing loses a rule it had before.
+    """
+
     names: set[str] = set()
     for group in (
-        "tool_fixtures",
         "required_tool_behavior",
         "allowed_tool_behavior",
         "forbidden_tool_behavior",

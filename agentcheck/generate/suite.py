@@ -35,11 +35,12 @@ from agentcheck.domain import (
     canonical_hash,
 )
 from agentcheck.errors import ConfigurationError, ScenarioValidationError
-from agentcheck.policies import PolicyPack, apply_policy_packs
+from agentcheck.policies import PolicyPack, PolicyRuleKind, apply_policy_packs
 from agentcheck.privacy import redact_log_text
 
 from .boundaries import (
     build_boundary_cases,
+    build_confirmation_variant_cases,
     build_outcome_variant_cases,
     build_positive_path_cases,
     build_output_schema_cases,
@@ -92,6 +93,10 @@ class CaseOrigin(str, Enum):
     # New members leave every existing suite dump, and therefore every existing
     # fingerprint, byte-identical.
     BEHAVIORAL_OUTCOME = "behavioral_outcome"
+    # Additive. Existing values keep their strings, and lineage sits on the
+    # frozen case rather than inside the scenario fingerprint, so no existing
+    # suite changes because this member exists.
+    CONFIRMED_ACTION = "confirmed_action"
 
 
 _MUTATION_LINEAGE_FIELDS = (
@@ -486,6 +491,26 @@ def build_frozen_suite(
     for scenario in outcome_variant_cases:
         candidates.append(
             (scenario, CaseLineage(origin=CaseOrigin.BEHAVIORAL_OUTCOME))
+        )
+    # Only tools a declared pack actually requires confirmation for. Derived
+    # from the packs rather than from the destructive flag, so a hand-written
+    # pack is covered too and a target with no confirmation rule gains nothing.
+    confirmation_tools = {
+        rule.tool_name
+        for pack in policy_packs
+        for rule in pack.rules
+        if rule.kind is PolicyRuleKind.CONFIRMATION_BEFORE_TOOL and rule.tool_name
+    }
+    for scenario in build_confirmation_variant_cases(
+        spec,
+        seed=seed,
+        confirmation_tools=confirmation_tools,
+        representative_inputs=representative_inputs,
+        scenario_requests=scenario_requests,
+        prerequisite_outcomes=prerequisite_outcomes,
+    ):
+        candidates.append(
+            (scenario, CaseLineage(origin=CaseOrigin.CONFIRMED_ACTION))
         )
     output_schema_cases = build_output_schema_cases(spec, seed=seed)
     for scenario in output_schema_cases:
