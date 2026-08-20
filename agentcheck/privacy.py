@@ -8,9 +8,9 @@ from pydantic import BaseModel
 from agentcheck.redaction import DEFAULT_REDACTED_KEYS, redact_text, sanitize_value
 
 
-# These are evaluation resource metrics, not authentication material. AgentLens
-# already exempts its plural token counters; AgentCheck adds its one singular
-# schema field so versioned scenarios remain valid after privacy filtering.
+# These are evaluation resource metrics, not authentication material. The
+# redaction layer already exempts the plural token counters; this adds the one
+# singular schema field so versioned scenarios survive privacy filtering.
 _NON_SECRET_AGENTCHECK_KEYS = frozenset({"token_budget"})
 _MAX_ARTIFACT_DEPTH = 20
 _MAX_ARTIFACT_ITEMS = 100
@@ -44,8 +44,8 @@ def _redact_artifact(
                 if index >= _MAX_ARTIFACT_ITEMS:
                     result["[TRUNCATED_ITEMS]"] = True
                     break
-                # A singleton placeholder lets AgentLens own key normalization
-                # and sensitivity classification.
+                # A singleton placeholder keeps key normalization and
+                # sensitivity classification in one place, in `redaction`.
                 if (
                     isinstance(raw_key, str)
                     and raw_key in _NON_SECRET_AGENTCHECK_KEYS
@@ -96,12 +96,12 @@ def _redact_artifact(
 
 
 def redact_artifact(value: Any, *, additional_keys: tuple[str, ...] = ()) -> Any:
-    """Apply AgentLens redaction without one shared budget truncating a whole suite.
+    """Redact an artifact without one shared budget truncating a whole suite.
 
-    AgentLens telemetry intentionally has a small per-event node budget.
-    Evaluation artifacts contain collections of independent cases, so this
-    layer retains its key/text rules while applying a larger, depth- and
-    item-bounded artifact budget.
+    The underlying sanitizer is tuned for a single telemetry event and so has a
+    small node budget. An evaluation artifact is a collection of independent
+    cases, so this layer keeps that sanitizer's key and text rules while
+    applying a larger, depth- and item-bounded artifact budget.
     """
 
     keys = tuple(dict.fromkeys((*DEFAULT_REDACTED_KEYS, *additional_keys)))
