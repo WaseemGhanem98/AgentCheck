@@ -44,7 +44,7 @@ class SpecBinding(ContractModel):
     """Inspected target surface that must still match at replay time."""
 
     spec_id: str = Field(min_length=1, max_length=200)
-    adapter: Literal["openai_agents", "pydantic_ai"]
+    adapter: Literal["openai_agents", "pydantic_ai", "custom"]
     entrypoint: str = Field(min_length=1, max_length=500)
     policy_pack_ids: tuple[str, ...] = ()
 
