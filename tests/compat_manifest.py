@@ -1,7 +1,7 @@
 """The cross-version compatibility suite: what runs on every supported Python.
 
-The full suite runs once, on the newest supported interpreter. Running all 930
-tests three times costs about 70 minutes of a single self-hosted runner's
+The full suite runs once, on the newest supported interpreter. Running the entire
+suite three times costs about 70 minutes of a single self-hosted runner's
 serial queue, and most of that third and second pass re-executes pure logic that
 cannot behave differently between 3.10 and 3.12.
 
