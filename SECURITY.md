@@ -14,9 +14,16 @@ reproduction steps. Reports are assessed as promptly as maintainers are
 available; this is a small pre-1.0 project, not a staffed security team, and
 that is worth knowing before you rely on a response time.
 
-If private vulnerability reporting is not enabled on this repository, open a
-public issue that contains **only** a request for a private reporting channel —
-no details.
+GitHub only offers private vulnerability reporting on public repositories, so
+while this repository is private that Security-tab flow is unavailable and
+enabling it is part of the publication checklist.
+
+If for any reason the flow is not available when you need it, open a public issue
+containing **only** a request for a private reporting channel — no details, no
+reproduction, no payloads.
+
+There is deliberately no security email address here. Publishing one that is not
+monitored would be worse than publishing none.
 
 ## Supported versions
 
