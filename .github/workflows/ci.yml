@@ -3,7 +3,7 @@
 # ============================================================================
 # READ BEFORE MAKING THIS REPOSITORY PUBLIC
 # ============================================================================
-# Every job below runs on `agentlens-local`, a self-hosted runner that is a
+# Every job below runs on `agentcheck-local`, a self-hosted runner that is a
 # maintainer's own workstation. That is acceptable *only* while this repository
 # is private and every branch in it is written by the owner.
 #

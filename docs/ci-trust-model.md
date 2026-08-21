@@ -12,7 +12,7 @@ version runs the cross-version suite defined in `tests/compat_manifest.py`.
 
 | | Py3.10 | Py3.11 | Py3.12 |
 |---|---|---|---|
-| Full behavioural suite (930 tests) | | | ✅ |
+| Full behavioural suite (964 tests) | | | ✅ |
 | Domain models, serialization, fingerprints | ✅ | ✅ | ✅ |
 | Worker / process isolation | ✅ | ✅ | ✅ |
 | ToolGateway, fail-closed, unknown tools | ✅ | ✅ | ✅ |
@@ -33,8 +33,9 @@ on, subprocess worker launch, import machinery, third-party SDK internals, and
 the `argparse` console entry point. All of those run everywhere. Pure logic over
 already-constructed objects runs once.
 
-The cross-version suite is 381 of 930 tests across 18 files and takes about six
-minutes, against roughly 22-26 for the full suite. It is not a smoke test.
+The cross-version suite is 381 of 964 tests across 18 files. Measured on the
+self-hosted runner it takes about 8 minutes per interpreter, against 21 for the
+full suite. It is not a smoke test.
 
 `tests/agentcheck/test_compat_manifest.py` fails if a category loses its files,
 if a listed file disappears, or if a listed file stops containing the symbols
@@ -57,7 +58,7 @@ serial queue.
 
 | Workflow | Runner | Trigger | Why |
 |---|---|---|---|
-| `ci.yml` | `[self-hosted, Linux, X64]` (`agentlens-local`) | `push`, `pull_request` | Every branch here is written by the owner, and GitHub-hosted minutes are billed against the account while the repository is private. |
+| `ci.yml` | `[self-hosted, Linux, X64]` (`agentcheck-local`) | `push`, `pull_request` | Every branch here is written by the owner, and GitHub-hosted minutes are billed against the account while the repository is private. |
 | `agentcheck-example.yml` | `ubuntu-latest` | `workflow_dispatch` | Deliberately GitHub-hosted — see below. |
 
 ## Why the example workflow stays GitHub-hosted
@@ -100,6 +101,33 @@ CI and in the test suite. It also fails if a `ci.yml` job drifts *back* to a
 GitHub-hosted label, because that spends billed minutes silently — nothing
 breaks, the bill just grows.
 
+## Why the answer is simply "move to GitHub-hosted"
+
+Two facts, both verified against GitHub's own documentation rather than assumed,
+decide this:
+
+**1. Self-hosted runners are the wrong tool for a public repository.** GitHub's
+security hardening guide states that "self-hosted runners should almost never be
+used for public repositories", because "anyone who can fork the repository and
+open a pull request ... are able to compromise the self-hosted runner
+environment, including gaining access to secrets and the `GITHUB_TOKEN`".
+
+**2. The cost objection disappears when the repository is public.** Standard
+GitHub-hosted runners are **free with no minute allowance to exhaust** for public
+repositories — "GitHub Actions usage is free for self-hosted runners and for
+public repositories that use standard GitHub-hosted runners". (Larger runners are
+always billed, including on public repositories; standard runners are what this
+project needs.)
+
+The only reason CI is self-hosted today is that hosted minutes *are* billed for
+**private** repositories, and this account exhausted them. Publication removes
+that constraint entirely. There is no trade-off to weigh: going public makes the
+secure option also the free one.
+
+Sources:
+- Security hardening for GitHub Actions — <https://docs.github.com/en/actions/security-for-github-actions/security-guides/security-hardening-for-github-actions>
+- About billing for GitHub Actions — <https://docs.github.com/en/billing/managing-billing-for-your-products/about-billing-for-github-actions>
+
 ## What must change before this repository becomes public
 
 The guard does not fail open, so publication would not instantly expose the
@@ -115,7 +143,7 @@ So, before publication:
 1. **Move `ci.yml`'s `tests` and `checks` jobs back to GitHub-hosted runners**
    (`runs-on: ubuntu-latest`), or to properly isolated ephemeral self-hosted
    runners that are destroyed after each job.
-2. **Remove the `if:` guards** once no job targets `agentlens-local`, since they
+2. **Remove the `if:` guards** once no job targets `agentcheck-local`, since they
    exist only to protect that runner.
 3. **Restore `actions/setup-python`** in place of the `uv`-provisioned
    interpreters if hosted runners are used. The `uv` approach exists because
@@ -129,13 +157,13 @@ So, before publication:
    Scenarios came back `INFRA_ERROR` instead of real verdicts. The fix is fewer
    pytest workers or sharding across jobs — **never** a larger scenario budget,
    which would trade away the signal that detects a starved run.
-5. **Do not attach `agentlens-local` to this repository's runner list**, and do
+5. **Do not attach any self-hosted runner to this repository**, and do
    not use `pull_request_target` anywhere.
 6. **Enable private vulnerability reporting** in the repository's Security
    settings. GitHub only offers it on public repositories, so it cannot be
    turned on before publication — and `SECURITY.md` directs researchers to it.
 7. **Scrub the runner references.** This document and `ci.yml` name
-   `agentlens-local` because that is operationally accurate today. Once CI moves
+   `agentcheck-local` because that is operationally accurate today. Once CI moves
    to hosted or ephemeral runners those names are stale, and a public repository
    should not carry the label of a machine it no longer uses.
 8. **Budget for the minutes.** Actions minutes are free on public
@@ -144,6 +172,23 @@ So, before publication:
    minutes of job time, most of it three full-suite jobs at 23–29 minutes each,
    and the account then declined to start further hosted jobs.
 
+### The prepared replacement
+
+`.github/workflows/ci-public.yml.disabled` is the finished public workflow. It is
+deliberately **not** a `.yml` file, so GitHub ignores it and it cannot run while
+this repository is private and hosted minutes are billed.
+
+Publication is then two file operations:
+
+```bash
+git rm .github/workflows/ci.yml
+git mv .github/workflows/ci-public.yml.disabled .github/workflows/ci.yml
+```
+
+Everything else in the checklist above is already satisfied by that file: hosted
+runners, no self-hosted label, no trusted-context guards, `actions/setup-python`
+instead of uv, and pytest concurrency reduced for a smaller machine.
+
 `tests/agentcheck/test_workflow_safety.py::test_publication_checklist_is_discoverable`
 asserts this document exists and that `ci.yml` carries the warning inline, so
 the decision cannot quietly disappear.
@@ -151,4 +196,4 @@ the decision cannot quietly disappear.
 ## The rule that does not change
 
 **Arbitrary code from a public pull request must never execute on
-`agentlens-local`,** whatever else is convenient.
+`agentcheck-local`,** whatever else is convenient.

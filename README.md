@@ -72,16 +72,27 @@ ambiguous account to the wrong ID, retries a destructive call after a timeout,
 claims an email update succeeded when the tool errored, applies the same side
 effect twice). That is the demonstration, not a bug.
 
-Once a release is published the install will be
-`pip install "agentcheck[openai-agents]"`. **That does not work today** — the
-name is not ours on PyPI yet, and the package is unpublished.
+### Once published
+
+The distribution will be **`agentcheck-ai`**, so the install will be:
+
+```bash
+pip install "agentcheck-ai[openai-agents]"
+```
+
+The import package and the command stay `agentcheck` either way —
+`import agentcheck`, `agentcheck --help`. Only the name you `pip install`
+differs, the way `scikit-learn` installs `sklearn`.
+
+**Do not `pip install agentcheck`.** That name on PyPI belongs to an unrelated
+project, and nothing here has been published yet. Use the source install above.
 
 ## Supported frameworks
 
 | Framework | Extra | Supported versions |
 |---|---|---|
-| OpenAI Agents SDK | `agentcheck[openai-agents]` | `openai-agents >=0.20,<0.21` |
-| PydanticAI | `agentcheck[pydantic-ai]` | `pydantic-ai-slim >=2.32,<2.33` |
+| OpenAI Agents SDK | `agentcheck-ai[openai-agents]` | `openai-agents >=0.20,<0.21` |
+| PydanticAI | `agentcheck-ai[pydantic-ai]` | `pydantic-ai-slim >=2.32,<2.33` |
 
 No other framework is supported. There is no partial or best-effort mode, and
 LangGraph, CrewAI, AutoGen and others are **not** supported.
