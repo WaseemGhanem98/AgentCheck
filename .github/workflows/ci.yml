@@ -1,14 +1,28 @@
-# Public-repository CI.
+# Normal AgentCheck CI.
 #
-# SECURITY: every job here runs on GitHub-hosted ephemeral runners. This
-# repository must never attach a self-hosted runner to a workflow triggered by
-# `pull_request`, because that trigger runs code from a contributor's fork. A
-# self-hosted runner is somebody's machine; giving arbitrary pull requests
-# execution on it is a workstation compromise, not a CI configuration choice.
+# ============================================================================
+# READ BEFORE MAKING THIS REPOSITORY PUBLIC
+# ============================================================================
+# Every job below runs on `agentlens-local`, a self-hosted runner that is a
+# maintainer's own workstation. That is acceptable *only* while this repository
+# is private and every branch in it is written by the owner.
 #
-# `pull_request` (not `pull_request_target`) is also deliberate: fork PRs get a
-# read-only GITHUB_TOKEN and no access to repository secrets. `pull_request_target`
-# would run untrusted code with the base repository's token and secrets.
+# The moment this repository becomes public, anyone can open a pull request
+# containing arbitrary code. Running that on this runner is remote code
+# execution on a personal machine with its filesystem, its network, and its
+# credentials.
+#
+# The `if:` guard on each job is what stands in the way: it admits pushes and
+# same-repository pull requests only, so a fork's pull request is skipped
+# rather than executed. Going public therefore does not silently expose the
+# runner -- but it does leave external contributors with no CI at all, which is
+# not a workable open-source project.
+#
+# So before publication, the tests and checks jobs must move back to
+# GitHub-hosted or isolated ephemeral runners. `docs/ci-trust-model.md` records
+# the full argument and the exact change. scripts/check_workflow_safety.py
+# proves the guard holds in the meantime, and it runs as part of this workflow.
+# ============================================================================
 #
 # No job here needs a secret, and none makes a provider call.
 
@@ -34,75 +48,224 @@ env:
 jobs:
   tests:
     name: Tests (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Carried by every job independently: a job-level `if` is not inherited, so
+    # a single unguarded job would be enough to run a fork's code on this
+    # machine.
+    #
+    # An allowlist, not `event_name != 'pull_request'`. A deny-list admits any
+    # trigger added to `on:` later -- a workflow_dispatch from a fork's branch,
+    # a future pull_request_target -- without anyone noticing. Naming the two
+    # trusted contexts means a new trigger has to be added here deliberately
+    # before it can reach this runner.
+    if: >-
+      github.event_name == 'push'
+      || (github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, Linux, X64]
+    # The suite measured 20:00 at -n 2 on this machine. 40 leaves real margin
+    # for a workstation's own background load without letting a hung job hold
+    # the single runner all afternoon.
+    timeout-minutes: 40
     strategy:
       fail-fast: false
       matrix:
+        # All three supported versions, on both triggers. There is one runner,
+        # so these queue serially rather than running side by side; that is the
+        # cost of keeping every supported version covered before merge instead
+        # of after it.
         python-version: ["3.10", "3.11", "3.12"]
 
+    env:
+      # A self-hosted runner inherits the service environment of a machine that
+      # holds real credentials, so every variable this package reads is pinned
+      # to an inert value. AgentCheck's environment surface is small: a grep for
+      # os.environ/os.getenv across the package and tests finds only the name
+      # below, plus OPENAI_API_KEY.
+      #
+      # Deliberately absent: OPENAI_API_KEY. agentcheck/inspect/extractor.py
+      # branches on whether that name is *present*, and `FOO: ""` makes it
+      # present. Pinning it here would change what those tests observe. The
+      # runner environment is verified credential-free by a step below instead.
+      AGENTCHECK_ALLOWED_TEST: ""
+
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Checkout
+        # The default clean: true runs git clean -ffdx, which clears the
+        # editable-install egg-info, __pycache__, and anything else a previous
+        # job left in this persistent workspace.
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
 
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+      - name: Install uv
+        # Not actions/setup-python. The interpreters it downloads record the
+        # absolute path of their own libpython as
+        # /opt/hostedtoolcache/Python/<version>/x64/lib, which exists only on a
+        # GitHub-hosted VM. This runner keeps its tool cache elsewhere, so the
+        # loader substitutes the host's libpython and the job ends up running a
+        # standard library and a core from different releases. uv's
+        # interpreters resolve libpython relative to the executable, so they
+        # stay correct wherever they are unpacked.
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
-          python-version: ${{ matrix.python-version }}
-          cache: pip
-          cache-dependency-path: pyproject.toml
+          version: "0.9.18"
+          # This runner keeps uv's cache on local disk between jobs, so a
+          # GitHub cache round-trip would be pure overhead.
+          enable-cache: false
+
+      - name: Verify no provider credential reached this job
+        # The suite asserts on how AgentCheck behaves when a provider
+        # credential is absent, and extractor.py takes a different branch when
+        # OPENAI_API_KEY is present. A key exported into the runner service
+        # would not fail loudly -- it would quietly change what several tests
+        # observe. Names only; no value is read or printed.
+        run: |
+          for name in OPENAI_API_KEY ANTHROPIC_API_KEY GOOGLE_API_KEY; do
+            if printenv "$name" >/dev/null 2>&1; then
+              echo "$name is present in this job's environment; the suite expects it absent" >&2
+              exit 1
+            fi
+          done
+          echo "PASS: no provider credential is visible to this job"
+
+      - name: Create an isolated virtual environment
+        # only-managed rather than whatever Python the host publishes: the job
+        # should test the version the matrix names, not a host build that
+        # merely shares its minor number. RUNNER_TEMP is recreated per job.
+        run: |
+          uv venv --python "${{ matrix.python-version }}" \
+            --python-preference only-managed "$RUNNER_TEMP/venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Verify interpreter integrity
+        # Seconds, before anything expensive. A mismatched interpreter does not
+        # fail honestly: it segfaults the worker subprocesses and arrives as a
+        # wall of behavioural failures with no diagnostics -- exactly the
+        # infrastructure-as-product-failure confusion AgentCheck exists to
+        # prevent.
+        run: python scripts/check_interpreter_integrity.py "${{ matrix.python-version }}"
+
+      - name: Install
+        run: uv pip install --python "$RUNNER_TEMP/venv/bin/python" -e ".[dev]"
+
+      - name: Compile Python sources
+        run: python -m compileall -q agentcheck scripts examples tests
+
+      - name: Test
+        # -n 2, measured rather than guessed, and not a knob to turn up.
+        #
+        # Every scenario runs in its own child process under a 10s wall-clock
+        # budget. That budget is a product default and the suite's ability to
+        # notice a starved scenario depends on it, so it is never raised to buy
+        # CI headroom. pytest-xdist workers each spawn their own scenario
+        # children, so the worker count decides whether those children get
+        # their budget. On this 14-core machine -n 2 has a green history; -n 3
+        # and -n 4 were benchmarked and starved scenarios, turning real
+        # verdicts into worker_timeout.
+        run: python -m pytest -p no:cacheprovider tests -q -n 2
+
+  checks:
+    # One job, not five. There is a single self-hosted runner, so every extra
+    # job is another slot in a serial queue: as separate jobs these checks cost
+    # a few minutes of work but five job setups and five checkouts, all waiting
+    # behind each other. Merged into one job they stay individually named
+    # steps, so each result is still visible, and `!cancelled()` keeps a
+    # failure in one check from hiding the outcome of the rest.
+    name: Quality, packaging, extras, and runner trust
+    if: >-
+      github.event_name == 'push'
+      || (github.event_name == 'pull_request'
+          && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+
+    env:
+      AGENTCHECK_ALLOWED_TEST: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          version: "0.9.18"
+          enable-cache: false
 
       - name: Verify no provider credential reached this job
         run: |
           for name in OPENAI_API_KEY ANTHROPIC_API_KEY GOOGLE_API_KEY; do
-            if [ -n "${!name:-}" ]; then
-              echo "$name is set in CI; evaluation tests must never spend money"
+            if printenv "$name" >/dev/null 2>&1; then
+              echo "$name is present in this job's environment" >&2
               exit 1
             fi
           done
-          echo "no provider credentials present"
+          echo "PASS: no provider credential is visible to this job"
+
+      - name: Create isolated virtual environments
+        run: |
+          uv venv --python 3.12 --python-preference only-managed "$RUNNER_TEMP/venv"
+          uv venv --python 3.12 --python-preference only-managed "$RUNNER_TEMP/base-venv"
+          uv venv --python 3.12 --python-preference only-managed "$RUNNER_TEMP/openai-venv"
+          uv venv --python 3.12 --python-preference only-managed "$RUNNER_TEMP/pydantic-venv"
+          uv venv --python 3.12 --python-preference only-managed "$RUNNER_TEMP/wheel-venv"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Verify interpreter integrity
+        run: python scripts/check_interpreter_integrity.py "3.12"
 
       - name: Install
-        run: python -m pip install -e ".[dev]"
+        run: uv pip install --python "$RUNNER_TEMP/venv/bin/python" -e ".[dev]"
 
-      - name: Test
-        run: python -m pytest tests -q -n 2
+      - name: Verify no untrusted context can reach this runner
+        # Every job here runs on a personal machine, and a job-level `if` is not
+        # inherited, so the guards are the only thing between a fork's branch
+        # and this host. They are checked by evaluating them against synthetic
+        # push, same-repo, fork, pull_request_target, workflow_run,
+        # workflow_dispatch, and issue_comment contexts rather than by matching
+        # their text, because the mistakes worth catching are logical ones.
+        if: ${{ !cancelled() }}
+        run: python scripts/check_workflow_safety.py
 
-  base-install:
-    name: Base install has no framework
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
-        with:
-          python-version: "3.12"
+      - name: Ruff
+        if: ${{ !cancelled() }}
+        run: python -m ruff check agentcheck tests scripts
 
-      - name: Install base only
-        run: python -m pip install .
+      - name: Mypy
+        if: ${{ !cancelled() }}
+        run: python -m mypy agentcheck
 
-      - name: A base install must import and run without any framework
+      - name: Secret scan
+        if: ${{ !cancelled() }}
+        run: python scripts/check_no_secrets.py
+
+      - name: Base install has no framework
+        # A base install must import and run with neither framework present.
+        if: ${{ !cancelled() }}
         run: |
-          python - <<'PY'
-          import importlib.util, subprocess, sys
+          uv pip install --python "$RUNNER_TEMP/base-venv/bin/python" .
+          "$RUNNER_TEMP/base-venv/bin/python" - <<'PY'
+          import importlib.util, subprocess
           for framework in ("agents", "pydantic_ai"):
               assert importlib.util.find_spec(framework) is None, (
                   f"{framework} must not be a base dependency"
               )
           import agentcheck
-          subprocess.run(["agentcheck", "--help"], check=True)
+          print("base import ok:", agentcheck.__version__)
           PY
+          "$RUNNER_TEMP/base-venv/bin/agentcheck" --help > /dev/null
 
-      - name: A missing extra must be actionable, not a traceback
+      - name: A missing extra is actionable, not a traceback
+        if: ${{ !cancelled() }}
         run: |
-          python - <<'PY'
+          "$RUNNER_TEMP/base-venv/bin/python" - <<'PY'
           from agentcheck.adapters import AdapterDependencyError
-          from agentcheck.adapters.openai_agents import _require_sdk as openai_sdk
-          from agentcheck.adapters.pydantic_ai import _require_sdk as pydantic_sdk
+          from agentcheck.adapters.openai_agents import _require_sdk as need_openai
+          from agentcheck.adapters.pydantic_ai import _require_sdk as need_pydantic
 
-          for require in (openai_sdk, pydantic_sdk):
+          for require in (need_openai, need_pydantic):
               try:
                   require()
               except AdapterDependencyError as exc:
@@ -112,69 +275,45 @@ jobs:
                   raise AssertionError(f"{require} should have refused")
           PY
 
-  extras:
-    name: Extra ${{ matrix.extra }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        extra: ["openai-agents", "pydantic-ai", "all"]
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
-        with:
-          python-version: "3.12"
-
-      - name: Install extra
-        run: python -m pip install ".[${{ matrix.extra }}]" pytest pytest-xdist
-
-      - name: Adapter tests for this extra
+      - name: Extra openai-agents in isolation
+        # Installed alone, so a leak from the other extra shows up here rather
+        # than being masked by a combined environment.
+        if: ${{ !cancelled() }}
         run: |
-          case "${{ matrix.extra }}" in
-            openai-agents) python -m pytest tests/agentcheck/test_openai_adapter.py -q ;;
-            pydantic-ai)   python -m pytest tests/agentcheck/test_pydantic_ai_adapter.py -q ;;
-            all)           python -m pytest tests/agentcheck/test_openai_adapter.py \
-                                            tests/agentcheck/test_pydantic_ai_adapter.py -q ;;
-          esac
+          uv pip install --python "$RUNNER_TEMP/openai-venv/bin/python" ".[openai-agents]" pytest
+          "$RUNNER_TEMP/openai-venv/bin/python" -c "
+          import importlib.util
+          assert importlib.util.find_spec('agents') is not None
+          assert importlib.util.find_spec('pydantic_ai') is None, 'pydantic-ai leaked'
+          "
+          "$RUNNER_TEMP/openai-venv/bin/python" -m pytest tests/agentcheck/test_openai_adapter.py -q
 
-  quality:
-    name: Quality, packaging, and secrets
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
-        with:
-          python-version: "3.12"
-
-      - name: Install
-        run: python -m pip install -e ".[dev]"
-
-      - name: Ruff
-        run: python -m ruff check agentcheck tests
-
-      - name: Mypy
-        run: python -m mypy agentcheck
-
-      - name: Secret scan
-        run: python scripts/check_no_secrets.py
+      - name: Extra pydantic-ai in isolation
+        if: ${{ !cancelled() }}
+        run: |
+          uv pip install --python "$RUNNER_TEMP/pydantic-venv/bin/python" ".[pydantic-ai]" pytest
+          "$RUNNER_TEMP/pydantic-venv/bin/python" -c "
+          import importlib.util
+          assert importlib.util.find_spec('pydantic_ai') is not None
+          assert importlib.util.find_spec('agents') is None, 'openai-agents leaked'
+          "
+          "$RUNNER_TEMP/pydantic-venv/bin/python" -m pytest tests/agentcheck/test_pydantic_ai_adapter.py -q
 
       - name: Build wheel and sdist
-        run: python -m build
+        if: ${{ !cancelled() }}
+        run: python -m build --outdir "$RUNNER_TEMP/dist"
 
       - name: Audit artifact contents
-        run: python scripts/check_distribution.py
+        if: ${{ !cancelled() }}
+        run: |
+          rm -rf dist && cp -r "$RUNNER_TEMP/dist" dist
+          python scripts/check_distribution.py
 
       - name: Wheel install smoke test
+        if: ${{ !cancelled() }}
         run: |
-          python -m venv /tmp/smoke
-          /tmp/smoke/bin/python -m pip install --quiet dist/*.whl
-          cd /tmp
-          /tmp/smoke/bin/python -c "import agentcheck; print(agentcheck.__version__)"
-          /tmp/smoke/bin/agentcheck --help > /dev/null
+          uv pip install --python "$RUNNER_TEMP/wheel-venv/bin/python" "$RUNNER_TEMP"/dist/*.whl
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/wheel-venv/bin/python" -c "import agentcheck; print(agentcheck.__version__)"
+          "$RUNNER_TEMP/wheel-venv/bin/agentcheck" --help > /dev/null
           echo "wheel install smoke passed"
