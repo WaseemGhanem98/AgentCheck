@@ -83,7 +83,14 @@ So, before publication:
    which would trade away the signal that detects a starved run.
 5. **Do not attach `agentlens-local` to this repository's runner list**, and do
    not use `pull_request_target` anywhere.
-6. **Budget for the minutes.** Actions minutes are free on public
+6. **Enable private vulnerability reporting** in the repository's Security
+   settings. GitHub only offers it on public repositories, so it cannot be
+   turned on before publication — and `SECURITY.md` directs researchers to it.
+7. **Scrub the runner references.** This document and `ci.yml` name
+   `agentlens-local` because that is operationally accurate today. Once CI moves
+   to hosted or ephemeral runners those names are stale, and a public repository
+   should not carry the label of a machine it no longer uses.
+8. **Budget for the minutes.** Actions minutes are free on public
    repositories, which is what makes step 1 affordable. While this repository
    is private they are billed: the single bootstrap CI run consumed roughly 84
    minutes of job time, most of it three full-suite jobs at 23–29 minutes each,

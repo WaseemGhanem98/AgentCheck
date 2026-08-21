@@ -1,106 +1,80 @@
 # AgentCheck
 
-AgentCheck runs your AI agent against generated adversarial scenarios in an
-isolated process, with every tool call simulated, and tells you whether the
-agent behaved safely.
+**An evaluation framework for testing whether AI agents behave safely — without
+letting them execute a single real side effect.**
 
-> **Status: pre-1.0 (0.1.0), alpha.** The contracts described here are
-> implemented and tested, but the project is young and the supported framework
-> surface is deliberately narrow. See [Known limitations](#known-limitations).
+AgentCheck imports an agent you already have, generates adversarial scenarios
+from the contracts its own code declares, and runs them in isolated processes
+where every tool call is intercepted before your handler and answered from a
+simulated world. It then judges the resulting trajectory and returns
+`PASS` / `FAIL` / `INCONCLUSIVE` / `INFRA_ERROR`.
 
-## The problem
+> **Status: 0.1.0, pre-1.0.** Two framework adapters, each pinned to one verified
+> minor version. Everything documented here is implemented and tested; see
+> [Known limitations](#known-limitations) for what it does not do.
 
-An agent that passes your unit tests can still delete the wrong account. The
-failures that matter are behavioral: it skips a confirmation, it retries a
-destructive call after an ambiguous timeout, it picks the wrong record out of
-an ambiguous request, it reports success after the tool returned an error.
+---
 
-Testing that by hand means either writing scenarios yourself for every risky
-path, or letting the agent touch real systems to find out. The first does not
-scale. The second is how you find out in production.
+## Why AgentCheck
 
-## What AgentCheck does
+An agent's final answer tells you almost nothing about whether it was safe
+getting there.
 
-1. **Inspects** a local agent you already trust — its tools, their schemas, its
-   instructions, its guardrails — by importing it, without running a turn.
-2. **Generates** a suite of scenarios from what it found, then freezes the suite
-   into a fingerprinted document so the same target, config, and seed always
-   produce a byte-identical suite.
-3. **Runs** each scenario in an isolated child process where every tool call is
-   intercepted before the original handler and answered from a simulated world.
-4. **Judges** the resulting trajectory against per-scenario oracles and emits
-   `PASS` / `FAIL` / `INCONCLUSIVE` / `INFRA_ERROR` plus an HTML report and a
-   replay manifest.
+The failures that matter are behavioural. The agent deletes an account without
+asking. It retries a destructive call after an ambiguous timeout. It resolves an
+ambiguous request to the wrong record. It reports success after the tool
+returned an error. Every one of those can occur underneath a perfectly
+reasonable-sounding reply.
 
-Your real tool handlers never execute. Nothing outside the sandbox is mutated.
+Testing that by hand means writing scenarios yourself for every risky path, or
+letting the agent touch real systems to find out. The first does not scale. The
+second is how you find out in production.
 
-## How it works
+## What it does
 
-```
-your agent  ──inspect──▶  AgentSpec  ──generate──▶  frozen suite (fingerprinted)
-                                                          │
-                                                          ▼
-                                         isolated child process, per scenario
-                                                          │
-                            ┌─────────────────────────────┴──────────────┐
-                            │  agent asks to call a tool                 │
-                            │  ToolGateway intercepts BEFORE the handler │
-                            │  simulated world answers from fixtures     │
-                            │  unknown tool ⇒ fail closed, never guessed │
-                            └─────────────────────────────┬──────────────┘
-                                                          ▼
-                                       verdict + findings + report + manifest
-```
+1. **Inspect** — imports a trusted local agent and reads its tools, their
+   schemas, its instructions and guardrails, without running a turn.
+2. **Generate** — derives scenarios from those contracts and freezes them into a
+   fingerprinted suite. Same target, config, and seed ⇒ byte-identical suite.
+3. **Run** — executes each scenario in an isolated child process with network
+   denied and credentials absent by default.
+4. **Simulate** — intercepts every tool call *before* your handler and answers
+   from a seeded world, with fixtures, prerequisites, and injected faults.
+5. **Evaluate** — judges the trajectory against per-scenario oracles.
+6. **Report** — writes local JSON/JSONL artifacts, an HTML report, and a replay
+   manifest.
+7. **Gate CI** — compares against a committed baseline so builds fail on *new*
+   regressions rather than the whole backlog.
 
-The interception point is the whole safety argument. AgentCheck does not wrap
-your handler and hope it is side-effect free — it replaces the invoker, so the
-original callable is left behind on the source agent and is never reached
-during a simulated evaluation.
+## Quickstart
 
-## Installation
-
-AgentCheck is **not on PyPI yet**, so install it from a clone or a built wheel.
+AgentCheck is **not published to PyPI yet**. Install from a clone:
 
 ```bash
 git clone https://github.com/WaseemGhanem98/AgentCheck.git
 cd AgentCheck
-python -m pip install -e ".[openai-agents]"     # or ".[pydantic-ai]", or ".[all]"
-```
-
-Or build and install a wheel:
-
-```bash
-python -m build
-python -m pip install "dist/agentcheck-0.1.0-py3-none-any.whl[openai-agents]"
-```
-
-Once a release is published, the install will be `pip install "agentcheck[openai-agents]"`.
-Do not assume that works today; it does not.
-
-The base install has no framework in it. Install the extra for the framework you
-actually evaluate — evaluating an OpenAI Agents target should not drag PydanticAI
-onto your machine. If an extra is missing, the adapter says so and names the
-command to fix it rather than raising an import traceback.
-
-## Quickstart
-
-The repository ships a deliberately flawed example target. Its model is local
-and scripted, so this makes **no provider calls and needs no API key**.
-
-```bash
 python -m pip install -e ".[openai-agents]"
+```
 
+The repository ships a deliberately flawed example agent. Its model is local and
+scripted, so this makes **no provider calls and needs no API key**:
+
+```bash
 agentcheck inspect  examples/evaluation/account_agent
 agentcheck generate examples/evaluation/account_agent
 agentcheck test     examples/evaluation/account_agent
 agentcheck report   examples/evaluation/account_agent --latest
 ```
 
-The example agent has five planted defects — it deletes without confirmation,
-resolves an ambiguous account to the wrong ID, retries a destructive call after
-a timeout, claims an email update succeeded when the tool errored, and applies
-the same side effect twice. `agentcheck test` is expected to report failures
-against it. That is the demonstration, not a bug.
+`agentcheck test` is *expected* to report failures against it — the example
+contains five planted defects (deletes without confirmation, resolves an
+ambiguous account to the wrong ID, retries a destructive call after a timeout,
+claims an email update succeeded when the tool errored, applies the same side
+effect twice). That is the demonstration, not a bug.
+
+Once a release is published the install will be
+`pip install "agentcheck[openai-agents]"`. **That does not work today** — the
+name is not ours on PyPI yet, and the package is unpublished.
 
 ## Supported frameworks
 
@@ -109,80 +83,111 @@ against it. That is the demonstration, not a bug.
 | OpenAI Agents SDK | `agentcheck[openai-agents]` | `openai-agents >=0.20,<0.21` |
 | PydanticAI | `agentcheck[pydantic-ai]` | `pydantic-ai-slim >=2.32,<2.33` |
 
-Both gates are pinned to a **single verified minor**, on purpose. Each adapter
-reads framework-private attributes to reconstruct an `AgentSpec`. On an
+No other framework is supported. There is no partial or best-effort mode, and
+LangGraph, CrewAI, AutoGen and others are **not** supported.
+
+Both gates are pinned to a **single verified minor**, deliberately. An adapter
+reconstructs an `AgentSpec` by reading framework-private attributes. On an
 unverified version those attributes can move, and the failure mode is not a
-clean crash — it is a subtly wrong spec, which means a suite that tests the
-wrong thing. AgentCheck refuses the version rather than guess.
+clean crash — it is a subtly wrong spec, which means a suite that confidently
+tests the wrong thing. AgentCheck refuses the version instead of guessing.
 
-No other framework is supported. There is no partial or best-effort mode.
+## How evaluation works
 
-## Safety model
+```text
+your agent
+   ↓  inspect (no turn is run)
+AgentCheck adapter  ── rebuilds each tool with an AgentCheck-owned invoker
+   ↓
+isolated child process  ── network denied, credentials absent
+   ↓
+ToolGateway  ── intercepts the call BEFORE your handler
+   ↓
+simulated fixture  ── seeded world, prerequisites, injected faults
+   ↓
+behavioural oracle
+   ↓
+PASS / FAIL / INCONCLUSIVE / INFRA_ERROR  + report + replay manifest
+```
 
-AgentCheck is designed for **trusted local targets**: code you already run. It
-is not a sandbox for hostile code, and importing an agent runs that agent's
-module-level code.
-
-Within that boundary:
-
-- **No original handler execution.** Accepted tools are reconstructed with an
-  AgentCheck-owned invoker. The original callable and every advanced callback
-  stay on the source agent.
-- **Process isolation.** Each scenario runs in a child process with a
-  constrained environment. The environment allowlist is empty by default, so
-  provider credentials are absent unless you explicitly add them.
-- **Fail closed on unknown tools.** A tool the gateway does not recognize is an
-  error, never an improvised result. Guessing a plausible response is how a
-  harness invents a passing run.
-- **Network containment.** Network is denied by default; reaching a
-  non-allowlisted destination is a containment failure, not a silent success.
-- **Bounded credential redaction** at the artifact and log boundary, applied
-  before anything is written to a report or printed.
-- **Source integrity.** Runs are bound to the source fileset they were produced
-  from, so a replay cannot silently drift onto changed code.
+The interception point is the whole safety argument. AgentCheck does not wrap
+your handler and discard the result — it replaces the invoker, so the original
+callable stays on the source agent and is never reached.
 
 ## Simulated tools
 
 Tool results come from a simulated world, seeded per scenario:
 
 - **fixtures** supply representative records so action paths are reachable;
-- **prerequisite chains** let a scenario require that an earlier step happened;
+- **prerequisite chains** let a scenario satisfy the lookups that gate a focal
+  action, so the interesting call is actually attempted;
 - **injected faults** produce the timeout and error cases that expose bad retry
-  and bad success-reporting behavior;
+  and bad success-reporting behaviour;
 - **confirmation policies** express which actions require the user to agree
-  first, so "deleted without asking" is a detectable verdict.
+  first, making "deleted without asking" a detectable verdict.
+
+An unknown tool is an error, never an improvised result. A harness that invents
+tool output invents passing runs.
 
 ## Interactive scenarios
 
-Scenarios are not limited to a single opening prompt. `followup_turns` let the
-scripted user answer the agent mid-run, which is what makes confirmation
-behavior testable: the agent asks, the scenario answers, and the run continues
-from there.
+A scenario is not limited to one opening prompt. `followup_turns` let the
+scripted user answer the agent *mid-run*.
 
-## Reports
-
-Every run writes to the target's artifacts directory (`.agentcheck/` by
-default):
-
-- an **HTML report** of the run, per case, with findings;
-- a **replay manifest** describing exactly what was executed;
-- stored run records queryable through `agentcheck report`.
-
-`agentcheck replay` re-executes a stored manifest, and `agentcheck shrink`
-minimizes a failing case while preserving its failure signature.
+This is what makes confirmation behaviour testable. The agent discloses what it
+is about to do and asks; the scenario supplies the answer; the run continues
+from there. Because the follow-up does not exist until the agent has finished
+speaking, it cannot be mistaken for prior consent — and the confirmation is
+carried as structured metadata, so no prose is parsed and no consent is inferred
+from free text.
 
 ## Verdicts
 
 | Verdict | Meaning | Exit code |
 |---|---|---|
-| `PASS` | The oracles were evaluated and the agent satisfied them. | `0` |
-| `FAIL` | The oracles were evaluated and the agent violated them. | `1` |
-| `INCONCLUSIVE` | The run could not authoritatively decide — e.g. a budget was not measurable. Not evidence of correctness. | `3` |
+| `PASS` | Oracles were evaluated and the agent satisfied them. | `0` |
+| `FAIL` | Oracles were evaluated and the agent violated them. | `1` |
+| `INCONCLUSIVE` | The run could not authoritatively decide. **Not** evidence of correctness. | `3` |
 | `INFRA_ERROR` | The harness itself failed. Says nothing about the agent. | `2` |
 
-The separation is deliberate. Collapsing `INCONCLUSIVE` into `PASS` would let a
-harness failure read as a clean bill of health, and that is the single most
-dangerous thing an evaluation tool can do.
+The separation is load-bearing. Collapsing `INCONCLUSIVE` or `INFRA_ERROR` into
+`PASS` would let a harness fault read as a clean bill of health, which is the
+most dangerous thing an evaluation tool can do. An infrastructure failure is
+never reported as a behavioural failure, and vice versa.
+
+## Determinism and replay
+
+Be precise about this, because it is where evaluation tools usually oversell.
+
+**Deterministic:** scenario generation, suite freezing and fingerprinting, tool
+simulation, fixture and fault injection, oracle evaluation, and verdict
+assignment given the same recorded inputs. Offline evaluation through the
+controlled model is deterministic, which is why the bundled example costs
+nothing and needs no credential.
+
+**Not deterministic:** a real provider model. Its outputs vary between runs, and
+so can the verdict.
+
+A **replay manifest is a re-execution recipe, not a captured provider replay.**
+It reproduces the inputs and the harness; it does not replay recorded model
+output as though the model were deterministic. AgentCheck does not make an LLM
+deterministic and does not claim to.
+
+Note that suite fingerprints incorporate the target's absolute entrypoint path,
+so they are stable per machine and location rather than portable across them.
+
+## Reports
+
+Each run writes to the target's artifacts directory (`.agentcheck/` by default):
+
+- a standalone **HTML report** with per-case findings;
+- **JSON/JSONL artifacts** for the run and its cases;
+- a **replay manifest**;
+- rows in a local **SQLite** store, queryable through `agentcheck report`.
+
+`agentcheck replay` re-executes a stored manifest; `agentcheck shrink` minimizes
+a failing case while preserving its failure signature; `agentcheck review`
+records a human decision on a finding.
 
 ## CI usage
 
@@ -200,63 +205,90 @@ agentcheck baseline check "$TARGET" --baseline agentcheck-baseline.json \
   --run-id "ci-$RUN_ID" --json
 ```
 
-A failing test run is never an implicit baseline. You commit a baseline
-explicitly or the gate refuses to run.
+A failing test run is never an implicit baseline — you commit one explicitly or
+the gate refuses to run. `.github/workflows/agentcheck-example.yml` is a
+copyable template that needs no credentials and calls no hosted service.
 
-`.github/workflows/agentcheck-example.yml` in this repository is a copyable
-template. It needs no provider credentials and calls no hosted service.
+## Safety model
 
-## Deterministic vs stochastic
+AgentCheck is built for **trusted local targets**: code you already run. It is
+not a sandbox for hostile code, and inspection imports your module, so
+module-level code executes.
 
-Be precise about what is guaranteed, because this is where evaluation tools
-usually oversell:
+Within that boundary:
 
-**Deterministic.** Scenario generation, suite freezing and fingerprinting, tool
-simulation, fixture and fault injection, oracle evaluation, verdict assignment,
-and the report contents given the same recorded inputs. The same target, config,
-and seed freeze a byte-identical suite.
+- **Your tool handlers never execute** during a simulated evaluation. Accepted
+  tools are rebuilt with an AgentCheck-owned invoker; the original callable and
+  every advanced callback stay on the source agent.
+- **No real mutations.** Only the simulated world changes.
+- **Worker isolation.** Each scenario runs in a child process whose environment
+  allowlist is empty by default, so provider credentials are absent unless you
+  add them explicitly.
+- **Fail closed.** Unknown tools, dynamic instructions, output validators, and
+  anything else that cannot be proven statically produce a refusal with a
+  reason, never an approximation.
+- **Network denied by default**, including AF_UNIX, so a target cannot quietly
+  reach a local model server.
+- **Source integrity.** Runs are bound to the source fileset they came from, so
+  a replay cannot silently drift onto changed code.
+- **Bounded credential redaction** at the artifact and log boundary.
 
-**Not deterministic.** The model. If you evaluate against a real provider, the
-agent's own outputs can vary between runs, and so can the verdict. AgentCheck
-does not make an LLM deterministic and does not claim to. That is why the
-bundled example uses a scripted local model, and why replay re-executes a
-manifest rather than replaying recorded model output as if it were a guarantee.
-
-A replay reproduces the **inputs and the harness**, not the model's freedom.
+These are the properties the test suite is built around; see
+[CONTRIBUTING.md](CONTRIBUTING.md) for the invariants contributors must preserve.
 
 ## Known limitations
 
-- Two framework adapters, each pinned to one minor version. That is the entire
+- **Two adapters**, each pinned to one minor version. That is the entire
   supported surface.
-- Trusted targets only. Importing an agent executes its module-level code.
-  AgentCheck is not a defense against malicious agent source.
-- Pre-1.0. Contracts are versioned and fingerprinted, but not yet stable across
-  releases by policy.
-- Not published to PyPI. Install from source or a built wheel.
-- Scenario generation derives from what inspection can see. An agent whose
-  behavior depends on state AgentCheck cannot observe will be under-tested.
-- Evaluating against a real provider costs money and reintroduces model
-  variance. The deterministic path is the one that is CI-safe.
-- AgentCheck reports what its oracles can decide. `INCONCLUSIVE` is common and
-  is not a soft pass.
+- **PydanticAI targets are refused** when they declare dynamic instructions,
+  output validators, `deps_type` dependency injection, or agent capabilities —
+  all of these would require executing target code, so the adapter fails closed
+  rather than approximating.
+- **Trusted targets only.** Importing an agent executes its module-level code.
+- **Prerequisite fixtures are single-use** within a scenario; an agent that
+  retries a gating lookup can exhaust them.
+- **Omission is harder than commission.** AgentCheck detects "the agent did
+  something it should not have" far more readily than "the agent failed to do
+  something it should have", because omission usually needs an authoritative
+  contract stating the obligation.
+- **Provider-backed runs are stochastic** and cost money. The deterministic
+  offline path is the CI-safe one.
+- **`INCONCLUSIVE` is common** and is not a soft pass.
+- **No historical buggy→FAIL / fixed→PASS benchmark exists.** One was attempted
+  against eight real candidates and none qualified; the search is recorded as a
+  negative result in [validation evidence](docs/validation-evidence.md). No
+  detection-rate figure is claimed anywhere.
+- **Not published to PyPI**, and pre-1.0: contracts are versioned and
+  fingerprinted but not yet stable across releases by policy.
 
 ## Development
 
 ```bash
 python -m pip install -e ".[dev]"
 
-python -m pytest tests -q                 # full suite
-python -m pytest tests/agentcheck/test_openai_adapter.py -q
-python -m ruff check agentcheck tests
+python -m pytest tests -q                                   # full suite
+python -m pytest tests/agentcheck/test_openai_adapter.py -q  # focused
+python -m ruff check agentcheck tests scripts
 python -m mypy agentcheck
+python -m build
 ```
+
+Tests must be offline, credential-free, and free of provider spend.
+
+## Documentation
+
+- [Development history](docs/development-history.md) — where this came from and
+  what was built when
+- [Validation evidence](docs/validation-evidence.md) — what has actually been
+  demonstrated, and what has not
+- [CI trust model](docs/ci-trust-model.md) — how CI runs and what must change
+  before this repository goes public
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). One rule matters more than the rest: an
-adapter that lets the original tool handler run during a simulated evaluation
-is not acceptable, however convenient it is. Read the safety invariants before
-opening an adapter PR.
+See [CONTRIBUTING.md](CONTRIBUTING.md). One rule outranks the rest: an adapter
+that lets the original tool handler run during a simulated evaluation is not
+acceptable, however convenient.
 
 ## Security
 
@@ -264,17 +296,17 @@ See [SECURITY.md](SECURITY.md) for private vulnerability reporting.
 
 ## Relationship to AgentLens
 
-AgentCheck is developed alongside [AgentLens](https://github.com/WaseemGhanem98/AgentLens),
-a separate observability platform for AI agent runs.
+AgentCheck began as an evaluation subsystem inside AgentLens, a separate
+observability product, and was extracted into this repository as an independent
+project.
 
-They do different jobs. **AgentCheck tests behavior** — it decides whether an
-agent did something unsafe. **AgentLens provides observability and debugging**
-for agent runs. AgentCheck does not depend on AgentLens, does not require it,
-and does not talk to it. Everything documented here works with AgentCheck alone.
+They do different jobs: **AgentCheck tests behaviour**, deciding whether an agent
+did something unsafe. **AgentLens provides observability and debugging** for
+agent runs. AgentCheck does not depend on AgentLens, does not require it, and
+does not talk to it — everything here works with AgentCheck alone.
 
-AgentCheck writes its results as local JSON artifacts and reports, which is a
-deliberate integration boundary: any platform, AgentLens included, can ingest
-those artifacts without AgentCheck taking on a dependency in return.
+Because AgentCheck writes its results as local artifacts, any platform can ingest
+them without AgentCheck taking on a dependency in return.
 
 ## License
 
