@@ -13,6 +13,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from agentcheck.adapters import (
+    CustomAgentAdapter,
     FrameworkAdapter,
     OpenAIAgentsAdapter,
     PydanticAIAdapter,
@@ -153,6 +154,7 @@ def _read_request(path: Path) -> dict[str, Any]:
 _ADAPTERS: dict[str, type[FrameworkAdapter]] = {
     "openai_agents": OpenAIAgentsAdapter,
     "pydantic_ai": PydanticAIAdapter,
+    "custom": CustomAgentAdapter,
 }
 
 

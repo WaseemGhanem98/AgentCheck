@@ -38,7 +38,7 @@ def test_supported_adapters_track_the_config_contract() -> None:
     supported set changes rather than letting it drift silently.
     """
 
-    assert SUPPORTED_ADAPTERS == ("openai_agents", "pydantic_ai")
+    assert SUPPORTED_ADAPTERS == ("openai_agents", "pydantic_ai", "custom")
     assert DEFAULT_ADAPTER in SUPPORTED_ADAPTERS
     # The default is unchanged, so an existing config keeps its meaning.
     assert DEFAULT_ADAPTER == "openai_agents"

@@ -18,7 +18,12 @@ from typing import Any, Mapping, Sequence, get_type_hints
 import pytest
 
 from agentcheck import CustomAgentProtocol, ToolRuntime, TurnResult
-from agentcheck.adapters import FrameworkAdapter, OpenAIAgentsAdapter, PydanticAIAdapter
+from agentcheck.adapters import (
+    CustomAgentAdapter,
+    FrameworkAdapter,
+    OpenAIAgentsAdapter,
+    PydanticAIAdapter,
+)
 from agentcheck.domain.agent_spec import ToolDefinition
 from agentcheck.domain.run import ToolOutcome, ToolOutcomeStatus
 
@@ -43,7 +48,9 @@ def test_framework_adapter_declares_the_universal_run_contract() -> None:
     )
 
 
-@pytest.mark.parametrize("adapter", [OpenAIAgentsAdapter, PydanticAIAdapter])
+@pytest.mark.parametrize(
+    "adapter", [OpenAIAgentsAdapter, PydanticAIAdapter, CustomAgentAdapter]
+)
 def test_existing_adapters_still_satisfy_the_interface(adapter: type) -> None:
     """Declaring run() must not have made a shipped adapter abstract."""
 
@@ -55,7 +62,9 @@ def test_existing_adapters_still_satisfy_the_interface(adapter: type) -> None:
     adapter()  # constructible, so nothing was left unimplemented
 
 
-@pytest.mark.parametrize("adapter", [OpenAIAgentsAdapter, PydanticAIAdapter])
+@pytest.mark.parametrize(
+    "adapter", [OpenAIAgentsAdapter, PydanticAIAdapter, CustomAgentAdapter]
+)
 def test_adapter_run_signature_matches_the_declared_contract(adapter: type) -> None:
     """The declaration describes the adapters; the adapters were not reshaped."""
 
@@ -69,7 +78,9 @@ def test_adapter_run_signature_matches_the_declared_contract(adapter: type) -> N
         assert actual.parameters[name].default == parameter.default, name
 
 
-@pytest.mark.parametrize("adapter", [OpenAIAgentsAdapter, PydanticAIAdapter])
+@pytest.mark.parametrize(
+    "adapter", [OpenAIAgentsAdapter, PydanticAIAdapter, CustomAgentAdapter]
+)
 def test_adapter_run_is_still_a_coroutine_function(adapter: type) -> None:
     assert inspect.iscoroutinefunction(adapter.run)
 
@@ -210,14 +221,25 @@ def test_custom_contracts_are_importable_from_both_paths() -> None:
     assert set(custom.__all__) == {"CustomAgentProtocol", "ToolRuntime", "TurnResult"}
 
 
-def test_custom_agent_execution_is_not_wired_up_yet() -> None:
-    """PR A is contracts only; nothing may execute a custom agent."""
+def test_custom_agent_execution_is_wired_through_the_normal_runtime() -> None:
+    """The contracts are now reachable by the one dispatch point that exists.
 
+    This replaces PR A's guard that nothing had been wired up yet. It asserts
+    the same boundary from the other side: a custom agent runs through the
+    ordinary worker registry and the ordinary config field, not through a second
+    execution path added beside them.
+    """
+
+    from agentcheck.adapters.custom import CustomAgentAdapter
     from agentcheck.config import AgentCheckConfig
     from agentcheck.runner import worker
 
     adapters = getattr(worker, "_ADAPTERS", {})
-    assert "custom" not in adapters, "a custom adapter was registered too early"
+    assert adapters["custom"] is CustomAgentAdapter
+    assert set(adapters) == {"openai_agents", "pydantic_ai", "custom"}, (
+        "a fourth dispatch entry means a framework arrived without review"
+    )
 
     annotation = str(AgentCheckConfig.model_fields["adapter"].annotation)
-    assert "custom" not in annotation, "config gained a custom adapter option"
+    assert "custom" in annotation
+    assert AgentCheckConfig().adapter == "openai_agents", "the default is unchanged"

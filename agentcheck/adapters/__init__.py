@@ -17,6 +17,7 @@ from .base import (
     encode_preflight_report,
     format_support_issues,
 )
+from .custom import CustomAgentAdapter
 from .openai_agents import OpenAIAgentsAdapter
 from .pydantic_ai import PydanticAIAdapter
 
@@ -24,6 +25,7 @@ __all__ = [
     "AdapterDependencyError",
     "AdapterError",
     "AdapterRuntimeError",
+    "CustomAgentAdapter",
     "EventSinkProtocol",
     "FrameworkAdapter",
     "GatewayRequest",

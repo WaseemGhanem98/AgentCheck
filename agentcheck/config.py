@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any, Literal, NamedTuple
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .errors import ConfigurationError
 
@@ -46,13 +46,22 @@ class LlmRealizationConfig(BaseModel):
     max_retries: int = Field(default=1, ge=0, le=_MAX_REALIZATION_RETRIES)
 
 
+# Adapters with no seam to substitute a deterministic offline model into. A
+# custom agent's model calls happen inside orchestration AgentCheck only starts
+# and resumes, so there is nothing to replace; see
+# `agentcheck/adapters/custom.py`, which refuses the same combination
+# independently for callers who build a config in code. Named here rather than
+# imported so parsing a config does not have to import every adapter.
+ADAPTERS_WITHOUT_CONTROLLED_MODEL = frozenset({"custom"})
+
+
 class AgentCheckConfig(BaseModel):
     """Versioned local target configuration for the Phase 1 CLI."""
 
     model_config = ConfigDict(extra="forbid", frozen=True, str_strip_whitespace=True)
 
     schema_version: Literal["agentcheck.config.v1"] = "agentcheck.config.v1"
-    adapter: Literal["openai_agents", "pydantic_ai"] = "openai_agents"
+    adapter: Literal["openai_agents", "pydantic_ai", "custom"] = "openai_agents"
     entrypoint: str = DEFAULT_ENTRYPOINT
     suite: Literal["account_support_v1"] = "account_support_v1"
     seed: int = Field(default=1729, ge=0, le=2**63 - 1)
@@ -82,6 +91,27 @@ class AgentCheckConfig(BaseModel):
     max_cases: int | None = Field(default=None, ge=1, le=256)
     llm_realization: LlmRealizationConfig | None = None
     python_executable: str | None = None
+
+    @model_validator(mode="after")
+    def reject_unsupported_controlled_model(self) -> "AgentCheckConfig":
+        """Fail the configuration rather than let the request quietly do nothing.
+
+        ``controlled_model`` is a promise that the target's provider was
+        replaced by a deterministic offline model. An adapter that cannot keep
+        it must not accept the flag: a warning next to a completed run reads as
+        a caveat about a substitution that happened, not as news that it did
+        not.
+        """
+
+        if self.controlled_model and self.adapter in ADAPTERS_WITHOUT_CONTROLLED_MODEL:
+            raise ValueError(
+                f"adapter {self.adapter!r} cannot substitute a controlled offline "
+                "model, so `controlled_model` must not be enabled for it: a "
+                "custom agent owns its own model calls and AgentCheck never sees "
+                "them. Remove `controlled_model`, or have the agent's own loop "
+                "select a deterministic model for evaluation runs."
+            )
+        return self
 
     @field_validator("entrypoint")
     @classmethod

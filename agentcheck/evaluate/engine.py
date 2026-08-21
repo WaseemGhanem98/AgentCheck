@@ -561,6 +561,34 @@ def _invocation_identity(tool_name: str, arguments: Any) -> str:
     )
 
 
+MODEL_TURNS_UNOBSERVABLE = "observed model requests"
+"""What is missing when an adapter cannot see the target's model calls."""
+
+
+def _observed_model_turns(run: CanonicalRun) -> int | None:
+    """Model requests this run actually observed, or ``None`` if it cannot see them.
+
+    An adapter that intercepts the model emits ``model_request`` events and this
+    is a count. An adapter that does not -- one driving a target whose model
+    calls happen inside its own loop -- says so by setting
+    ``model_turns_observable`` false in run metadata, and gets ``None`` here.
+
+    ``None`` rather than ``0`` for the same reason ``UsageMetrics`` leaves an
+    unreported token count ``None``: an unobserved quantity is not a measured
+    zero, and every check that compares it against a budget has to be able to
+    tell the difference. Absence of the key means observable, so no adapter that
+    was already counting changes behaviour.
+    """
+
+    if run.metadata.get("model_turns_observable") is False:
+        return None
+    return sum(
+        1
+        for event in run.events
+        if event.event_type == CanonicalEventType.MODEL_REQUEST
+    )
+
+
 def _evaluate_trajectory(builder: _EvaluationBuilder, constraint: TrajectoryConstraint) -> None:
     if constraint.kind in _HANDOFF_TRAJECTORY_KINDS:
         _evaluate_handoff_trajectory(builder, constraint)
@@ -618,8 +646,27 @@ def _evaluate_trajectory(builder: _EvaluationBuilder, constraint: TrajectoryCons
         passed = max(0, len(attempts) - 1) <= maximum
         data["max_retries"] = maximum
     elif constraint.kind == TrajectoryConstraintKind.MAX_MODEL_TURNS:
-        turns = sum(1 for event in builder.run.events if event.event_type == CanonicalEventType.MODEL_REQUEST)
+        turns = _observed_model_turns(builder.run)
         maximum = int(constraint.parameters.get("maximum", builder.scenario.resource_budgets.max_model_turns))
+        if turns is None:
+            # The scenario asked how many model turns the target used. On a
+            # target whose model calls are not intercepted there is no answer,
+            # and `0 <= maximum` would be a pass invented out of the absence of
+            # evidence rather than derived from any.
+            builder.add_assertion(
+                constraint.criterion_id,
+                constraint.description,
+                Verdict.INCONCLUSIVE,
+                constraint.oracle_ids,
+                (
+                    "This run's adapter does not observe the target's model "
+                    "requests, so the number of model turns it used is unknown "
+                    "and could not be compared with the limit."
+                ),
+                required=constraint.required,
+                missing=(MODEL_TURNS_UNOBSERVABLE,),
+            )
+            return
         passed = turns <= maximum
         data.update({"model_turns": turns, "maximum": maximum})
     elif constraint.kind == TrajectoryConstraintKind.MAX_TOOL_CALLS:
@@ -861,8 +908,8 @@ def _evaluate_budgets(builder: _EvaluationBuilder) -> None:
     budgets = builder.scenario.resource_budgets
     failures: list[str] = []
     missing: list[str] = []
-    model_turns = sum(1 for event in builder.run.events if event.event_type == CanonicalEventType.MODEL_REQUEST)
-    if model_turns > budgets.max_model_turns:
+    model_turns = _observed_model_turns(builder.run)
+    if model_turns is not None and model_turns > budgets.max_model_turns:
         failures.append("max_model_turns")
     if len(builder.run.tool_attempts) > budgets.max_tool_calls:
         failures.append("max_tool_calls")
@@ -885,6 +932,7 @@ def _evaluate_budgets(builder: _EvaluationBuilder) -> None:
         [builder.run.run_id],
         {
             "model_turns": model_turns,
+            "model_turns_observable": model_turns is not None,
             "tool_calls": len(builder.run.tool_attempts),
             "latency_ms": builder.run.latency_ms,
             "usage": builder.run.usage.model_dump(mode="json"),
@@ -909,6 +957,53 @@ def _evaluate_budgets(builder: _EvaluationBuilder) -> None:
         rationale,
         (evidence_id,),
         missing=tuple(missing),
+    )
+
+
+def _evaluate_model_turn_observability(builder: _EvaluationBuilder) -> None:
+    """Say out loud when the model-turn budget could not be measured.
+
+    Every scenario carries a ``max_model_turns``, so unlike a token budget it is
+    never absent -- which means silence would read as "checked, and fine". This
+    assertion exists so the report cannot be mistaken that way. It is
+    ``required=False``: the case verdict is not blocked, because the scenario's
+    other budgets were measured and because the runtime still enforces a turn
+    budget and would have terminated the run. What it does not do is claim the
+    target's model turns were counted.
+    """
+
+    if _observed_model_turns(builder.run) is not None:
+        return
+    budgets = builder.scenario.resource_budgets
+    evidence_id = builder.add_evidence(
+        "model_turn_observability",
+        EvidenceKind.BUDGET,
+        "The adapter that produced this run does not observe model requests.",
+        [builder.run.run_id],
+        {
+            "model_turns": None,
+            "model_turns_observable": False,
+            "max_model_turns": budgets.max_model_turns,
+            "framework": builder.run.metadata.get("framework"),
+        },
+    )
+    builder.add_assertion(
+        "model_turn_observability",
+        "The scenario's model-turn budget is measurable on this target",
+        Verdict.INCONCLUSIVE,
+        ("scenario_resource_budgets",),
+        (
+            "This run's adapter does not intercept the target's model calls, so "
+            f"the {budgets.max_model_turns}-model-turn budget was not measured "
+            "and nothing here shows how many the target used. The runtime still "
+            "bounded the conversation, but it counted turns it drives, which is "
+            "a different quantity: one of those turns may contain any number of "
+            "model calls. A budget that was actually hit would appear as this "
+            "run's termination."
+        ),
+        (evidence_id,),
+        required=False,
+        missing=(MODEL_TURNS_UNOBSERVABLE,),
     )
 
 
@@ -988,6 +1083,7 @@ def evaluate_run(scenario: Scenario, run: CanonicalRun) -> CaseEvaluation:
     _evaluate_schema_blocks(builder)
     _evaluate_gateway_budget_blocks(builder)
     _evaluate_budgets(builder)
+    _evaluate_model_turn_observability(builder)
 
     required = [assertion for assertion in builder.assertions if assertion.required]
     if any(assertion.result == Verdict.FAIL and assertion.confidence >= 0.8 for assertion in required):

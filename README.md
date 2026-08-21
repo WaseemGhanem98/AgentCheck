@@ -1,16 +1,19 @@
 # AgentCheck
 
 **An evaluation framework for testing whether AI agents behave safely — without
-letting them execute a single real side effect.**
+letting their declared tools execute real side effects.**
 
 AgentCheck imports an agent you already have, generates adversarial scenarios
 from the contracts its own code declares, and runs them in isolated processes
-where every tool call is intercepted before your handler and answered from a
-simulated world. It then judges the resulting trajectory and returns
-`PASS` / `FAIL` / `INCONCLUSIVE` / `INFRA_ERROR`.
+where declared tool requests are answered from a simulated world. Native SDK
+adapters replace each handler before it can be reached; custom agents provide
+inert declarations and call an AgentCheck-supplied runtime. AgentCheck then
+judges the resulting trajectory and returns `PASS` / `FAIL` / `INCONCLUSIVE` /
+`INFRA_ERROR`.
 
-> **Status: 0.1.0, pre-1.0.** Two framework adapters, each pinned to one verified
-> minor version. Everything documented here is implemented and tested; see
+> **Status: 0.1.0, pre-1.0.** Two native framework adapters, each pinned to one
+> verified minor version, plus a declaration-based custom Python integration.
+> Everything documented here is implemented and tested; see
 > [Known limitations](#known-limitations) for what it does not do.
 
 ---
@@ -38,8 +41,9 @@ second is how you find out in production.
    fingerprinted suite. Same target, config, and seed ⇒ byte-identical suite.
 3. **Run** — executes each scenario in an isolated child process with network
    denied and credentials absent by default.
-4. **Simulate** — intercepts every tool call *before* your handler and answers
-   from a seeded world, with fixtures, prerequisites, and injected faults.
+4. **Simulate** — routes declared tool calls into a seeded world, with fixtures,
+   prerequisites, and injected faults. SDK handlers are replaced before they
+   can run; custom agents call the supplied `ToolRuntime`.
 5. **Evaluate** — judges the trajectory against per-scenario oracles.
 6. **Report** — writes local JSON/JSONL artifacts, an HTML report, and a replay
    manifest.
@@ -53,7 +57,7 @@ AgentCheck is **not published to PyPI yet**. Install from a clone:
 ```bash
 git clone https://github.com/WaseemGhanem98/AgentCheck.git
 cd AgentCheck
-python -m pip install -e ".[openai-agents]"
+python -m pip install "agentcheck-ai[openai-agents] @ file://$PWD"
 ```
 
 The repository ships a deliberately flawed example agent. Its model is local and
@@ -89,30 +93,41 @@ project, and nothing here has been published yet. Use the source install above.
 
 ## Supported frameworks
 
-| Framework | Extra | Supported versions |
+| Integration | Install surface | Support contract |
 |---|---|---|
 | OpenAI Agents SDK | `agentcheck-ai[openai-agents]` | `openai-agents >=0.20,<0.21` |
 | PydanticAI | `agentcheck-ai[pydantic-ai]` | `pydantic-ai-slim >=2.32,<2.33` |
+| Custom Python agent | base `agentcheck-ai` package | `CustomAgentProtocol`: inert `ToolDefinition` values plus synchronous `start` / `resume` methods |
 
-No other framework is supported. There is no partial or best-effort mode, and
-LangGraph, CrewAI, AutoGen and others are **not** supported.
+AgentCheck supports OpenAI Agents SDK and PydanticAI natively, plus custom
+Python agents through a lightweight integration contract. It does not have
+native adapters for LangGraph, CrewAI, AutoGen, or other framework objects, and
+there is no partial or best-effort inspection mode. Code you own can use the
+custom contract; pointing `adapter: "custom"` at an arbitrary framework object
+does not make that object supported.
 
-Both gates are pinned to a **single verified minor**, deliberately. An adapter
-reconstructs an `AgentSpec` by reading framework-private attributes. On an
-unverified version those attributes can move, and the failure mode is not a
-clean crash — it is a subtly wrong spec, which means a suite that confidently
-tests the wrong thing. AgentCheck refuses the version instead of guessing.
+The two SDK gates are pinned to a **single verified minor**, deliberately. An
+SDK adapter reconstructs an `AgentSpec` by reading framework-private attributes.
+On an unverified version those attributes can move, and the failure mode is not
+a clean crash — it is a subtly wrong spec, which means a suite that confidently
+tests the wrong thing. AgentCheck refuses the version instead of guessing. The
+custom integration has no framework version to widen: preflight validates its
+small public contract directly.
 
 ## How evaluation works
 
 ```text
 your agent
    ↓  inspect (no turn is run)
-AgentCheck adapter  ── rebuilds each tool with an AgentCheck-owned invoker
+AgentCheck adapter
+   ├─ SDK target: rebuilds each tool with an AgentCheck-owned invoker
+   └─ custom target: reads inert ToolDefinition values and supplies ToolRuntime
    ↓
 isolated child process  ── network denied, credentials absent
    ↓
-ToolGateway  ── intercepts the call BEFORE your handler
+declared tool request  ── SDK replacement or custom tools.call(...)
+   ↓
+ToolGateway  ── validates and simulates; unknown tools fail closed
    ↓
 simulated fixture  ── seeded world, prerequisites, injected faults
    ↓
@@ -121,9 +136,13 @@ behavioural oracle
 PASS / FAIL / INCONCLUSIVE / INFRA_ERROR  + report + replay manifest
 ```
 
-The interception point is the whole safety argument. AgentCheck does not wrap
-your handler and discard the result — it replaces the invoker, so the original
-callable stays on the source agent and is never reached.
+The declared-tool boundary is the safety argument. For an SDK target, AgentCheck
+does not wrap your handler and discard the result — it replaces the invoker, so
+the original callable stays on the source agent and is never reached. For a
+custom target, no handler is supplied at all; the agent receives a
+`ToolRuntime` whose calls go to the same `ToolGateway`. See
+[Custom Python agents](docs/custom-agents.md) for that contract and its exact
+boundary.
 
 ## Simulated tools
 
@@ -228,10 +247,11 @@ module-level code executes.
 
 Within that boundary:
 
-- **Your tool handlers never execute** during a simulated evaluation. Accepted
-  tools are rebuilt with an AgentCheck-owned invoker; the original callable and
-  every advanced callback stay on the source agent.
-- **No real mutations.** Only the simulated world changes.
+- **Declared real tool handlers never execute** during a simulated evaluation.
+  SDK tools are rebuilt with an AgentCheck-owned invoker; custom agents supply
+  declarations without a handler and reach tools only through `ToolRuntime`.
+- **No real declared-tool mutations.** Calls through the replacement invoker or
+  `ToolRuntime` change only the simulated world.
 - **Worker isolation.** Each scenario runs in a child process whose environment
   allowlist is empty by default, so provider credentials are absent unless you
   add them explicitly.
@@ -244,17 +264,33 @@ Within that boundary:
   a replay cannot silently drift onto changed code.
 - **Bounded credential redaction** at the artifact and log boundary.
 
+For a custom target, the orchestration inside `start()` and `resume()` really
+executes. A direct filesystem, subprocess, or local-database side effect written
+there is outside the declared-tool guarantee. Isolation and denied egress remain
+active, but AgentCheck does not claim they sandbox arbitrary local Python side
+effects.
+
 These are the properties the test suite is built around; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for the invariants contributors must preserve.
 
 ## Known limitations
 
-- **Two adapters**, each pinned to one minor version. That is the entire
-  supported surface.
+- **Two native SDK adapters** are each pinned to one minor version. Custom
+  Python agents use the separate declaration contract; arbitrary framework
+  objects are not accepted through it.
 - **PydanticAI targets are refused** when they declare dynamic instructions,
   output validators, `deps_type` dependency injection, or agent capabilities —
   all of these would require executing target code, so the adapter fails closed
   rather than approximating.
+- **Custom orchestration is trusted code.** Direct arbitrary Python side effects
+  inside `start()`, `resume()`, imports, or helpers are outside the declared-tool
+  guarantee.
+- **ControlledModel is unsupported for custom agents.** Their model calls live
+  inside orchestration AgentCheck cannot replace, so the configuration is
+  refused rather than accepted with a silent fallback.
+- **Custom model turns are unobservable.** Agent turns are not model turns; an
+  unobserved count is recorded as unknown, and a required model-turn constraint
+  becomes `INCONCLUSIVE` rather than a vacuous `PASS`.
 - **Trusted targets only.** Importing an agent executes its module-level code.
 - **Prerequisite fixtures are single-use** within a scenario; an agent that
   retries a gating lookup can exhaust them.
@@ -275,7 +311,7 @@ These are the properties the test suite is built around; see
 ## Development
 
 ```bash
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev]"  # agentcheck-ai[dev] from this checkout
 
 python -m pytest tests -q                                   # full suite
 python -m pytest tests/agentcheck/test_openai_adapter.py -q  # focused
@@ -288,6 +324,8 @@ Tests must be offline, credential-free, and free of provider spend.
 
 ## Documentation
 
+- [Custom Python agents](docs/custom-agents.md) — contract, configuration,
+  declared-tool boundary, and observability limitations
 - [Development history](docs/development-history.md) — where this came from and
   what was built when
 - [Validation evidence](docs/validation-evidence.md) — what has actually been

@@ -1,7 +1,7 @@
 """The cross-version compatibility suite: what runs on every supported Python.
 
-The full suite runs once, on the newest supported interpreter. Running all 930
-tests three times costs about 70 minutes of a single self-hosted runner's
+The full suite runs once, on the newest supported interpreter. Running the entire
+suite three times costs about 70 minutes of a single self-hosted runner's
 serial queue, and most of that third and second pass re-executes pure logic that
 cannot behave differently between 3.10 and 3.12.
 
@@ -104,6 +104,11 @@ COMPATIBILITY_SUITE: dict[str, dict[str, object]] = {
             "tests/agentcheck/test_openai_adapter.py",
             "tests/agentcheck/test_pydantic_ai_adapter.py",
             "tests/agentcheck/test_controlled_model.py",
+            # The custom adapter reads no SDK internals, but it is the one
+            # adapter whose preflight decides support from `inspect.signature`
+            # and whose target code runs in the worker unwrapped by a framework.
+            # Both are interpreter surfaces rather than product logic.
+            "tests/agentcheck/test_custom_agent_adapter.py",
         ),
         "symbols": ("adapter", "Adapter"),
     },
