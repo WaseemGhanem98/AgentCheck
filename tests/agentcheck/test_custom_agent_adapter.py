@@ -44,6 +44,7 @@ from agentcheck.domain import (
     ToolDefinition,
     ToolFixture,
     ToolOutcomeStatus,
+    WorldStateEffect,
 )
 from agentcheck.domain.run import CanonicalEventType
 from agentcheck.replay.fileset import collect_source_file_set, describe_file_set_mismatch
@@ -496,6 +497,47 @@ def test_the_outcome_handed_to_the_agent_is_the_canonical_one() -> None:
     assert seen[0] == run.tool_outcomes[0]
     assert seen[0].tool_name == "get_order"
     assert seen[0].status is ToolOutcomeStatus.SUCCESS
+
+
+def test_world_state_effects_keep_canonical_links_and_snapshots() -> None:
+    """Gateway IDs must not leak into a run whose transitions are canonicalized."""
+
+    agent = SupportAgent()
+    adapter = CustomAgentAdapter()
+    spec = adapter.inspect(agent)
+    fixture = ToolFixture(
+        fixture_id="get-order-state-effect",
+        tool_name="get_order",
+        outcome=SimulatedToolOutcome(
+            status=SimulatedToolStatus.SUCCESS,
+            result={"status": "open"},
+            state_effects=(
+                WorldStateEffect(
+                    path="orders.W123.status",
+                    before="pending",
+                    after="open",
+                ),
+            ),
+        ),
+    )
+    gateway = ToolGateway(
+        tuple(item.value for item in spec.tools.items),
+        (fixture,),
+        world={"orders": {"W123": {"status": "pending"}}},
+        run_id="custom-run",
+    )
+    prepared = adapter.prepare(agent, gateway, world_state=gateway.world)
+
+    run = _run(adapter, prepared, "What is happening with W123?")
+
+    assert run.termination == RunTermination.COMPLETED
+    assert len(run.state_transitions) == 1
+    assert run.tool_outcomes[0].state_transition_ids == (
+        run.state_transitions[0].transition_id,
+    )
+    assert run.state_transitions[0].attempt_id == run.tool_attempts[0].attempt_id
+    assert run.initial_world_state["orders"]["W123"]["status"] == "pending"
+    assert run.final_world_state["orders"]["W123"]["status"] == "open"
 
 
 def test_a_turn_may_call_several_tools_before_answering() -> None:

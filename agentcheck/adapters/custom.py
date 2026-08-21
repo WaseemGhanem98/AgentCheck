@@ -405,12 +405,18 @@ class _Capture:
 
     def link_transitions(
         self, transition_ids: Sequence[str], attempt: ToolAttempt
-    ) -> None:
+    ) -> tuple[str, ...]:
+        canonical_ids: list[str] = []
         for gateway_id in transition_ids:
-            self.transition_links[gateway_id] = (
-                f"{self.run_id}:transition:{len(self.transition_links):04d}",
-                attempt.attempt_id,
-            )
+            link = self.transition_links.get(gateway_id)
+            if link is None:
+                link = (
+                    f"{self.run_id}:transition:{len(self.transition_links):04d}",
+                    attempt.attempt_id,
+                )
+                self.transition_links[gateway_id] = link
+            canonical_ids.append(link[0])
+        return tuple(canonical_ids)
 
 
 def _tool_error_from_gateway(error: Any, *, fallback_code: str) -> ToolError | None:
@@ -519,6 +525,18 @@ def _state_transitions(
             )
         )
     return tuple(normalized)
+
+
+def _world_snapshot(world: Any) -> dict[str, Any]:
+    if world is None:
+        return {}
+    value = world
+    snapshot = getattr(world, "snapshot", None)
+    if callable(snapshot):
+        value = snapshot()
+    elif hasattr(world, "state"):
+        value = world.state
+    return _json_object(value)
 
 
 # ---------------------------------------------------------------------------
@@ -647,6 +665,7 @@ class _GatewayToolRuntime:
             transition_ids,
             metadata,
         ) = _gateway_result_parts(value)
+        canonical_transition_ids = capture.link_transitions(transition_ids, attempt)
         outcome = capture.tool_result(
             attempt=attempt,
             status=status,
@@ -654,10 +673,9 @@ class _GatewayToolRuntime:
             error=error,
             started_at=started_at,
             gateway_outcome_id=outcome_id,
-            state_transition_ids=transition_ids,
+            state_transition_ids=canonical_transition_ids,
             gateway_metadata=metadata,
         )
-        capture.link_transitions(transition_ids, attempt)
         return outcome
 
 
@@ -1268,6 +1286,7 @@ class CustomAgentAdapter(FrameworkAdapter):
                 )
         prompt, turn_id, turn_metadata = _runner_input(input_text)
         prepared.metadata["consumed"] = True
+        initial_world = _world_snapshot(prepared.world_state)
 
         started_at = utc_now()
         capture = _Capture(run_id=run_id)
@@ -1377,8 +1396,8 @@ class CustomAgentAdapter(FrameworkAdapter):
             tool_attempts=tuple(capture.attempts),
             tool_outcomes=tuple(capture.outcomes),
             state_transitions=_state_transitions(prepared, capture),
-            initial_world_state={},
-            final_world_state={},
+            initial_world_state=initial_world,
+            final_world_state=_world_snapshot(prepared.world_state),
             final_output=final_output,
             # Every field stays None: a custom agent's tokens are spent inside
             # its own provider calls, and an unobserved metric is not zero.
