@@ -12,7 +12,7 @@ build-backend = "setuptools.build_meta"
 # both stay `agentcheck` -- the same split scikit-learn/sklearn has used for
 # years, and invisible in day-to-day use:
 #
-#     pip install agentcheck-ai      import agentcheck      agentcheck --help
+#     pip install 'agentcheck-ai[all]'    import agentcheck    agentcheck --help
 name = "agentcheck-ai"
 # This version is not only release metadata. It is recorded as
 # `provenance.generator_version` inside every frozen suite, and the suite

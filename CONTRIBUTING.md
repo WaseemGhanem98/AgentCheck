@@ -10,7 +10,7 @@ means a bug here does not just break a feature — it can produce a confident
 git clone https://github.com/WaseemGhanem98/AgentCheck.git
 cd AgentCheck
 python -m venv .venv && source .venv/bin/activate
-python -m pip install -e ".[dev]"
+python -m pip install -e ".[dev]"  # agentcheck-ai[dev] from this checkout
 ```
 
 `[dev]` installs both framework extras plus the test and quality tooling.
@@ -46,13 +46,16 @@ These are not style preferences. A change that breaks one of them will be
 rejected regardless of how much it improves anything else.
 
 1. **The original tool handler must never execute during a simulated
-   evaluation.** Interception happens *before* the handler, by replacing the
-   invoker — not by wrapping the call and discarding the result, and not by
-   trusting a handler to be side-effect free.
+   evaluation.** SDK interception happens *before* the handler by replacing the
+   invoker; custom integrations never supply a handler and route declared calls
+   through `ToolRuntime`. Neither path wraps a live handler or trusts one to be
+   side-effect free.
 2. **Unknown tools fail closed.** If the gateway does not recognize a tool, that
    is an error. Never synthesize a plausible result. A harness that invents tool
    output invents passing runs.
-3. **No real mutations.** Evaluation touches the simulated world only.
+3. **No real mutations through declared tools.** Evaluation tool calls touch
+   the simulated world only. Custom orchestration is trusted target code and
+   must keep direct side effects behind its declared `ToolRuntime` boundary.
 4. **Worker isolation holds.** Scenarios run in child processes with a
    constrained environment. Do not widen the environment allowlist by default,
    and do not leak credentials into a worker.

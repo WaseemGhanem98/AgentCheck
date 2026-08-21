@@ -896,8 +896,8 @@ def _print_custom_integration_hint(source: Path) -> None:
         print(f"    {line}" if line else "")
     print()
     print(
-        "Call your real model and tools inside start()/resume(); "
-        "tools.call(...) is simulated by AgentCheck."
+        "Call your model inside start()/resume(), and route every declared tool "
+        "request through tools.call(...), which AgentCheck simulates."
     )
 
 

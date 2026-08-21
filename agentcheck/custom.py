@@ -18,9 +18,10 @@ socket-level network denial catch the common escapes; a local filesystem write
 inside reasoning code is not preventable, and the documentation says so rather
 than implying a sandbox.
 
-These types are contracts only. Nothing here executes a custom agent yet: the
-adapter, the configuration surface and the CLI wiring are separate work, and
-landing the shape first keeps that work reviewable.
+These types remain contracts only. Execution lives in
+``agentcheck.adapters.custom.CustomAgentAdapter``; keeping the declarations in
+this framework-neutral module lets a target depend on the small public surface
+without importing runner internals.
 """
 
 from __future__ import annotations
