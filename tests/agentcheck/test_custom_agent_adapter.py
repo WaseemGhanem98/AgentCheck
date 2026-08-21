@@ -1172,7 +1172,7 @@ def test_no_model_event_is_invented_for_a_loop_agentcheck_cannot_see() -> None:
     kinds = {event.event_type for event in run.events}
     assert CanonicalEventType.MODEL_REQUEST not in kinds
     assert CanonicalEventType.MODEL_RESPONSE not in kinds
-    assert run.metadata["model_events_observed"] is False
+    assert run.metadata["model_turns_observable"] is False
     assert run.provider_request_ids == ()
     # An unobserved metric is not zero.
     assert run.usage.total_tokens is None
@@ -1651,13 +1651,11 @@ def test_a_scenario_that_declares_no_followups_still_serializes_identically() ->
     assert scenario.fingerprint == scenario.expected_fingerprint()
 
 
-def test_controlled_model_is_recorded_rather_than_silently_ignored() -> None:
-    """There is no model object to replace, and the metadata says so.
+def test_controlled_model_is_refused_rather_than_accepted_and_ignored() -> None:
+    """There is no model object to replace, so the request fails here.
 
-    A custom agent chooses its own provider inside its own loop. Accepting the
-    flag and doing nothing would let a caller believe a deterministic model had
-    been substituted; the containment that actually applies is the worker's
-    denied egress.
+    Covered in depth by test_custom_agent_ux.py; pinned beside the adapter so a
+    change that starts accepting the flag has to pass this too.
     """
 
     adapter = CustomAgentAdapter()
@@ -1665,12 +1663,10 @@ def test_controlled_model_is_recorded_rather_than_silently_ignored() -> None:
     spec = adapter.inspect(agent)
     gateway = _gateway(spec, (_fixture("get_order", {"status": "open"}),))
 
-    prepared = adapter.prepare(
-        agent, gateway, world_state=gateway.world, controlled_model=True
-    )
-
-    assert prepared.metadata["controlled_model_requested"] is True
-    assert prepared.metadata["controlled_model_supported"] is False
+    with pytest.raises(UnsupportedTargetError, match="controlled_model_unsupported"):
+        adapter.prepare(
+            agent, gateway, world_state=gateway.world, controlled_model=True
+        )
 
 
 def test_the_prepared_target_is_the_declared_agent_itself() -> None:

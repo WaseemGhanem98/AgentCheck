@@ -8,6 +8,7 @@ import os
 import re
 import sys
 from collections import Counter
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from agentcheck import __version__
@@ -847,6 +848,59 @@ def _json_spec(spec: AgentSpec) -> str:
     return json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2, sort_keys=True)
 
 
+# The smallest object that satisfies `agentcheck.custom`. Printed by `init
+# --adapter custom` when the entrypoint does not exist yet, because unlike an
+# SDK agent -- which the developer already has -- a custom integration is a
+# short module they have to write, and the shape of it is the only thing they
+# need to be told. Deliberately a printed skeleton rather than a generated file:
+# `init` does not write target source, and a scaffold that silently appears on
+# disk is harder to review than one the developer pastes.
+_CUSTOM_INTEGRATION_SKELETON = """\
+from agentcheck import ToolRuntime, TurnResult
+from agentcheck.domain import ToolDefinition
+
+
+class MyAgent:
+    # Declarations only. AgentCheck is never handed a tool's implementation,
+    # which is why it cannot run one.
+    tools = (
+        ToolDefinition(
+            name="lookup_account",
+            description="Read one account.",
+            input_schema={
+                "type": "object",
+                "properties": {"account_id": {"type": "string"}},
+                "required": ["account_id"],
+                "additionalProperties": False,
+            },
+        ),
+    )
+
+    def start(self, message: str, tools: ToolRuntime) -> TurnResult:
+        outcome = tools.call("lookup_account", {"account_id": "A-1"})
+        return TurnResult(output=f"Found {outcome.result}", state={})
+
+    def resume(self, state, message: str, tools: ToolRuntime) -> TurnResult:
+        return TurnResult(output="...", state=state)
+
+
+agent = MyAgent()
+"""
+
+
+def _print_custom_integration_hint(source: Path) -> None:
+    print()
+    print(f"A custom agent is declared in {source.name} like this:")
+    print()
+    for line in _CUSTOM_INTEGRATION_SKELETON.splitlines():
+        print(f"    {line}" if line else "")
+    print()
+    print(
+        "Call your real model and tools inside start()/resume(); "
+        "tools.call(...) is simulated by AgentCheck."
+    )
+
+
 def _init_command(target: str, *, entrypoint: str, adapter: str, force: bool) -> int:
     config_path = write_initial_config(
         target,
@@ -865,6 +919,8 @@ def _init_command(target: str, *, entrypoint: str, adapter: str, force: bool) ->
         print()
         print(f"Note: the entrypoint source does not exist yet: {source}")
         print("Create it, or re-run init with --entrypoint and --force.")
+        if adapter == "custom":
+            _print_custom_integration_hint(source)
     print()
     print("Next steps:")
     print(f"- agentcheck inspect {root}")

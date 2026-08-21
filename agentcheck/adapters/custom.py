@@ -924,10 +924,50 @@ class CustomAgentAdapter(FrameworkAdapter):
         declaration that has to be executed to be read is not a declaration.
         """
 
+        if not self._implements_any_of_the_contract(target):
+            # One diagnosis, not three symptoms. An object with none of the
+            # contract on it is almost always the wrong object -- a config
+            # pointing at a dict, a module, or an SDK agent belonging to another
+            # adapter -- and listing its three missing members invites the
+            # developer to add them to the wrong thing.
+            return PreflightReport(
+                framework=FRAMEWORK_NAME,
+                issues=(
+                    SupportIssue(
+                        code="not_a_custom_agent",
+                        message=(
+                            f"The configured entrypoint resolved to "
+                            f"{type(target).__name__}, which implements none of "
+                            "the custom-agent contract. AgentCheck expects an "
+                            "object with a `tools` sequence of ToolDefinition "
+                            "and `start(message, tools)` / `resume(state, "
+                            "message, tools)` methods (agentcheck.custom). If "
+                            "this target is an OpenAI Agents or PydanticAI "
+                            "agent, set that adapter instead of \"custom\"."
+                        ),
+                        location="entrypoint",
+                    ),
+                ),
+            )
         issues: list[SupportIssue] = []
         issues.extend(self._tool_issues(target))
         issues.extend(self._turn_method_issues(target))
         return PreflightReport(framework=FRAMEWORK_NAME, issues=tuple(issues))
+
+    @staticmethod
+    def _implements_any_of_the_contract(target: Any) -> bool:
+        """Whether the object is an attempt at the contract at all.
+
+        Deliberately generous: one recognisable member is enough to treat the
+        target as a custom agent whose implementation is incomplete, and to
+        report precisely what is missing from it.
+        """
+
+        if _raw_tools(target) is not None:
+            return True
+        return any(
+            callable(_turn_method(target, name)) for name in _REQUIRED_TURN_METHODS
+        )
 
     @staticmethod
     def _tool_issues(target: Any) -> list[SupportIssue]:
@@ -1075,6 +1115,31 @@ class CustomAgentAdapter(FrameworkAdapter):
         constructed here.
         """
 
+        if controlled_model:
+            # Refused, not recorded as a caveat. AgentCheck substitutes a
+            # deterministic model by rebuilding the target around one, and a
+            # custom agent has no such seam: its model calls happen inside the
+            # loop this adapter merely starts and resumes. Accepting the request
+            # and running anyway would let a caller believe an offline
+            # substitution had happened while the target reached for its own
+            # provider -- which the worker's denied egress would then refuse,
+            # somewhere much less legible than here.
+            raise UnsupportedTargetError(
+                [
+                    SupportIssue(
+                        code="controlled_model_unsupported",
+                        message=(
+                            "This adapter cannot substitute a controlled offline "
+                            "model: a custom agent owns its own model calls, and "
+                            "AgentCheck never sees them. Remove "
+                            "`controlled_model` from the configuration, or make "
+                            "the agent's own loop use a deterministic model of "
+                            "its choosing for evaluation runs."
+                        ),
+                        location="config.controlled_model",
+                    )
+                ]
+            )
         report = self.preflight(target)
         report.require_supported()
         spec = self.inspect(target, source=source)
@@ -1112,11 +1177,6 @@ class CustomAgentAdapter(FrameworkAdapter):
                 "tool_risks": tool_risks,
                 "tool_runtime": runtime,
                 "consumed": False,
-                # Recorded rather than silently honoured. There is no model
-                # object to substitute, so a caller asking for one is told here
-                # instead of being left to assume it happened.
-                "controlled_model_requested": bool(controlled_model),
-                "controlled_model_supported": False,
             },
         )
 
@@ -1329,7 +1389,10 @@ class CustomAgentAdapter(FrameworkAdapter):
                 "framework": FRAMEWORK_NAME,
                 "framework_version": None,
                 "usage_unknown": True,
-                "model_events_observed": False,
+                # Read by the evaluator, which will not compare an unobserved
+                # model-turn count against a budget. See
+                # agentcheck/evaluate/engine.py::_observed_model_turns.
+                "model_turns_observable": False,
                 **(
                     {
                         "stages_executed": stages_executed,
