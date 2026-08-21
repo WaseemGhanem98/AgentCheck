@@ -5,6 +5,54 @@
 > personal workstation. That is safe while this repository is private. It stops
 > being safe the moment anyone can open a pull request.
 
+## What runs, and on which interpreter
+
+The full suite runs once, on the primary interpreter. Every other supported
+version runs the cross-version suite defined in `tests/compat_manifest.py`.
+
+| | Py3.10 | Py3.11 | Py3.12 |
+|---|---|---|---|
+| Full behavioural suite (930 tests) | | | ✅ |
+| Domain models, serialization, fingerprints | ✅ | ✅ | ✅ |
+| Worker / process isolation | ✅ | ✅ | ✅ |
+| ToolGateway, fail-closed, unknown tools | ✅ | ✅ | ✅ |
+| Prerequisites, confirmation, `followup_turns` | ✅ | ✅ | ✅ |
+| Replay, source integrity | ✅ | ✅ | ✅ |
+| OpenAI Agents adapter | ✅ | ✅ | ✅ |
+| PydanticAI adapter | ✅ | ✅ | ✅ |
+| CLI end-to-end, target import, package boundary | ✅ | ✅ | ✅ |
+| Network containment | ✅ | ✅ | ✅ |
+| Packaging, extras, clean install | | | ✅ (checks job) |
+| Capability inference, generation, selection, shrink, reporting logic | | | ✅ |
+
+The split is by **where the interpreter can reach**, not by how slow a file is.
+The package contains no `sys.version_info` branching, so what differs between
+3.10 and 3.12 is the boundary with the interpreter: the recursive
+`TypeAliasType` models in `agentcheck/domain/base.py` that every contract sits
+on, subprocess worker launch, import machinery, third-party SDK internals, and
+the `argparse` console entry point. All of those run everywhere. Pure logic over
+already-constructed objects runs once.
+
+The cross-version suite is 381 of 930 tests across 18 files and takes about six
+minutes, against roughly 22-26 for the full suite. It is not a smoke test.
+
+`tests/agentcheck/test_compat_manifest.py` fails if a category loses its files,
+if a listed file disappears, or if a listed file stops containing the symbols
+that made it evidence — and if `ci.yml` stops reading the list from the manifest.
+
+## Post-merge
+
+A pull request runs all three interpreters. A push to `main` runs only the
+primary, plus the full checks job.
+
+`pull_request` events already build and test the **merge result**, not the
+branch tip, so post-merge CI is not re-testing an untested tree. What it still
+catches is a merge race: `main` advancing between the moment PR CI ran and the
+moment the merge landed. That risk is real but interpreter-independent — a
+semantic conflict breaks on 3.12 exactly as it breaks on 3.10 — so re-running
+the other two versions after merge buys nothing and costs about 45 minutes of a
+serial queue.
+
 ## Where CI runs today
 
 | Workflow | Runner | Trigger | Why |

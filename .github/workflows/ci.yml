@@ -44,6 +44,9 @@ concurrency:
 env:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   PYTHONDONTWRITEBYTECODE: "1"
+  # The interpreter that runs the whole suite. Every other supported version
+  # runs the cross-version suite from tests/compat_manifest.py.
+  PRIMARY_PYTHON: "3.12"
 
 jobs:
   tests:
@@ -69,11 +72,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # All three supported versions, on both triggers. There is one runner,
-        # so these queue serially rather than running side by side; that is the
-        # cost of keeping every supported version covered before merge instead
-        # of after it.
-        python-version: ["3.10", "3.11", "3.12"]
+        # One runner means these queue serially, so every entry is wall-clock a
+        # pull request waits. On a pull request all three supported versions run;
+        # after merge only the primary does, because the merge-race this second
+        # run exists to catch would show up on any interpreter. See the Test step.
+        python-version: ${{ github.event_name == 'push' && fromJSON('["3.12"]') || fromJSON('["3.10", "3.11", "3.12"]') }}
 
     env:
       # A self-hosted runner inherits the service environment of a machine that
@@ -162,7 +165,26 @@ jobs:
         # their budget. On this 14-core machine -n 2 has a green history; -n 3
         # and -n 4 were benchmarked and starved scenarios, turning real
         # verdicts into worker_timeout.
-        run: python -m pytest -p no:cacheprovider tests -q -n 2
+        #
+        # The primary interpreter runs everything. The others run the
+        # cross-version suite, whose contents and rationale live in
+        # tests/compat_manifest.py and are enforced by
+        # tests/agentcheck/test_compat_manifest.py -- the list is read from the
+        # manifest here rather than duplicated, so the two cannot drift.
+        #
+        # The package has no sys.version_info branching, so what differs between
+        # interpreters is where it meets one: recursive TypeAliasType models,
+        # subprocess workers, import machinery, SDK internals and the CLI entry
+        # point. Those all run on every version. Pure logic over already-built
+        # objects runs once.
+        run: |
+          if [ "${{ matrix.python-version }}" = "$PRIMARY_PYTHON" ]; then
+            python -m pytest -p no:cacheprovider tests -q -n 2
+          else
+            mapfile -t compat < <(python tests/compat_manifest.py)
+            echo "cross-version suite: ${#compat[@]} files"
+            python -m pytest -p no:cacheprovider "${compat[@]}" -q -n 2
+          fi
 
   checks:
     # One job, not five. There is a single self-hosted runner, so every extra
