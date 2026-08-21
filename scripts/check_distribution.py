@@ -32,7 +32,13 @@ FORBIDDEN = (
 
 # The wheel is the installed package. Tests, examples, and docs belong in the
 # sdist and the repository, not in every user's site-packages.
-WHEEL_ALLOWED = re.compile(r"^(agentcheck/|agentcheck-[^/]*\.dist-info/)")
+#
+# The import package and the distribution have different names on purpose --
+# `agentcheck` is imported, `agentcheck-ai` is installed -- and a wheel's
+# dist-info directory is named after the distribution, with dashes normalised to
+# underscores. Matching that shape rather than a literal keeps this check honest
+# if either name changes again.
+WHEEL_ALLOWED = re.compile(r"^(agentcheck/|[A-Za-z0-9_.]+-[^/]*\.dist-info/)")
 
 
 def _members(path: pathlib.Path) -> list[str]:

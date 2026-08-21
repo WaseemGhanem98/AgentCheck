@@ -1,0 +1,146 @@
+# The public CI workflow. NOT ACTIVE — the .disabled suffix keeps GitHub from
+# seeing it, because hosted minutes are billed while this repository is private.
+#
+# To activate at publication (see docs/ci-trust-model.md):
+#   git rm .github/workflows/ci.yml
+#   git mv .github/workflows/ci-public.yml.disabled .github/workflows/ci.yml
+#
+# What changed from the private workflow, and why:
+#
+#   * runs-on is ubuntu-latest everywhere. GitHub: "self-hosted runners should
+#     almost never be used for public repositories", because anyone who can fork
+#     and open a pull request can compromise the runner, its secrets and its
+#     GITHUB_TOKEN. Standard hosted runners are free for public repositories, so
+#     this costs nothing.
+#   * The trusted-context `if:` guards are gone. They existed only to keep fork
+#     pull requests off a workstation; with no self-hosted runner there is
+#     nothing to guard, and keeping them would silently skip every external
+#     contributor's CI.
+#   * actions/setup-python replaces uv. The uv indirection existed because
+#     setup-python's interpreters hard-code /opt/hostedtoolcache libpython paths
+#     that do not exist on a self-hosted runner. On a hosted runner that is the
+#     correct path.
+#   * pytest runs serially. -n 2 is measured for a 14-core workstation; a hosted
+#     runner has far fewer cores, and at -n 2 there the suite starved its own 10s
+#     scenario budget (10 failed / 920 passed on 3.11 and 3.12 while 3.10 passed,
+#     scenarios returning INFRA_ERROR). The budget is a product default and is
+#     never raised to buy CI headroom, so the worker count gives way instead.
+#
+# `pull_request` is used, never `pull_request_target`: fork pull requests must
+# not run with the base repository's token or secrets.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+  PRIMARY_PYTHON: "3.12"
+
+jobs:
+  tests:
+    name: Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        # Hosted runners are free and run in parallel here, so every supported
+        # version runs on both triggers -- there is no serial queue to ration.
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Verify no provider credential reached this job
+        run: |
+          for name in OPENAI_API_KEY ANTHROPIC_API_KEY GOOGLE_API_KEY; do
+            if printenv "$name" >/dev/null 2>&1; then
+              echo "$name is present; the suite expects it absent" >&2
+              exit 1
+            fi
+          done
+          echo "PASS: no provider credential is visible to this job"
+
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+
+      - name: Test
+        # Serial: see the header. Do not raise this to speed the build up.
+        run: |
+          if [ "${{ matrix.python-version }}" = "$PRIMARY_PYTHON" ]; then
+            python -m pytest -p no:cacheprovider tests -q
+          else
+            mapfile -t compat < <(python tests/compat_manifest.py)
+            echo "cross-version suite: ${#compat[@]} files"
+            python -m pytest -p no:cacheprovider "${compat[@]}" -q
+          fi
+
+  checks:
+    name: Quality, packaging, extras, and trust
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: python -m pip install -e ".[dev]"
+
+      - name: Workflow trust model
+        if: ${{ !cancelled() }}
+        run: python scripts/check_workflow_safety.py
+
+      - name: Ruff
+        if: ${{ !cancelled() }}
+        run: python -m ruff check agentcheck tests scripts
+
+      - name: Mypy
+        if: ${{ !cancelled() }}
+        run: python -m mypy agentcheck
+
+      - name: Secret scan
+        if: ${{ !cancelled() }}
+        run: python scripts/check_no_secrets.py
+
+      - name: Base install has no framework
+        if: ${{ !cancelled() }}
+        run: |
+          python -m venv /tmp/base && /tmp/base/bin/python -m pip install --quiet .
+          /tmp/base/bin/python - <<'PY'
+          import importlib.util
+          for framework in ("agents", "pydantic_ai"):
+              assert importlib.util.find_spec(framework) is None, framework
+          import agentcheck; print("base import ok:", agentcheck.__version__)
+          PY
+          /tmp/base/bin/agentcheck --help > /dev/null
+
+      - name: Build and audit artifacts
+        if: ${{ !cancelled() }}
+        run: |
+          python -m build
+          python scripts/check_distribution.py
