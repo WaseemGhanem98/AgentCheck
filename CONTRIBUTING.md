@@ -66,6 +66,31 @@ rejected regardless of how much it improves anything else.
    behavior. It does not make a model deterministic, and no message or document
    may imply that it does.
 
+## Things that are never acceptable trade-offs
+
+Green CI is not the goal; a trustworthy verdict is. These are the shortcuts that
+look reasonable in the moment and are always rejected:
+
+- **Never widen a safety or resource budget to make CI pass.** Scenario
+  wall-clock budgets are a product default, and the suite's ability to notice a
+  starved scenario depends on them. If a run is starving, reduce concurrency or
+  shard the job — never raise the budget, which trades away the signal to hide
+  the symptom.
+- **Never turn `INCONCLUSIVE` or `INFRA_ERROR` into `PASS`** to clear a red
+  build. A harness fault reported as a clean bill of health is the single most
+  dangerous output this project can produce.
+- **Never weaken a test to match changed behaviour** without saying so
+  explicitly in the PR. If a fingerprint or a contract moved, that is a
+  compatibility event and needs to be argued, not absorbed.
+- **Never widen a framework version gate without evidence** that the new version
+  was actually verified. "It seemed to work" is not evidence; adapters read
+  framework-private attributes, so an unverified version fails by producing a
+  wrong `AgentSpec`, not by crashing.
+- **Keep determinism claims scoped.** Generation, freezing, simulation, and
+  oracle evaluation are deterministic. A provider model is not. Do not describe
+  replay as reproducing model behaviour — it re-executes a recipe. Documentation
+  that overstates this is a defect like any other.
+
 ## Framework adapter expectations
 
 New adapters are welcome, but an adapter is the highest-risk code in the
