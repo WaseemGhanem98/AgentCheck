@@ -116,6 +116,10 @@ COMPATIBILITY_SUITE: dict[str, dict[str, object]] = {
             "tests/agentcheck/test_cli_e2e.py",
             "tests/agentcheck/test_target_loading.py",
             "tests/agentcheck/test_package_boundary.py",
+            # Protocol runtime-checkability and typing behaviour differ between
+            # interpreters, and this contract must hold on every version the
+            # package claims to support.
+            "tests/agentcheck/test_custom_agent_contract.py",
         ),
         "symbols": ("main", "import"),
     },
