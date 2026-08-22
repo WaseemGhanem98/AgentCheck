@@ -7,9 +7,10 @@ import json
 import os
 import re
 import sys
+import threading
 from collections import Counter
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, TextIO
 
 from agentcheck import __version__
 from agentcheck.adapters.base import SupportIssue
@@ -31,6 +32,7 @@ from agentcheck.fixtures import (
 from agentcheck.domain import (
     AgentSpec,
     CaseEvaluation,
+    Scenario,
     Severity,
     Verdict,
     action_path_exercise,
@@ -59,6 +61,9 @@ from agentcheck.shrink import (
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$")
 _CONSOLE_ERROR_CODE_CHARS = 80
 _CONSOLE_ERROR_MESSAGE_CHARS = 320
+_CONSOLE_SCENARIO_TITLE_CHARS = 96
+_TEST_PROGRESS_HEARTBEAT_SECONDS = 10.0
+_TEST_PROGRESS_RESULT_COLUMN = 72
 _TRUNCATION_MARKER = "...[TRUNCATED]"
 
 
@@ -932,8 +937,12 @@ def _bounded_console_diagnostic(value: str, *, max_chars: int) -> str:
     return f"{normalized[:prefix_chars].rstrip()}{_TRUNCATION_MARKER}"
 
 
-def _print_case_evaluation(evaluation: CaseEvaluation, *, title: str) -> None:
-    print(f"{evaluation.verdict.value:<12} {title}")
+def _print_infrastructure_diagnostic(
+    evaluation: CaseEvaluation,
+    *,
+    prefix: str,
+    stream: TextIO,
+) -> None:
     if evaluation.verdict != Verdict.INFRA_ERROR:
         return
     error = evaluation.infrastructure_error
@@ -947,7 +956,163 @@ def _print_case_evaluation(evaluation: CaseEvaluation, *, title: str) -> None:
         error.message,
         max_chars=_CONSOLE_ERROR_MESSAGE_CHARS,
     )
-    print(f"{'':12} INFRA_ERROR — {code}: {message}")
+    print(f"{prefix}INFRA_ERROR — {code}: {message}", file=stream, flush=True)
+
+
+def _print_case_evaluation(evaluation: CaseEvaluation, *, title: str) -> None:
+    print(f"{evaluation.verdict.value:<12} {title}")
+    _print_infrastructure_diagnostic(
+        evaluation,
+        prefix=" " * 12,
+        stream=sys.stdout,
+    )
+
+
+def _print_progress_case_evaluation(
+    evaluation: CaseEvaluation,
+    *,
+    title: str,
+    completed: int,
+    total: int,
+    stream: TextIO,
+) -> None:
+    safe_title = _bounded_console_diagnostic(
+        title,
+        max_chars=_CONSOLE_SCENARIO_TITLE_CHARS,
+    )
+    count_prefix = f"[{completed}/{total}] "
+    label = f"{count_prefix}{safe_title}"
+    dots = "." * max(3, _TEST_PROGRESS_RESULT_COLUMN - len(label))
+    print(
+        f"{label} {dots} {evaluation.verdict.value}",
+        file=stream,
+        flush=True,
+    )
+    _print_infrastructure_diagnostic(
+        evaluation,
+        prefix=" " * len(count_prefix),
+        stream=stream,
+    )
+
+
+class _TestProgressReporter:
+    # Newline-only output keeps redirected and CI logs readable.
+    def __init__(
+        self,
+        *,
+        stream: TextIO,
+        heartbeat_seconds: float = _TEST_PROGRESS_HEARTBEAT_SECONDS,
+    ) -> None:
+        self._stream = stream
+        self._heartbeat_seconds = heartbeat_seconds
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._stage = "Inspecting agent"
+        self._completed = 0
+        self._total: int | None = None
+
+    def start(self) -> None:
+        self._write("Inspecting agent...")
+        self._thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name="agentcheck-cli-progress",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def inspection_complete(self) -> None:
+        with self._lock:
+            self._write_locked("Inspection complete. ✓")
+            self._stage = "Preparing suite"
+
+    def suite_ready(
+        self,
+        frozen: Any,
+        total: int,
+        invalid: int,
+        excluded_by_selection: int,
+    ) -> None:
+        scenario_word = "scenario" if total == 1 else "scenarios"
+        with self._lock:
+            if frozen is not None:
+                self._write_locked(
+                    f"Loading frozen suite... ✓ {total} {scenario_word}"
+                )
+                self._write_locked(f"Suite ID: {frozen.suite_id}")
+                self._write_locked(f"Seed:     {frozen.seed}")
+            else:
+                self._write_locked(
+                    "Building deterministic test suite... "
+                    f"✓ {total} {scenario_word}"
+                )
+            if invalid:
+                self._write_locked(
+                    f"Excluded: {invalid} invalid scenario(s); "
+                    "these do not affect results"
+                )
+            if excluded_by_selection:
+                self._write_locked(
+                    f"Excluded by selection: {excluded_by_selection} "
+                    "valid scenario(s); these are not scored"
+                )
+            self._write_locked("")
+            self._write_locked(
+                f"Running {total} {scenario_word} in isolated workers..."
+            )
+            self._completed = 0
+            self._total = total
+            self._stage = "Running scenarios"
+
+    def case_completed(
+        self,
+        completed: int,
+        total: int,
+        scenario: Scenario,
+        evaluation: CaseEvaluation,
+    ) -> None:
+        with self._lock:
+            self._completed = completed
+            self._total = total
+            _print_progress_case_evaluation(
+                evaluation,
+                title=scenario.title,
+                completed=completed,
+                total=total,
+                stream=self._stream,
+            )
+            if completed >= total:
+                self._stage = "Finalizing report"
+                self._total = None
+                self._write_locked("Finalizing report...")
+
+    def emit_heartbeat(self) -> None:
+        with self._lock:
+            if self._total is None:
+                self._write_locked(f"{self._stage}... still running")
+            elif self._completed < self._total:
+                remaining = self._total - self._completed
+                scenario_word = "scenario" if remaining == 1 else "scenarios"
+                self._write_locked(
+                    f"{remaining} {scenario_word} still running "
+                    f"({self._completed}/{self._total} complete)"
+                )
+
+    def close(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join()
+
+    def _heartbeat_loop(self) -> None:
+        while not self._stop.wait(self._heartbeat_seconds):
+            self.emit_heartbeat()
+
+    def _write(self, line: str) -> None:
+        with self._lock:
+            self._write_locked(line)
+
+    def _write_locked(self, line: str) -> None:
+        print(line, file=self._stream, flush=True)
 
 
 def _init_command(target: str, *, entrypoint: str, adapter: str, force: bool) -> int:
@@ -1073,46 +1238,46 @@ def _test_command(
     select: str | None,
     python_executable: str | None,
 ) -> int:
-    print("Inspecting agent...")
-    print()
-    execution = execute_suite(
-        target,
-        seed=seed,
-        run_id=run_id,
-        persist_store=persist_store,
-        select=select,
-        python_executable=python_executable,
-    )
+    reporter = _TestProgressReporter(stream=sys.stdout)
+
+    def on_inspected(spec: AgentSpec) -> None:
+        reporter.inspection_complete()
+        print()
+        _print_inspection(spec)
+        print()
+
+    def on_prepared(
+        frozen: Any,
+        total: int,
+        invalid: int,
+        excluded_by_selection: int,
+    ) -> None:
+        reporter.suite_ready(
+            frozen,
+            total,
+            invalid,
+            excluded_by_selection,
+        )
+
+    reporter.start()
+    try:
+        execution = execute_suite(
+            target,
+            seed=seed,
+            run_id=run_id,
+            progress=reporter.case_completed,
+            on_inspected=on_inspected,
+            on_prepared=on_prepared,
+            persist_store=persist_store,
+            select=select,
+            python_executable=python_executable,
+        )
+    finally:
+        reporter.close()
     if not execution.scenarios:
         raise ScenarioValidationError(
             "No valid scenarios remain after linting; no agent verdict was produced."
         )
-    _print_inspection(execution.spec)
-    print()
-    if execution.frozen_suite is not None:
-        print("Using frozen suite...")
-        print(f"Suite ID: {execution.frozen_suite.suite_id}")
-        print(f"Seed:     {execution.frozen_suite.seed}")
-    else:
-        print("Building deterministic test suite...")
-    print(f"Generated: {len(execution.scenarios)} valid scenarios")
-    if execution.invalid_scenarios:
-        print(
-            f"Excluded: {len(execution.invalid_scenarios)} invalid scenario(s); "
-            "these do not affect results"
-        )
-    if execution.selection is not None and execution.selection.excluded_ids:
-        print(
-            f"Excluded by selection: {len(execution.selection.excluded_ids)} "
-            "valid scenario(s); these are not scored"
-        )
-    print()
-    print(f"Running {len(execution.scenarios)} scenarios in isolated child processes...")
-    print()
-    evaluation_by_id = {item.scenario_id: item for item in execution.evaluations}
-    for scenario in execution.scenarios:
-        evaluation = evaluation_by_id[scenario.scenario_id]
-        _print_case_evaluation(evaluation, title=scenario.title)
 
     counts: Counter[Verdict] = execution.counts
     pass_rate = execution.observed_pass_rate

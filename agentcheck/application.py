@@ -109,6 +109,8 @@ from agentcheck.runner.orchestrator import (
 
 
 ProgressCallback = Callable[[int, int, Scenario, CaseEvaluation], None]
+InspectionProgressCallback = Callable[[AgentSpec], None]
+PreparationProgressCallback = Callable[[FrozenSuite | None, int, int, int], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,6 +322,8 @@ def execute_suite(
     seed: int | None = None,
     run_id: str | None = None,
     progress: ProgressCallback | None = None,
+    on_inspected: InspectionProgressCallback | None = None,
+    on_prepared: PreparationProgressCallback | None = None,
     persist_store: bool = True,
     select: str | None = None,
     python_executable: str | None = None,
@@ -343,6 +347,8 @@ def execute_suite(
         root, config, spec=_require_supported_spec(inspection)
     )
     spec = attach_declared_policies(_require_supported_spec(inspection), packs)
+    if on_inspected is not None:
+        on_inspected(spec)
 
     frozen: FrozenSuite | None = None
     if configured is None:
@@ -423,6 +429,12 @@ def execute_suite(
                 "No valid scenarios remain after coverage selection; "
                 "no agent verdict was produced."
             )
+
+    if on_prepared is not None:
+        excluded_by_selection = (
+            len(selection_plan.excluded_ids) if selection_plan is not None else 0
+        )
+        on_prepared(frozen, len(valid), len(invalid), excluded_by_selection)
 
     return _execute_valid_scenarios(
         root=root,
