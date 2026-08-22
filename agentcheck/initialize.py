@@ -40,7 +40,10 @@ def resolve_initialization_root(target: str | os.PathLike[str]) -> Path:
     except (OSError, RuntimeError) as exc:
         raise ConfigurationError(f"target path cannot be resolved: {exc}") from exc
     if not resolved.is_dir():
-        raise ConfigurationError(f"target must be an existing directory: {resolved}")
+        raise ConfigurationError(
+            f"target must be an existing directory: {resolved}; "
+            "create the directory first, then run agentcheck init again"
+        )
     return resolved
 
 
