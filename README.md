@@ -1,56 +1,69 @@
 # AgentCheck
 
+[![PyPI version](https://img.shields.io/pypi/v/agentcheck-ai.svg)](https://pypi.org/project/agentcheck-ai/)
 [![Python 3.10–3.12](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-2ea44f.svg)](LICENSE)
 
 **Behavioral testing for AI agents.**
 
-You already test your code. AgentCheck tests the decisions your agent makes:
-which tools it calls, in what order, and how it responds when an action needs
-confirmation, fails, times out, or must not be repeated.
+You already test your code. AgentCheck tests the decisions your agent makes.
 
 AgentCheck runs trusted local agents against generated or frozen behavioral
-scenarios. During evaluation, declared tool actions are routed to simulated
-results instead of their real handlers. Every executed case ends as `PASS`, `FAIL`,
+scenarios and checks which tools they call, in what order, and how they respond
+when an action needs confirmation, fails, times out, or must not be repeated.
+During evaluation, declared tool actions are routed to simulated results instead
+of their real handlers. Every executed case ends as `PASS`, `FAIL`,
 `INCONCLUSIVE`, or `INFRA_ERROR`, with an HTML report and replay manifest.
 
-> **Status:** AgentCheck is pre-1.0 and is not published to PyPI. Install it
-> from source using the instructions below.
-
+[Demo](#demo) ·
 [Quickstart](#30-second-quickstart) ·
 [Integrations](#supported-integrations) ·
 [Safety model](#simulated-tools-and-the-safety-boundary) ·
 [Reports](#reports-and-verdicts) ·
 [Documentation](#documentation)
 
+## Demo
+
+[![AgentCheck terminal demo showing behavioral PASS and FAIL results](docs/assets/agentcheck-demo-poster.png)](docs/assets/agentcheck-demo.mp4)
+
+[Watch the 25-second terminal demo](docs/assets/agentcheck-demo.mp4)
+
 ## 30-second quickstart
 
-Clone AgentCheck and install the extra used by the bundled OpenAI Agents SDK
-example:
+Install AgentCheck from PyPI:
 
 ```bash
-git clone https://github.com/WaseemGhanem98/AgentCheck.git
-cd AgentCheck
-python -m pip install ".[openai-agents]"
+pip install agentcheck-ai
 ```
 
-The example uses a local scripted model, needs no API key, and makes no provider
-requests:
+The distribution is `agentcheck-ai`; the Python import and CLI are both
+`agentcheck`. Do not run `pip install agentcheck`—that name belongs to an
+unrelated project.
+
+For a new environment using a native SDK adapter, install its verified extra:
 
 ```bash
-agentcheck inspect  examples/evaluation/account_agent
-agentcheck generate examples/evaluation/account_agent
-agentcheck test     examples/evaluation/account_agent
-agentcheck report   examples/evaluation/account_agent --latest
+pip install "agentcheck-ai[openai-agents]"
+# or
+pip install "agentcheck-ai[pydantic-ai]"
 ```
 
-The test command exits with status `1` on this example by design: it contains
-five planted behavioral defects. That is the demonstration, not an installation
-failure.
+For an existing OpenAI Agents SDK target exported as `agent` from `agent.py`,
+the default workflow is:
 
-AgentCheck's distribution name is `agentcheck-ai`; its import and CLI are
-both `agentcheck`. **Do not run `pip install agentcheck`** — that name belongs to
-an unrelated project. No AgentCheck PyPI installation command is available yet.
+```bash
+cd my-agent
+agentcheck init .
+agentcheck inspect .
+agentcheck generate .
+agentcheck test .
+```
+
+The target directory must already exist. `init` writes `agentcheck.json`; it
+does not create the directory or agent source. PydanticAI and Custom Python
+targets select their adapter and entrypoint explicitly—use the
+[PydanticAI guide](docs/pydantic-ai.md) or
+[Custom Python guide](docs/custom-agents.md) for the exact target shape.
 
 ## See the result
 
@@ -143,8 +156,8 @@ behavioral results.
 
 | Integration | Install extra | Verified support |
 |---|---|---|
-| [OpenAI Agents SDK](examples/evaluation/account_agent/README.md) | `openai-agents` | `openai-agents >=0.20,<0.21` |
-| [PydanticAI](docs/pydantic-ai.md) | `pydantic-ai` | `pydantic-ai-slim >=2.32,<2.33` |
+| [OpenAI Agents SDK](examples/evaluation/account_agent/README.md) | `agentcheck-ai[openai-agents]` | `openai-agents >=0.20,<0.21` |
+| [PydanticAI](docs/pydantic-ai.md) | `agentcheck-ai[pydantic-ai]` | `pydantic-ai-slim >=2.32,<2.33` |
 | [Custom Python agents](docs/custom-agents.md) | base package | `CustomAgentProtocol`, inert `ToolDefinition` values, synchronous `start` / `resume` |
 
 The SDK adapters are intentionally pinned to one verified minor version. They
@@ -335,6 +348,7 @@ before enabling workflows for untrusted contributions.
 
 ## Documentation
 
+- [PyPI package (`agentcheck-ai`)](https://pypi.org/project/agentcheck-ai/)
 - [OpenAI Agents SDK worked example](examples/evaluation/account_agent/README.md)
 - [PydanticAI setup and offline evaluation](docs/pydantic-ai.md)
 - [Custom Python agent contract](docs/custom-agents.md)
