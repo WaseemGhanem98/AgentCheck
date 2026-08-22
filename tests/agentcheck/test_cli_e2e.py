@@ -201,8 +201,24 @@ def test_offline_cli_runs_complete_phase1_flow_with_intercepted_tools(
 
     assert execution.returncode == 1, execution.stderr
     assert execution.stderr == ""
-    assert len(re.findall(r"^PASS\s+", execution.stdout, flags=re.MULTILINE)) == 7
-    assert len(re.findall(r"^FAIL\s+", execution.stdout, flags=re.MULTILINE)) == 5
+    assert len(
+        re.findall(r"^\[\d+/12\].+\sPASS$", execution.stdout, flags=re.MULTILINE)
+    ) == 7
+    assert len(
+        re.findall(r"^\[\d+/12\].+\sFAIL$", execution.stdout, flags=re.MULTILINE)
+    ) == 5
+    stages = (
+        "Inspecting agent...",
+        "Inspection complete. ✓",
+        "Building deterministic test suite... ✓ 12 scenarios",
+        "Running 12 scenarios in isolated workers...",
+        "[1/12]",
+        "Finalizing report...",
+    )
+    positions = [execution.stdout.index(stage) for stage in stages]
+    assert positions == sorted(positions)
+    assert "\r" not in execution.stdout
+    assert "\x1b" not in execution.stdout
     assert "Observed suite pass rate: 58.3%" in execution.stdout
     assert "Passed:        7" in execution.stdout
     assert "Failed:        5" in execution.stdout

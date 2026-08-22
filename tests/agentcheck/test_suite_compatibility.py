@@ -239,7 +239,7 @@ def test_cli_test_with_frozen_suite_does_not_report_suite_mismatch(
     assert "No compatible built-in suite" not in combined
     assert "No valid scenarios remain after linting" not in captured.err
     assert "INFRA_ERROR" in captured.out
-    assert "Using frozen suite" in captured.out
+    assert "Loading frozen suite... ✓" in captured.out
 
 
 def test_unsupported_preflight_is_reported_before_suite_mismatch(

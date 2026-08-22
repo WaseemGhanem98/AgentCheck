@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,6 +43,72 @@ def _infra_execution(
     )
 
 
+def _execution_for_verdict(
+    scenario: Scenario,
+    verdict: Verdict,
+) -> SimpleNamespace:
+    if verdict == Verdict.INFRA_ERROR:
+        return _infra_execution(
+            scenario,
+            code="fixture_not_found",
+            message="No fixture declared for tool 'lookup_customer'.",
+        )
+    evaluation = SimpleNamespace(
+        scenario_id=scenario.scenario_id,
+        verdict=verdict,
+        infrastructure_error=None,
+    )
+    return SimpleNamespace(
+        scenarios=(scenario,),
+        evaluations=(evaluation,),
+        spec=object(),
+        frozen_suite=None,
+        invalid_scenarios=(),
+        selection=None,
+        counts=Counter({verdict: 1}),
+        observed_pass_rate=1.0 if verdict == Verdict.PASS else 0.0,
+        runs=(),
+        findings=(),
+        report_path=Path("report.html"),
+        replay_manifest_path=None,
+    )
+
+
+def _execute_with_progress(execution: SimpleNamespace):
+    def execute(*_args: object, **kwargs: object) -> SimpleNamespace:
+        on_inspected = kwargs["on_inspected"]
+        on_prepared = kwargs["on_prepared"]
+        progress = kwargs["progress"]
+        assert callable(on_inspected)
+        assert callable(on_prepared)
+        assert callable(progress)
+        on_inspected(execution.spec)
+        excluded = (
+            len(execution.selection.excluded_ids)
+            if execution.selection is not None
+            else 0
+        )
+        on_prepared(
+            execution.frozen_suite,
+            len(execution.scenarios),
+            len(execution.invalid_scenarios),
+            excluded,
+        )
+        for completed, (scenario, evaluation) in enumerate(
+            zip(execution.scenarios, execution.evaluations),
+            start=1,
+        ):
+            progress(
+                completed,
+                len(execution.scenarios),
+                scenario,
+                evaluation,
+            )
+        return execution
+
+    return execute
+
+
 @pytest.mark.parametrize(
     ("code", "message"),
     [
@@ -67,7 +134,7 @@ def test_test_command_surfaces_actionable_infrastructure_diagnostics(
 ) -> None:
     scenario = build_account_support_suite()[0]
     execution = _infra_execution(scenario, code=code, message=message)
-    monkeypatch.setattr(cli, "execute_suite", lambda *_args, **_kwargs: execution)
+    monkeypatch.setattr(cli, "execute_suite", _execute_with_progress(execution))
     monkeypatch.setattr(cli, "_print_inspection", lambda *_args, **_kwargs: None)
 
     assert cli.main(["test", "."]) == 2
@@ -76,6 +143,95 @@ def test_test_command_surfaces_actionable_infrastructure_diagnostics(
     assert f"INFRA_ERROR — {code}: {message}" in output
     assert scenario.title in output
     assert "Traceback" not in output
+
+
+def test_test_command_reports_stages_and_scenario_progress_in_order(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    scenario = build_account_support_suite()[0]
+    execution = _execution_for_verdict(scenario, Verdict.PASS)
+    monkeypatch.setattr(cli, "execute_suite", _execute_with_progress(execution))
+    monkeypatch.setattr(cli, "_print_inspection", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "_print_action_path_exercise",
+        lambda *_args, **_kwargs: None,
+    )
+
+    assert cli.main(["test", "."]) == 0
+
+    output = capsys.readouterr().out
+    expected = (
+        "Inspecting agent...",
+        "Inspection complete. ✓",
+        "Building deterministic test suite... ✓ 1 scenario",
+        "Running 1 scenario in isolated workers...",
+        "[1/1]",
+        "Finalizing report...",
+    )
+    positions = [output.index(item) for item in expected]
+    assert positions == sorted(positions)
+    assert scenario.title in output
+    assert "[1/1]" in output
+    assert output.count(" PASS") >= 1
+
+
+@pytest.mark.parametrize(
+    ("verdict", "exit_code"),
+    [
+        (Verdict.PASS, 0),
+        (Verdict.FAIL, 1),
+        (Verdict.INCONCLUSIVE, 3),
+        (Verdict.INFRA_ERROR, 2),
+    ],
+)
+def test_test_progress_renders_each_verdict_without_changing_exit_semantics(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    verdict: Verdict,
+    exit_code: int,
+) -> None:
+    scenario = build_account_support_suite()[0]
+    execution = _execution_for_verdict(scenario, verdict)
+    monkeypatch.setattr(cli, "execute_suite", _execute_with_progress(execution))
+    monkeypatch.setattr(cli, "_print_inspection", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "_print_action_path_exercise",
+        lambda *_args, **_kwargs: None,
+    )
+
+    assert cli.main(["test", "."]) == exit_code
+
+    output = capsys.readouterr().out
+    result_line = next(line for line in output.splitlines() if line.startswith("[1/1]"))
+    assert result_line.endswith(verdict.value)
+
+
+def test_test_progress_heartbeat_is_readable_without_a_tty() -> None:
+    stream = io.StringIO()
+    reporter = cli._TestProgressReporter(
+        stream=stream,
+        heartbeat_seconds=60.0,
+    )
+    reporter.start()
+    reporter.inspection_complete()
+    reporter.suite_ready(None, 2, 0, 0)
+    scenario = build_account_support_suite()[0]
+    evaluation = _execution_for_verdict(scenario, Verdict.PASS).evaluations[0]
+    reporter.case_completed(1, 2, scenario, evaluation)
+    reporter.emit_heartbeat()
+    reporter.close()
+
+    output = stream.getvalue()
+    result_position = output.index("[1/2]")
+    heartbeat_position = output.index("1 scenario still running (1/2 complete)")
+    assert result_position < heartbeat_position
+    assert "[1/2] Still running..." not in output
+    assert "\r" not in output
+    assert "\x1b" not in output
+    assert "\b" not in output
 
 
 def test_infrastructure_diagnostic_is_redacted_single_line_and_bounded(
