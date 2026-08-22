@@ -19,7 +19,7 @@ name = "agentcheck-ai"
 # fingerprint is a hash of that document. Bumping it re-identifies every
 # existing suite, baseline, and replay manifest, so treat it as a contract
 # change rather than a routine version bump.
-version = "0.1.0"
+version = "0.1.1"
 description = "Deterministic, local behavioral and safety evaluation for AI agents"
 readme = "README.md"
 license = "MIT"
