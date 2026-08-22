@@ -24,9 +24,7 @@ of their real handlers. Every executed case ends as `PASS`, `FAIL`,
 
 ## Demo
 
-[![AgentCheck terminal demo showing behavioral PASS and FAIL results](docs/assets/agentcheck-demo-poster.png)](docs/assets/agentcheck-demo.mp4)
-
-[Watch the 25-second terminal demo](docs/assets/agentcheck-demo.mp4)
+https://github.com/user-attachments/assets/3ecdf66c-0aa7-45fe-a606-72cfb9d6d5bc
 
 ## 30-second quickstart
 
