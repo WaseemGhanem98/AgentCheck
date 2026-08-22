@@ -46,6 +46,10 @@ Understand the boundary before relying on it:
   passed to a worker unless you explicitly add them.
 - **Network is denied by default.** Reaching a non-allowlisted destination is
   reported as a containment failure rather than silently permitted.
+- **The declared-tool guarantee is not a general Python sandbox.** Target
+  imports execute. Direct filesystem writes, subprocess execution, and direct
+  local-database access performed by imports or custom orchestration are outside
+  the guarantee; network denial does not prevent those local effects.
 - **Artifacts are redacted** with bounded credential redaction before being
   written or printed. Redaction is best-effort pattern matching: it is not a
   guarantee that a novel secret format will be caught. Treat run artifacts as

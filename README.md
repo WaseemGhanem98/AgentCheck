@@ -114,6 +114,24 @@ tests the wrong thing. AgentCheck refuses the version instead of guessing. The
 custom integration has no framework version to widen: preflight validates its
 small public contract directly.
 
+### SDK setup and offline runs
+
+For PydanticAI, follow the
+[self-contained setup guide](docs/pydantic-ai.md) or run the
+[credential-free worked example](examples/evaluation/pydantic_agent/README.md).
+It covers the exact supported extra, target export, fixtures and prerequisites,
+`inspect` / `generate` / `test`, and the difference between a local scripted
+model and ControlledModel.
+
+For OpenAI Agents SDK, install the verified
+`agentcheck-ai[openai-agents]` extra (`openai-agents >=0.20,<0.21`). Set
+`"controlled_model": true` in `agentcheck.json` to substitute AgentCheck's
+deterministic, neutral offline model during evaluation. It makes no provider
+request and never chooses a tool, so check the CLI's action-path coverage before
+treating a passing action case as exercised. The bundled
+[account-support example](examples/evaluation/account_agent/README.md) instead
+uses a local scripted SDK model to exercise tool calls without a provider.
+
 ## How evaluation works
 
 ```text
@@ -270,6 +288,9 @@ there is outside the declared-tool guarantee. Isolation and denied egress remain
 active, but AgentCheck does not claim they sandbox arbitrary local Python side
 effects.
 
+Network denial is not a general operating-system sandbox and does not stop
+those local effects.
+
 These are the properties the test suite is built around; see
 [CONTRIBUTING.md](CONTRIBUTING.md) for the invariants contributors must preserve.
 
@@ -313,7 +334,7 @@ These are the properties the test suite is built around; see
 ```bash
 python -m pip install -e ".[dev]"  # agentcheck-ai[dev] from this checkout
 
-python -m pytest tests -q                                   # full suite
+python -m pytest tests -q -n 2                              # full suite
 python -m pytest tests/agentcheck/test_openai_adapter.py -q  # focused
 python -m ruff check agentcheck tests scripts
 python -m mypy agentcheck

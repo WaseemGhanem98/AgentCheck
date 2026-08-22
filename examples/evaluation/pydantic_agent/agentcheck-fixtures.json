@@ -1,0 +1,12 @@
+{
+  "schema_version": "agentcheck.fixtures.v1",
+  "tools": {
+    "lookup_order": {
+      "arguments": {
+        "order_id": "order_123"
+      },
+      "user_request": "Look up order order_123 and tell me its current status."
+    }
+  },
+  "prerequisites": {}
+}

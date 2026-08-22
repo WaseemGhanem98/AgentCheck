@@ -12,10 +12,10 @@ tools during evaluation.
 
 ## Minimal contract
 
-Run `agentcheck init TARGET --adapter custom`. If the configured entrypoint does
-not exist, the command prints the following working skeleton without writing
-target source for you. This block is tested against the CLI text so the two
-cannot drift.
+Run `agentcheck init TARGET --adapter custom` (TARGET must already
+exist; `init` does not create it). If the configured entrypoint does not exist,
+the command prints the following working skeleton without writing target source
+for you. This block is tested against the CLI text so the two cannot drift.
 
 <!-- custom-agent-cli-skeleton:start -->
 ```python
@@ -50,6 +50,12 @@ class MyAgent:
 agent = MyAgent()
 ```
 <!-- custom-agent-cli-skeleton:end -->
+
+The printed starter demonstrates the integration shape, not a finished agent
+policy. Its `start()` method always calls `lookup_account` with `A-1`, so the
+first generated evaluation can contain behavioral `FAIL` results until you
+adapt the decision logic and add representative fixtures. Those results describe
+the starter's behavior; they do not mean installation failed.
 
 The configured object must expose:
 
@@ -167,6 +173,9 @@ write in that code is not converted into a fixture-backed tool call. Process
 isolation, credential removal, and socket-level egress denial contain common
 escapes, but they do not prevent arbitrary local filesystem mutations. Use this
 adapter only for trusted local code and keep side effects behind declared tools.
+
+Network denial is not a general operating-system sandbox; it does not stop
+those local effects.
 
 ## ControlledModel is unsupported
 

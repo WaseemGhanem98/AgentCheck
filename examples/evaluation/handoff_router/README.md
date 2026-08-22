@@ -25,9 +25,13 @@ agentcheck generate examples/evaluation/handoff_router
 agentcheck test examples/evaluation/handoff_router
 ```
 
+The CLI commands below verify inspection, safe reconstruction, and generated
+schema-boundary cases. They are not a CLI demonstration of the three planted
+handoff defects and may report 100% with zero action paths exercised. The
+handoff-specific behavioral scenarios live in
+`tests/agentcheck/test_example_handoff_agent.py`.
+
 `inspect` prints the reachable handoff topology. Without a frozen suite,
 `test` fails closed because the built-in `account_support_v1` suite does not
 match this target's tools; `generate` freezes schema-boundary cases for the
-merged tool surface. The handoff-specific scenarios (required/forbidden
-handoff, loop detection, fabricated success after a downstream tool error)
-are exercised by `tests/agentcheck/test_example_handoff_agent.py`.
+merged tool surface.

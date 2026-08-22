@@ -28,7 +28,13 @@ from agentcheck.fixtures import (
     FIXTURE_PACK_CONTRACT_VERSION,
     load_representative_inputs,
 )
-from agentcheck.domain import AgentSpec, Severity, Verdict, action_path_exercise
+from agentcheck.domain import (
+    AgentSpec,
+    CaseEvaluation,
+    Severity,
+    Verdict,
+    action_path_exercise,
+)
 from agentcheck.errors import ConfigurationError, ScenarioValidationError
 from agentcheck.generate.boundaries import (
     AUTHORED_REQUEST_TAG,
@@ -51,6 +57,9 @@ from agentcheck.shrink import (
 
 
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$")
+_CONSOLE_ERROR_CODE_CHARS = 80
+_CONSOLE_ERROR_MESSAGE_CHARS = 320
+_TRUNCATION_MARKER = "...[TRUNCATED]"
 
 
 def _run_id(value: str) -> str:
@@ -147,7 +156,8 @@ def _parser() -> argparse.ArgumentParser:
         description=(
             "Write an explicit local AgentCheck configuration. This command never "
             "imports or executes the target, so it is safe to run against code that "
-            "has not been reviewed yet."
+            "has not been reviewed yet. TARGET must already be an existing directory; "
+            "init does not create it."
         ),
     )
     init_parser.add_argument("target", nargs="?", default=".")
@@ -271,10 +281,13 @@ def _parser() -> argparse.ArgumentParser:
             "run a compatible frozen suite or the matching built-in suite. "
             "account_support_v1 is used only when the spec declares that suite's "
             "required tools. A supported target with no compatible suite is not "
-            "PASS; run generate or provide a frozen suite. Network access is "
-            "disabled during evaluation so a target cannot cause external side "
-            'effects; set "allow_network": true in agentcheck.json to reach a '
-            "real provider."
+            "PASS; run generate or provide a frozen suite. Declared tool calls are "
+            "simulated by AgentCheck and never reach their original handlers. "
+            "Network is denied by default, but the target remains trusted code: "
+            "direct filesystem writes, subprocess execution, and local database "
+            "access in imports or orchestration are outside the declared-tool "
+            'guarantee. Set "allow_network": true in agentcheck.json only when a '
+            "real provider is intentionally required."
         ),
     )
     test_parser.add_argument("target", nargs="?", default=".")
@@ -899,6 +912,42 @@ def _print_custom_integration_hint(source: Path) -> None:
         "Call your model inside start()/resume(), and route every declared tool "
         "request through tools.call(...), which AgentCheck simulates."
     )
+    print(
+        "This starter demonstrates the integration shape, not a finished policy. "
+        "Because start() always looks up A-1, its first generated evaluation may "
+        "contain behavioral FAIL results until you adapt the decision logic and "
+        "representative fixtures."
+    )
+
+
+def _bounded_console_diagnostic(value: str, *, max_chars: int) -> str:
+    redacted = redact_log_text(value)
+    printable = "".join(
+        character if character.isprintable() else " " for character in redacted
+    )
+    normalized = " ".join(printable.split()) or "(no diagnostic text)"
+    if len(normalized) <= max_chars:
+        return normalized
+    prefix_chars = max_chars - len(_TRUNCATION_MARKER)
+    return f"{normalized[:prefix_chars].rstrip()}{_TRUNCATION_MARKER}"
+
+
+def _print_case_evaluation(evaluation: CaseEvaluation, *, title: str) -> None:
+    print(f"{evaluation.verdict.value:<12} {title}")
+    if evaluation.verdict != Verdict.INFRA_ERROR:
+        return
+    error = evaluation.infrastructure_error
+    if error is None:
+        return
+    code = _bounded_console_diagnostic(
+        error.code,
+        max_chars=_CONSOLE_ERROR_CODE_CHARS,
+    )
+    message = _bounded_console_diagnostic(
+        error.message,
+        max_chars=_CONSOLE_ERROR_MESSAGE_CHARS,
+    )
+    print(f"{'':12} INFRA_ERROR — {code}: {message}")
 
 
 def _init_command(target: str, *, entrypoint: str, adapter: str, force: bool) -> int:
@@ -1063,7 +1112,7 @@ def _test_command(
     evaluation_by_id = {item.scenario_id: item for item in execution.evaluations}
     for scenario in execution.scenarios:
         evaluation = evaluation_by_id[scenario.scenario_id]
-        print(f"{evaluation.verdict.value:<12} {scenario.title}")
+        _print_case_evaluation(evaluation, title=scenario.title)
 
     counts: Counter[Verdict] = execution.counts
     pass_rate = execution.observed_pass_rate
@@ -1144,7 +1193,7 @@ def _replay_command(
     evaluation_by_id = {item.scenario_id: item for item in execution.evaluations}
     for scenario in execution.scenarios:
         evaluation = evaluation_by_id[scenario.scenario_id]
-        print(f"{evaluation.verdict.value:<12} {scenario.title}")
+        _print_case_evaluation(evaluation, title=scenario.title)
 
     counts: Counter[Verdict] = execution.counts
     pass_rate = execution.observed_pass_rate

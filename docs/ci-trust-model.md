@@ -12,7 +12,7 @@ version runs the cross-version suite defined in `tests/compat_manifest.py`.
 
 | | Py3.10 | Py3.11 | Py3.12 |
 |---|---|---|---|
-| Full behavioural suite (964 tests) | | | ✅ |
+| Full behavioural suite | | | ✅ |
 | Domain models, serialization, fingerprints | ✅ | ✅ | ✅ |
 | Worker / process isolation | ✅ | ✅ | ✅ |
 | ToolGateway, fail-closed, unknown tools | ✅ | ✅ | ✅ |
@@ -33,7 +33,7 @@ on, subprocess worker launch, import machinery, third-party SDK internals, and
 the `argparse` console entry point. All of those run everywhere. Pure logic over
 already-constructed objects runs once.
 
-The cross-version suite is 381 of 964 tests across 18 files. Measured on the
+The cross-version suite is selected by the compatibility manifest. Measured on the
 self-hosted runner it takes about 8 minutes per interpreter, against 21 for the
 full suite. It is not a smoke test.
 
