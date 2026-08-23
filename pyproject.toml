@@ -68,7 +68,7 @@ dev = [
     # range means a lint failure lands on whoever installs next rather than on
     # the change that caused it. These are the versions the tree is actually
     # clean against; widening the range is a deliberate act with a diff attached.
-    "mypy>=1.17,<1.18",
+    "mypy>=2.3.1,<2.4",
     "pytest>=8.0,<10.0",
     "pytest-xdist>=3.6,<4",
     # scripts/check_workflow_safety.py parses the workflows it audits.
