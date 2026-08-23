@@ -14,15 +14,14 @@ build-backend = "setuptools.build_meta"
 #
 #     pip install 'agentcheck-ai[all]'    import agentcheck    agentcheck --help
 name = "agentcheck-ai"
-# This version is not only release metadata. It is recorded as
-# `provenance.generator_version` inside every frozen suite, and the suite
-# fingerprint is a hash of that document. Bumping it re-identifies every
-# existing suite, baseline, and replay manifest, so treat it as a contract
-# change rather than a routine version bump.
+# This release version is also recorded as `provenance.generator_version` in
+# newly frozen suites and participates in their fingerprints. Existing suites
+# remain loadable, but a routine package bump can re-identify otherwise-equivalent
+# newly generated suites. Separating those concepts is known technical debt.
 version = "0.1.1"
-description = "Deterministic, local behavioral and safety evaluation for AI agents"
+description = "Behavioral testing for AI agents"
 readme = "README.md"
-license = "MIT"
+license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Waseem Ghanem" }]
 requires-python = ">=3.10"

@@ -1,7 +1,7 @@
 # Deliberately flawed multi-agent handoff router
 
-This OpenAI Agents SDK target is the deterministic Phase 5A handoff fixture
-for AgentCheck. Three module-level agents (`triage_agent`, `billing_agent`,
+This OpenAI Agents SDK target is a deterministic handoff fixture for
+AgentCheck. Three module-level agents (`triage_agent`, `billing_agent`,
 `docs_agent`) are connected only by static `handoff()` factory edges with no
 callbacks, payload schemas, input filters, or dynamic enablement — exactly the
 surface AgentCheck can prove safe and reconstruct.

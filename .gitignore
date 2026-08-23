@@ -34,8 +34,15 @@ htmlcov/
 # paths and captured model output, and are never committed.
 .agentcheck/
 *.log
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
+*.sqlite-journal
+*.sqlite-shm
+*.sqlite-wal
 *.tmp
 *.swp
 *.swo

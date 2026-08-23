@@ -1,4 +1,4 @@
-"""AgentCheck: deterministic, local evaluation for AI agents."""
+"""AgentCheck: behavioral testing for AI agents."""
 
 from .config import AgentCheckConfig, load_config
 from .custom import CustomAgentProtocol, ToolRuntime, TurnResult

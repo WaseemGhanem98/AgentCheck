@@ -5,45 +5,51 @@ body:
   - type: markdown
     attributes:
       value: |
-        Please do not paste API keys, provider payloads, or customer data.
-        Artifacts under `.agentcheck/` can contain prompts, model output and
-        absolute paths — read before pasting.
-
-        For a security vulnerability, do not open an issue. See SECURITY.md.
+        Do not paste API keys, provider payloads, customer data, or unreviewed
+        `.agentcheck/` artifacts. For a security vulnerability, do not open an
+        Issue; use the private reporting path in SECURITY.md.
   - type: textarea
     id: what
     attributes:
-      label: What happened
-      description: What you expected, and what you got instead.
+      label: What happened?
+      description: What did you expect, and what happened instead?
     validations:
       required: true
   - type: dropdown
-    id: framework
+    id: integration
     attributes:
-      label: Framework adapter
-      options: ["OpenAI Agents SDK", "PydanticAI", "Neither / not applicable"]
+      label: Integration
+      options:
+        - OpenAI Agents SDK
+        - PydanticAI
+        - Custom Python agent
+        - Not integration-specific
     validations:
       required: true
   - type: input
     id: versions
     attributes:
       label: Versions
-      description: AgentCheck version, framework SDK version, Python version.
-      placeholder: "agentcheck 0.1.0, openai-agents 0.20.0, Python 3.12"
+      description: Include `agentcheck --version`, Python, and the framework SDK version when applicable.
     validations:
       required: true
   - type: dropdown
     id: verdict
     attributes:
       label: Verdict involved
-      description: INFRA_ERROR usually means the harness failed, not your agent.
-      options: ["PASS", "FAIL", "INCONCLUSIVE", "INFRA_ERROR", "No verdict / command failed"]
+      description: INFRA_ERROR is a harness or setup error, not behavioral FAIL.
+      options:
+        - PASS
+        - FAIL
+        - INCONCLUSIVE
+        - INFRA_ERROR
+        - No verdict / command failed
     validations:
       required: true
   - type: textarea
-    id: repro
+    id: reproduction
     attributes:
-      label: Reproduction
-      description: The command you ran and, if possible, a minimal target.
+      label: Minimal reproduction
+      description: Include the command and a minimal synthetic target or fixture when possible.
     validations:
       required: true

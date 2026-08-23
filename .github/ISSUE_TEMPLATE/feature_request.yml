@@ -1,0 +1,41 @@
+name: Feature request
+description: Propose a concrete improvement to AgentCheck
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security vulnerabilities belong in GitHub Private Vulnerability
+        Reporting, not in this form. Please do not include credentials or
+        production data.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What developer or evaluation problem should AgentCheck solve?
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful outcome, not an implementation mandate.
+    validations:
+      required: true
+  - type: dropdown
+    id: integration
+    attributes:
+      label: Integration
+      options:
+        - Framework-neutral
+        - OpenAI Agents SDK
+        - PydanticAI
+        - Custom Python agent
+        - Not sure
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and compatibility impact
+      description: Note any expected impact on simulation, isolation, schemas, fingerprints, replay, or verdicts.

@@ -104,8 +104,9 @@ and none is quoted here or anywhere else.** The benchmark remains unfinished.
 
 Deterministic:
 
-- scenario generation, suite freezing, and fingerprinting — the same target,
-  config, and seed freeze a byte-identical suite;
+- scenario generation, suite freezing, and fingerprinting — the same target
+  location, configuration, seed, and generator version freeze a byte-identical
+  suite;
 - tool simulation, fixture and fault injection;
 - oracle evaluation and verdict assignment given the same recorded inputs;
 - offline evaluation through the controlled model, which is why the bundled

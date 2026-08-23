@@ -1,0 +1,10 @@
+* @WaseemGhanem98
+/agentcheck/ @WaseemGhanem98
+/.github/ @WaseemGhanem98
+/pyproject.toml @WaseemGhanem98
+/agentcheck/__init__.py @WaseemGhanem98
+/MANIFEST.in @WaseemGhanem98
+/LICENSE @WaseemGhanem98
+/SECURITY.md @WaseemGhanem98
+/scripts/check_distribution.py @WaseemGhanem98
+/scripts/check_workflow_safety.py @WaseemGhanem98

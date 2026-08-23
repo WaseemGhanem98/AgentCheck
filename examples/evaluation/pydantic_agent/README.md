@@ -11,12 +11,12 @@ reached, the evaluation stops. During evaluation AgentCheck rebuilds the tool
 with an AgentCheck-owned invoker, and `ToolGateway` supplies the simulated
 result from the frozen scenario.
 
-## Install from the current source checkout
+## Install
 
-AgentCheck is not published to PyPI yet. From the AgentCheck repository root:
+Install AgentCheck and the verified PydanticAI adapter from PyPI:
 
 ```bash
-python -m pip install "agentcheck-ai[pydantic-ai] @ file://$PWD"
+python -m pip install "agentcheck-ai[pydantic-ai]"
 ```
 
 This installs the verified PydanticAI range:
