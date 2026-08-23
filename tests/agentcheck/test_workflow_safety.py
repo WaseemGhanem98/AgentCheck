@@ -150,7 +150,7 @@ def test_public_trust_model_is_discoverable() -> None:
         assert required in text, f"CI trust model does not mention {required!r}"
 
 
-def test_full_pytest_commands_keep_two_workers() -> None:
+def test_process_heavy_pytest_commands_are_serial_on_hosted_runners() -> None:
     ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
-    assert "tests -q -n 2" in ci
-    assert '"${compat[@]}" -q -n 2' in ci
+    assert "tests -q -n 1" in ci
+    assert '"${compat[@]}" -q -n 1' in ci

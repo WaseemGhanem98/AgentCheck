@@ -88,9 +88,11 @@ BUILT_IN_FINGERPRINTS_SEED_7 = {
 }
 
 # A generated suite for a target with no confirmation-required tool declares no
-# follow-up anywhere, so its whole document must stay byte-identical.
+# follow-up anywhere, so its whole document stays byte-identical within the
+# current generator version. The package version is currently part of suite
+# provenance, so the intentional 0.1.1 release bump moved this pin.
 NO_FOLLOWUP_SUITE_FINGERPRINT = (
-    "sha256:18c309ac4919d4b4db082dd2bd8dac4db3a2f60204bcf3dee34f99e9b6ba3f64"
+    "sha256:70c4e36947c5f188831517afbbdd7d567f06173730e4b46dd116ca4e87118819"
 )
 # Likewise for a scenario embedded in a parent contract: a replay manifest over
 # the built-in suite, digested by the tree before ``followup_turns`` existed.

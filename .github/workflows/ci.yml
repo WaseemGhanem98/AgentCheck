@@ -119,15 +119,16 @@ jobs:
 
       - name: Test
         # The primary interpreter runs everything; the others run the
-        # compatibility manifest. Keep pytest at -n 2 and keep product
-        # wall-clock budgets unchanged.
+        # compatibility manifest. AgentCheck scenarios already run in child
+        # processes, so serialize these process-heavy pytest invocations on
+        # standard hosted runners. Product wall-clock budgets stay unchanged.
         run: |
           if [ "${{ matrix.python-version }}" = "$PRIMARY_PYTHON" ]; then
-            python -m pytest -p no:cacheprovider tests -q -n 2
+            python -m pytest -p no:cacheprovider tests -q -n 1
           else
             mapfile -t compat < <(python tests/compat_manifest.py)
             echo "cross-version suite: ${#compat[@]} files"
-            python -m pytest -p no:cacheprovider "${compat[@]}" -q -n 2
+            python -m pytest -p no:cacheprovider "${compat[@]}" -q -n 1
           fi
 
   checks:

@@ -128,8 +128,11 @@ def main() -> int:
         ci = yaml.safe_load(ci_path.read_text(encoding="utf-8"))
         if _triggers(ci) != {"push", "pull_request"}:
             failures.append("ci.yml must run for push and pull_request only")
-        if "-n 2" not in ci_path.read_text(encoding="utf-8"):
-            failures.append("ci.yml must retain pytest -n 2")
+        ci_text = ci_path.read_text(encoding="utf-8")
+        if "tests -q -n 1" not in ci_text:
+            failures.append("ci.yml must serialize the process-heavy full suite")
+        if '"${compat[@]}" -q -n 1' not in ci_text:
+            failures.append("ci.yml must serialize the compatibility suite")
 
         jobs = ci.get("jobs") or {}
         scope = jobs.get("scope") or {}
@@ -179,7 +182,6 @@ def main() -> int:
         if scope_options.get("fetch-depth") != 0:
             failures.append("ci.yml:scope checkout must fetch complete comparison history")
 
-        ci_text = ci_path.read_text(encoding="utf-8")
         if "needs.scope.outputs.expensive == 'false'" not in ci_text:
             failures.append("ci.yml must run focused checks for documentation-only changes")
 

@@ -19,13 +19,14 @@ credentials. `scripts/check_workflow_safety.py` enforces these repository-side
 controls.
 
 For code and runtime changes, the test matrix runs the full suite on Python 3.12
-and the compatibility manifest on Python 3.10 and 3.11, always with
-`pytest -n 2`. A fail-closed scope check skips that matrix only when every
-changed path is Markdown or under `docs/assets/`. The documentation-only path
-still runs workflow-safety and secret checks plus focused documentation
-consistency tests. Missing or unresolvable comparison SHAs select full
-validation. Product scenario timeouts and wall-clock budgets are not widened
-for CI.
+and the compatibility manifest on Python 3.10 and 3.11. Those process-heavy
+invocations use one pytest worker on standard hosted runners because AgentCheck
+scenarios already execute in child processes. A fail-closed scope check skips
+that matrix only when every changed path is Markdown or under `docs/assets/`.
+The documentation-only path still runs workflow-safety and secret checks plus
+focused documentation consistency tests. Missing or unresolvable comparison
+SHAs select full validation. Product scenario timeouts and wall-clock budgets
+are not widened for CI.
 
 ## Self-hosted runners
 
