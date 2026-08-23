@@ -151,6 +151,18 @@ def test_public_trust_model_is_discoverable() -> None:
 
 
 def test_process_heavy_pytest_commands_are_serial_on_hosted_runners() -> None:
+    workflow = _load(WORKFLOWS / "ci.yml")
+    assert workflow["jobs"]["tests"]["timeout-minutes"] == 60
     ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
     assert "tests -q -n 1" in ci
     assert '"${compat[@]}" -q -n 1' in ci
+
+
+def test_dependabot_preserves_supported_python_dependency_ranges() -> None:
+    config = _load(REPOSITORY_ROOT / ".github" / "dependabot.yml")
+    pip_updates = next(
+        update
+        for update in config["updates"]
+        if update["package-ecosystem"] == "pip"
+    )
+    assert pip_updates["versioning-strategy"] == "increase-if-necessary"
