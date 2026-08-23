@@ -51,7 +51,7 @@ dependencies = [
 # Both gates are pinned to a single verified minor for that reason. They are
 # separate extras so evaluating one framework never installs the other.
 openai-agents = [
-    "openai-agents>=0.20,<0.21",
+    "openai-agents>=0.20,<0.23",
     "websockets>=15,<16",
 ]
 pydantic-ai = [
