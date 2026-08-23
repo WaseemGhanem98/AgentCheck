@@ -20,7 +20,6 @@ import zipfile
 FORBIDDEN = (
     (re.compile(r"(^|/)\.env($|\.)"), "environment file"),
     (re.compile(r"(^|/)\.agentcheck/"), "local evaluation run artifacts"),
-    (re.compile(r"(^|/)agentlens(_sdk|_collector)?/"), "private AgentLens source"),
     (re.compile(r"(^|/)migrations/"), "database migrations"),
     (re.compile(r"(^|/)\.venv/|(^|/)venv/"), "virtual environment"),
     (re.compile(r"(^|/)__pycache__/|\.pyc$"), "bytecode cache"),
@@ -39,6 +38,31 @@ FORBIDDEN = (
 # underscores. Matching that shape rather than a literal keeps this check honest
 # if either name changes again.
 WHEEL_ALLOWED = re.compile(r"^(agentcheck/|[A-Za-z0-9_.]+-[^/]*\.dist-info/)")
+
+# An sdist legitimately carries contributor material as well as the package,
+# but a new top-level directory must be reviewed. This generic allowlist catches
+# accidental sibling/private packages without naming or depending on any host
+# repository.
+SDIST_ALLOWED_ROOTS = frozenset(
+    {
+        ".github",
+        "AGENTS.md",
+        "CONTRIBUTING.md",
+        "LICENSE",
+        "MANIFEST.in",
+        "PKG-INFO",
+        "README.md",
+        "SECURITY.md",
+        "agentcheck",
+        "agentcheck_ai.egg-info",
+        "docs",
+        "examples",
+        "pyproject.toml",
+        "scripts",
+        "setup.cfg",
+        "tests",
+    }
+)
 
 
 def _members(path: pathlib.Path) -> list[str]:
@@ -68,8 +92,15 @@ def main() -> int:
             for pattern, label in FORBIDDEN:
                 if pattern.search(name):
                     failures.append(f"{artifact.name}: {name} ({label})")
-            if artifact.suffix == ".whl" and not WHEEL_ALLOWED.match(name):
-                failures.append(f"{artifact.name}: {name} (not part of the package)")
+            if artifact.suffix == ".whl":
+                if not WHEEL_ALLOWED.match(name):
+                    failures.append(f"{artifact.name}: {name} (not part of the package)")
+            else:
+                root = name.split("/", 1)[0]
+                if root not in SDIST_ALLOWED_ROOTS:
+                    failures.append(
+                        f"{artifact.name}: {name} (unexpected sdist top-level path)"
+                    )
 
     if failures:
         print("\nFAIL: distributions contain files that must not ship:")

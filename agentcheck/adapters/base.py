@@ -33,10 +33,8 @@ class AdapterRuntimeError(AdapterError):
 def missing_extra_message(subject: str, extra: str) -> str:
     """Name the install command that actually works for this installation.
 
-    ``agentcheck`` is published on its own, but the same package is also still
-    shipped inside the private AgentLens distribution during the split. Telling
-    a developer to install an extra of a distribution they do not have is worse
-    than saying nothing, so the providing distribution is read at runtime.
+    Import and distribution names need not match, so the providing distribution
+    is discovered from installed metadata instead of being guessed.
     """
 
     distribution = "agentcheck"

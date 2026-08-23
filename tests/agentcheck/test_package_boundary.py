@@ -1,21 +1,32 @@
-"""AgentCheck ships as its own distribution, so it may not import its host repo.
+"""AgentCheck may import only its public runtime dependency surface.
 
-AgentCheck is developed alongside AgentLens but released separately and
-publicly. A single ``from agentlens_sdk...`` line is enough to make the public
-package unimportable for anyone who installed it from PyPI, and it would not
-fail here, because the private sources are on the path during development. The
-static scan below is the thing that fails instead.
+A private sibling package can be importable on a maintainer's machine and absent
+from the published distribution. Static allowlisting makes that error fail in
+the repository instead of after installation from PyPI.
 """
 
 from __future__ import annotations
 
 import ast
 import pathlib
+import sys
 
 import pytest
 
 
-PRIVATE_ROOTS = ("agentlens", "agentlens_sdk", "agentlens_collector")
+PUBLIC_IMPORT_ROOTS = frozenset(
+    {
+        "agentcheck",
+        "agents",
+        "jsonschema",
+        "openai",
+        "pydantic",
+        "pydantic_ai",
+        "referencing",
+        "requests",
+        "typing_extensions",
+    }
+)
 PACKAGE_ROOT = pathlib.Path(__file__).resolve().parents[2] / "agentcheck"
 
 
@@ -31,55 +42,16 @@ def _imported_roots(tree: ast.AST) -> set[str]:
         if isinstance(node, ast.Import):
             roots.update(alias.name.split(".", 1)[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
-            # A relative import cannot escape the package, so only absolute
-            # ones can name a private distribution.
             if node.level == 0 and node.module:
                 roots.add(node.module.split(".", 1)[0])
     return roots
 
 
 @pytest.mark.parametrize("source", _python_sources(), ids=lambda path: path.name)
-def test_agentcheck_never_imports_private_agentlens_modules(
-    source: pathlib.Path,
-) -> None:
+def test_agentcheck_imports_only_public_runtime_modules(source: pathlib.Path) -> None:
     tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
-    forbidden = _imported_roots(tree).intersection(PRIVATE_ROOTS)
-    assert not forbidden, (
-        f"{source.relative_to(PACKAGE_ROOT.parent)} imports {sorted(forbidden)}; "
-        "AgentCheck must not depend on private AgentLens code"
+    unexpected = _imported_roots(tree) - sys.stdlib_module_names - PUBLIC_IMPORT_ROOTS
+    assert not unexpected, (
+        f"{source.relative_to(PACKAGE_ROOT.parent)} imports undeclared module root(s) "
+        f"{sorted(unexpected)}; published AgentCheck must stand alone"
     )
-
-
-def test_agentcheck_imports_without_any_private_module_available() -> None:
-    """Import the package the way a PyPI installation would: with nothing else."""
-
-    import subprocess
-    import sys
-    import textwrap
-
-    program = textwrap.dedent(
-        f"""
-        import importlib, sys
-
-        class Blocked:
-            def find_spec(self, name, path=None, target=None):
-                if name.split(".", 1)[0] in {PRIVATE_ROOTS!r}:
-                    raise ImportError(f"private module {{name}} is not installable")
-                return None
-
-        sys.meta_path.insert(0, Blocked())
-        for module in ("agentcheck", "agentcheck.cli", "agentcheck.application",
-                       "agentcheck.privacy", "agentcheck.redaction",
-                       "agentcheck.adapters"):
-            importlib.import_module(module)
-        print("ok")
-        """
-    )
-    result = subprocess.run(
-        [sys.executable, "-c", program],
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip().endswith("ok")

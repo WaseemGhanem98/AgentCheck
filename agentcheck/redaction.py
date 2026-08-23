@@ -1,15 +1,9 @@
 """Credential redaction and JSON-safe sanitization for evaluation artifacts.
 
 These primitives bound and redact untrusted text before it reaches a report, a
-replay manifest, or the console. They are deliberately free of any transport,
-storage, or telemetry concern so that evaluation has no dependency on an
-observability backend.
-
-The rules here are byte-compatible with the AgentLens SDK's redaction layer,
-which is where they originated. Both products need the same answer for "is this
-string a credential", and an evaluation artifact that redacted less than the
-telemetry path would be a regression. Any change to a pattern, a key rule, or a
-budget below changes what a stored artifact looks like, so treat them as a
+replay manifest, or the console. They are deliberately free of transport,
+storage, and telemetry concerns. Any change to a pattern, key rule, or budget
+below changes what a stored artifact looks like, so treat the rules as a
 serialized contract rather than as internal helpers.
 """
 
@@ -44,7 +38,7 @@ _MAX_SANITIZE_STRING_CHARS = 8_192
 _MAX_SANITIZE_KEY_CHARS = 256
 _TOKEN_USAGE_KEYS = frozenset({"tokens_prompt", "tokens_completion", "tokens_total"})
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]{8,}")
-_AGENTLENS_KEY_RE = re.compile(r"\bal_[A-Za-z0-9_-]{8,}\b")
+_PRODUCT_TOKEN_RE = re.compile(r"\bal_[A-Za-z0-9_-]{8,}\b")
 _PROVIDER_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
 _AUTH_HEADER_RE = re.compile(
     r"(?im)(\b(?:proxy[-_ ]?authorization|authorization|cookie|set[-_ ]?cookie)"
@@ -64,7 +58,7 @@ def redact_text(value: str) -> str:
     # value through the line boundary before applying narrower token patterns.
     text = _AUTH_HEADER_RE.sub(r"\1[REDACTED]", value)
     text = _BEARER_RE.sub("Bearer [REDACTED]", text)
-    text = _AGENTLENS_KEY_RE.sub("[REDACTED]", text)
+    text = _PRODUCT_TOKEN_RE.sub("[REDACTED]", text)
     text = _PROVIDER_KEY_RE.sub("[REDACTED]", text)
     return _SECRET_ASSIGNMENT_RE.sub(
         lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",

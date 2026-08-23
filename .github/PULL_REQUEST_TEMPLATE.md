@@ -1,33 +1,19 @@
-## What this changes
+## What and why
 
-<!-- What and why. Prefer the reason over the diff summary. -->
+<!-- Describe the problem and the smallest change that solves it. -->
 
-## Safety invariants
+## Safety and compatibility
 
-AgentCheck's value is that its verdicts can be trusted, so these are checked on
-every PR. Tick what applies, and say so plainly if something does not.
+- [ ] Original declared tool handlers still never execute during simulated evaluation.
+- [ ] Unknown tools still fail closed; no plausible result is synthesized.
+- [ ] Worker isolation, network denial, source integrity, and verdict semantics are unchanged or explicitly reviewed.
+- [ ] No safety or wall-clock budget was widened.
+- [ ] Fingerprint, schema, protocol, and stored-artifact compatibility impact is stated.
+- [ ] Replay is not described as deterministic provider-output replay.
 
-- [ ] No original target tool handler executes during a simulated evaluation.
-- [ ] Unknown tools still fail closed — no synthesized tool results.
-- [ ] No real mutations; only the simulated world changes.
-- [ ] Worker isolation and the network-denied default are intact.
-- [ ] `INCONCLUSIVE` / `INFRA_ERROR` are not collapsed into `PASS`.
-- [ ] No safety or wall-clock budget was widened to make CI pass.
+## Validation
 
-## Contracts
+<!-- List focused commands and results. Tests must be offline and credential-free. -->
 
-- [ ] No fingerprint, serialized contract, or stored artifact shape changed.
-      *(If one did, describe the compatibility impact — suite fingerprints
-      include the generator version, so they are easy to move by accident.)*
-
-## Adapters (skip if untouched)
-
-- [ ] Interception happens **before** the original handler.
-- [ ] The framework version gate is unchanged, or the widening is backed by
-      evidence that the new version was actually verified.
-- [ ] A missing optional extra raises an actionable `AdapterDependencyError`.
-
-## Verification
-
-<!-- Commands you ran and what they reported. Tests must be offline,
-     credential-free, and cost nothing. -->
+- Provider requests: 0
+- API spend: $0

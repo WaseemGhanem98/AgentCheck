@@ -8,10 +8,10 @@ never called during simulated evaluation.
 
 ## Install the verified version
 
-AgentCheck is not published to PyPI yet. From an AgentCheck source checkout:
+Install the verified adapter extra from PyPI:
 
 ```bash
-python -m pip install "agentcheck-ai[pydantic-ai] @ file://$PWD"
+python -m pip install "agentcheck-ai[pydantic-ai]"
 ```
 
 The extra installs `pydantic-ai-slim >=2.32,<2.33`. AgentCheck deliberately
