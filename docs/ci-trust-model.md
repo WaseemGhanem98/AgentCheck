@@ -30,24 +30,20 @@ are not widened for CI.
 
 ## Self-hosted runners
 
-A personal self-hosted runner must not remain attached when this repository is
-public. A fork can propose a workflow that targets any repository-level runner;
-job guards, CODEOWNERS, and branch rules operate too late to prevent that
-pre-merge execution. The repository's personal-account ownership also provides
-no organization runner group that can restrict a runner to a selected trusted
-workflow.
+No self-hosted runner is registered with this public repository, and public
+workflows must remain GitHub-hosted. A fork can propose a workflow that targets
+any repository-level runner; job guards, CODEOWNERS, and branch rules operate
+too late to prevent that pre-merge execution.
 
-Before changing visibility, remove the repository-level self-hosted runner under
-**Settings → Actions → Runners**. If trusted self-hosted execution is needed in
-the future, move the repository to an organization and use an isolated ephemeral
-runner group limited to selected repositories and a trusted workflow pinned to
-`refs/heads/main`. Do not rely on a YAML `if` condition alone.
+If a repository-level self-hosted runner is ever attached accidentally, remove
+it under **Settings → Actions → Runners**. Do not rely on a YAML `if`
+condition to protect a personal machine from untrusted pull-request code.
 
 ## Fork approval and secrets
 
-After the repository is public, set **Settings → Actions → General → Approval for
-running fork pull request workflows** to require approval for all external
-contributors. Review workflow changes before approving a run. This is
+Set **Settings → Actions → General → Approval for running fork pull request
+workflows** to require approval for all external contributors. Review workflow
+changes before approving a run. This is
 defense-in-depth; GitHub-hosted isolation, read-only permissions, and the absence
 of secrets are still required.
 

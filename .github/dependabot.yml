@@ -4,6 +4,10 @@ updates:
     directory: "/"
     schedule:
       interval: monthly
+    # This is a library with tested compatibility ranges, not an application
+    # lockfile. Do not raise a supported minimum when the declared range already
+    # permits the newly released version.
+    versioning-strategy: increase-if-necessary
     open-pull-requests-limit: 5
     labels:
       - dependencies
