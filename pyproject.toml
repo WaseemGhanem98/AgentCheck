@@ -52,7 +52,7 @@ dependencies = [
 # separate extras so evaluating one framework never installs the other.
 openai-agents = [
     "openai-agents>=0.20,<0.21",
-    "websockets>=15,<16",
+    "websockets>=15,<17",
 ]
 pydantic-ai = [
     "pydantic-ai-slim>=2.32,<2.33",
