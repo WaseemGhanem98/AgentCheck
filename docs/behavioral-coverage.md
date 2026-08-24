@@ -48,6 +48,13 @@ duplicate-action behavior. Retry coverage similarly accounts for the number of
 reachable configured outcomes, fixture priority and ambiguity, declared input
 schemas, and scenario resource budgets.
 
+A simulated mutation bounds reach without hiding it. A fixture that changes
+simulated world state is itself controlled, so it supports coverage of its own
+outcome; the invocation after it is not counted, because that one depends on
+world state this analysis does not evaluate. A state-changing success path is
+therefore still `COVERED`, while a duplicate attempt behind the same mutation
+stays `PARTIAL`.
+
 Prerequisite relationships are not inferred from tool or fixture names in
 arbitrary custom scenarios. The generator convention is recognized only with a
 known generated-action source tag, exactly one explicit `tool:<name>` focal
@@ -113,6 +120,14 @@ mandatory artifact redaction or truncation losslessly are reported
 `UNKNOWN`, never `COVERED`. The normalized spec ID is a display/source hint,
 not proof of semantic identity; when full source inputs are available,
 verification re-derives coverage from those inputs.
+
+Coverage never aborts generation over its own limits. A repeated declared tool
+name makes tool identity ambiguous, so no definition under that name is
+authoritative and every subject bound to it is `UNKNOWN`; `ToolGateway`
+independently refuses to execute such a target. An input schema this analysis
+cannot evaluate offline — an unresolvable local reference, for instance — yields
+no controlled reach rather than an escaping error, so the affected behavior is
+reported missing rather than covered.
 
 For a stored selected run, embedded coverage can retain the digest of the full
 reference universe. The loader can verify the coverage checksum and surviving
