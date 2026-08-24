@@ -151,6 +151,16 @@ The CLI prints the same family counts and uncovered subjects after `generate`
 and `test`. Collections are bounded before they reach the artifact boundary;
 omitted-item counts remain explicit.
 
+## Suite identity is a source binding
+
+The recorded `suite_fingerprint` is the run's own record of which frozen suite
+it executed. AgentCheck binds a stored run to a suite file only when that
+fingerprint matches: regenerating a suite keeps the same `spec_id` while
+changing its cases, seed, and policy packs, so matching on `spec_id` alone
+would let a later document inherit provenance the run never had. A run whose
+suite identity is unrecorded is left unbound rather than matched to whatever
+happens to be on disk.
+
 ## Compatibility
 
 Behavioral coverage is derived report metadata. It adds no field to `Scenario`,

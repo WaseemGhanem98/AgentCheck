@@ -7,6 +7,7 @@ never makes a network call.
 
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import re
@@ -174,7 +175,15 @@ def load_stored_run(
         filename="runs.jsonl",
     )
     findings = _load_findings(directory / "findings.json")
-    frozen = _optional_frozen_suite(root, config, spec)
+    frozen = _optional_frozen_suite(
+        root,
+        config,
+        spec,
+        # The run's own record of which suite it executed. A run that used no
+        # frozen suite, and a run written before that identity was recorded,
+        # both leave this None and stay unbound.
+        recorded_fingerprint=behavioral_coverage.suite_fingerprint,
+    )
     return LoadedRun(
         root=root,
         config=config,
@@ -202,9 +211,11 @@ def render_stored_run(
 ) -> StoredReport:
     loaded = load_stored_run(target, run_id=run_id, latest=latest)
     reviews = load_reviews_for_run(loaded.root, loaded.config, loaded.run_id)
-    # This configured frozen suite may postdate the stored run. It remains
-    # useful display metadata, but must not become a new source binding after
-    # the loader has verified coverage against the persisted artifacts.
+    # The loader has already verified coverage against the persisted artifacts,
+    # and any attached frozen suite is the one this run recorded executing.
+    # What a stored run cannot supply is the cases selection discarded before
+    # persistence, so the complete requirement universe is not reconstructable
+    # here and must not be demanded again.
     html = render_report(
         run_id=loaded.run_id,
         target=str(loaded.root),
@@ -327,9 +338,34 @@ def _report_destination(loaded: LoadedRun, out: str | None) -> Path:
     return destination
 
 
+def _digest_equal(left: str, right: str) -> bool:
+    left_bytes = left.encode("utf-8")
+    right_bytes = right.encode("utf-8")
+    if len(left_bytes) != len(right_bytes):
+        hmac.compare_digest(left_bytes, left_bytes)
+        return False
+    return hmac.compare_digest(left_bytes, right_bytes)
+
+
 def _optional_frozen_suite(
-    root: Path, config: AgentCheckConfig, spec: AgentSpec
+    root: Path,
+    config: AgentCheckConfig,
+    spec: AgentSpec,
+    *,
+    recorded_fingerprint: str | None,
 ) -> FrozenSuite | None:
+    """Return the configured suite only when this run recorded executing it.
+
+    The configured file can postdate the run: regenerating a suite keeps the
+    same ``spec_id`` while changing its cases, seed, and policy packs. Binding
+    on ``spec_id`` alone let a baseline claim suite provenance the run never
+    had, and attached another suite's case lineage to this run's scenarios.
+    A run whose suite identity is unrecorded is left unbound rather than
+    matched to whatever happens to be on disk.
+    """
+
+    if recorded_fingerprint is None:
+        return None
     try:
         configured = configured_frozen_suite(root, config)
     except ConfigurationError:
@@ -338,6 +374,8 @@ def _optional_frozen_suite(
         return None
     _, frozen = configured
     if frozen.spec_id != spec.spec_id:
+        return None
+    if not _digest_equal(frozen.fingerprint, recorded_fingerprint):
         return None
     return frozen
 

@@ -14,6 +14,16 @@ from agentcheck.baseline import (
     format_comparison,
 )
 from agentcheck.baseline.build import baseline_from_loaded
+from agentcheck.coverage import analyze_behavioral_coverage
+from agentcheck.generate import (
+    DEFAULT_SUITE_FILENAME,
+    CaseLineage,
+    CaseOrigin,
+    FrozenCase,
+    FrozenSuite,
+    write_frozen_suite,
+)
+from agentcheck.generate.suite import GeneratorProvenance
 from agentcheck.baseline.service import check_baseline, create_baseline
 from agentcheck.cli import main
 from agentcheck.domain import (
@@ -1103,3 +1113,81 @@ def test_cli_help_documents_no_execution(capsys: pytest.CaptureFixture[str]) -> 
     assert "never import the target" in help_text
     assert "never spawn a worker" in help_text
     assert "never implicitly accepted" in help_text
+
+
+def _write_frozen_suite(
+    root: Path, spec: AgentSpec, scenario: Scenario, *, seed: int
+) -> str:
+    suite = FrozenSuite(
+        spec_id=spec.spec_id,
+        seed=seed,
+        provenance=GeneratorProvenance(
+            generator="test", generator_version="1", sources=("test",)
+        ),
+        cases=(
+            FrozenCase(
+                scenario=scenario, lineage=CaseLineage(origin=CaseOrigin.BUILT_IN)
+            ),
+        ),
+    )
+    write_frozen_suite(root / DEFAULT_SUITE_FILENAME, suite, force=True)
+    return suite.fingerprint
+
+
+def test_a_regenerated_suite_never_supplies_another_runs_provenance(
+    tmp_path: Path,
+) -> None:
+    # Regenerating a suite keeps the same spec_id while changing its cases and
+    # seed. A baseline is a trusted CI document, so it must never inherit the
+    # identity of a suite the run it snapshots did not execute.
+    root = tmp_path / "target"
+    root.mkdir()
+    scenario = build_account_support_suite(seed=SEED)[0]
+    spec = _spec()
+    directory = _write_run(
+        root, "run-a", [(scenario, _pass_evaluation(scenario.scenario_id, "r1"))]
+    )
+    executed = _write_frozen_suite(root, spec, scenario, seed=SEED)
+
+    summary_path = directory / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["behavioral_coverage"] = analyze_behavioral_coverage(
+        spec, (scenario,), suite_fingerprint=executed
+    ).model_dump(mode="json")
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    bound = baseline_from_loaded(load_stored_run(root, run_id="run-a"))
+    assert bound.suite_fingerprint == executed
+
+    # The same run, after the suite on disk was regenerated.
+    replaced = _write_frozen_suite(root, spec, scenario, seed=SEED + 1)
+    assert replaced != executed
+
+    unbound = baseline_from_loaded(load_stored_run(root, run_id="run-a"))
+    assert unbound.suite_fingerprint is None
+    assert unbound.suite_id is None
+    assert unbound.suite_fingerprint != replaced
+    # The snapshot itself is unchanged; only the unearned provenance is gone.
+    assert unbound.cases == bound.cases
+
+
+def test_a_run_without_recorded_suite_identity_stays_unbound(
+    tmp_path: Path,
+) -> None:
+    # A summary written before suite identity was recorded cannot show which
+    # suite ran, so it is left unbound rather than matched to whatever happens
+    # to be on disk.
+    root = tmp_path / "target"
+    root.mkdir()
+    scenario = build_account_support_suite(seed=SEED)[0]
+    spec = _spec()
+    _write_run(
+        root, "run-legacy", [(scenario, _pass_evaluation(scenario.scenario_id, "r1"))]
+    )
+    _write_frozen_suite(root, spec, scenario, seed=SEED)
+
+    loaded = load_stored_run(root, run_id="run-legacy")
+
+    assert loaded.behavioral_coverage.suite_fingerprint is None
+    assert loaded.frozen_suite is None
+    assert baseline_from_loaded(loaded).suite_fingerprint is None
