@@ -672,6 +672,22 @@ def _evaluate_trajectory(builder: _EvaluationBuilder, constraint: TrajectoryCons
         data.update({"model_turns": turns, "maximum": maximum})
     elif constraint.kind == TrajectoryConstraintKind.ORDERING:
         required_before = constraint.parameters.get("required_before")
+        if not isinstance(tool_name, str) or not tool_name:
+            # Without a dependent tool every attempt in the run would be
+            # treated as the call under test, including the prerequisite's own.
+            builder.add_assertion(
+                constraint.criterion_id,
+                constraint.description,
+                Verdict.INCONCLUSIVE,
+                constraint.oracle_ids,
+                (
+                    "This ordering constraint does not name the tool whose "
+                    "decision is under test, so there is no relation to check."
+                ),
+                required=constraint.required,
+                missing=("tool_name for the dependent call",),
+            )
+            return
         if not isinstance(required_before, str) or not required_before:
             builder.add_assertion(
                 constraint.criterion_id,
@@ -696,14 +712,22 @@ def _evaluate_trajectory(builder: _EvaluationBuilder, constraint: TrajectoryCons
         violations: list[str] = []
         unproven: list[str] = []
         for dependent in attempts:
-            if not prior:
-                # The prerequisite never ran, so no evidence about decision
-                # order is needed to know it was not observed first.
-                violations.append(dependent.attempt_id)
+            candidates = [
+                earlier
+                for earlier in prior
+                if earlier.attempt_id != dependent.attempt_id
+            ]
+            if not candidates:
+                # A rule naming its own tool asks each later call to follow an
+                # observed result; the first call has nothing to follow.
+                if required_before != tool_name:
+                    # The prerequisite never ran, so no evidence about decision
+                    # order is needed to know it was not observed first.
+                    violations.append(dependent.attempt_id)
                 continue
             relations = [
                 analysis.observed_before(earlier.attempt_id, dependent.attempt_id)
-                for earlier in prior
+                for earlier in candidates
             ]
             if any(relation is True for relation in relations):
                 continue
@@ -722,7 +746,8 @@ def _evaluate_trajectory(builder: _EvaluationBuilder, constraint: TrajectoryCons
                     dependent.attempt_id
                     for dependent in attempts
                     for earlier in prior
-                    if analysis.same_launch_group(
+                    if earlier.attempt_id != dependent.attempt_id
+                    and analysis.same_launch_group(
                         earlier.attempt_id, dependent.attempt_id
                     )
                     is True

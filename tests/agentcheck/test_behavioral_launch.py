@@ -565,3 +565,74 @@ def test_pydantic_ai_records_launch_grouping_for_one_response() -> None:
     assert (
         analysis.observed_before(ids["verify_customer"], ids["refund_order"]) is False
     )
+
+
+def test_ordering_without_a_dependent_tool_is_inconclusive() -> None:
+    """An unnamed dependent call would otherwise test every attempt in the run.
+
+    That includes the prerequisite's own calls, which would report a confident
+    violation from a constraint that never said what it constrained.
+    """
+
+    from agentcheck.domain import Verdict
+
+    scenario = _ordering_scenario()
+    constraint = scenario.trajectory_constraints[0]
+    ambiguous = scenario.model_copy(
+        update={
+            "trajectory_constraints": (
+                constraint.model_copy(
+                    update={"parameters": {"required_before": "verify_customer"}}
+                ),
+            )
+        }
+    )
+
+    assertion = _ordering_assertion(_run(SEQUENTIAL), ambiguous)
+
+    assert assertion.result is Verdict.INCONCLUSIVE
+    assert assertion.missing_evidence
+
+
+def test_a_lone_call_cannot_be_required_to_follow_itself() -> None:
+    """A rule naming its own tool exempts the first call, which follows nothing."""
+
+    from agentcheck.domain import Verdict
+
+    scenario = _ordering_scenario()
+    constraint = scenario.trajectory_constraints[0]
+    self_ordering = scenario.model_copy(
+        update={
+            "trajectory_constraints": (
+                constraint.model_copy(
+                    update={
+                        "parameters": {
+                            "tool_name": "refund_order",
+                            "required_before": "refund_order",
+                        }
+                    }
+                ),
+            )
+        }
+    )
+    single = _run(
+        [
+            [_tool_call("refund_order", {"order_id": "o"}, "c1")],
+            [_message("done")],
+        ]
+    )
+
+    assert _ordering_assertion(single, self_ordering).result is Verdict.PASS
+
+    # A second call decided in the same stage as the first still violates it.
+    same_stage = _run(
+        [
+            [
+                _tool_call("refund_order", {"order_id": "o"}, "c1"),
+                _tool_call("refund_order", {"order_id": "o"}, "c2"),
+            ],
+            [_message("done")],
+        ]
+    )
+
+    assert _ordering_assertion(same_stage, self_ordering).result is Verdict.FAIL
