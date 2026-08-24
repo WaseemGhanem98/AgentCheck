@@ -10,6 +10,7 @@ from pathlib import Path
 from agentcheck.config import AgentCheckConfig, resolve_entrypoint
 from agentcheck.domain import AgentSpec
 from agentcheck.errors import ConfigurationError
+from agentcheck.identity import identity_mismatch_hint, spec_identity_matches
 
 from .fileset import collect_source_file_set, describe_file_set_mismatch, git_command_env
 from .manifest import ReplayManifest
@@ -146,10 +147,11 @@ def verify_replay_spec_bindings(
     """Refuse replay when the inspected spec is not the bound surface."""
 
     binding = manifest.spec_binding
-    if spec.spec_id != binding.spec_id:
+    if not spec_identity_matches(spec, binding.spec_id):
         raise ConfigurationError(
             f"replay manifest was bound to spec {binding.spec_id}, "
             f"but this target inspects as {spec.spec_id}"
+            + identity_mismatch_hint(spec, binding.spec_id)
         )
     live_packs = tuple(sorted(set(policy_pack_ids)))
     bound_packs = tuple(sorted(set(binding.policy_pack_ids)))

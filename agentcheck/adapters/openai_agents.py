@@ -65,6 +65,7 @@ from agentcheck.runner.budgets import BudgetExceeded
 from agentcheck.runner.network_guard import denied_destinations
 
 from .base import (
+    portable_identity,
     AdapterDependencyError,
     AdapterRuntimeError,
     EventSinkProtocol,
@@ -1863,7 +1864,13 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
 
     framework = FRAMEWORK_NAME
 
-    def inspect(self, target: Any, *, source: str | None = None) -> AgentSpec:
+    def inspect(
+        self,
+        target: Any,
+        *,
+        source: str | None = None,
+        identity_locator: str | None = None,
+    ) -> AgentSpec:
         _require_sdk()
         source = source or "runtime:agent"
         if type(target) is not Agent:
@@ -2114,11 +2121,16 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
                     for edge in graph.edges
                 ],
             }
-        spec_id = f"agentspec-{canonical_hash(fingerprint).split(':', 1)[1][:24]}"
+        spec_id, legacy_spec_id = portable_identity(
+            fingerprint,
+            location_locator=source,
+            identity_locator=identity_locator,
+        )
         runtime_locator = f"{source}.agent.runtime"
 
         return AgentSpec(
             spec_id=spec_id,
+            legacy_spec_id=legacy_spec_id,
             identity=IdentitySpec(
                 name=_property(
                     target.name,
@@ -2511,11 +2523,14 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         world_state: Any = None,
         event_sink: EventSinkProtocol | None = None,
         source: str | None = None,
+        identity_locator: str | None = None,
         controlled_model: bool = False,
     ) -> PreparedTarget:
         report = self.preflight(target)
         report.require_supported()
-        spec = self.inspect(target, source=source)
+        spec = self.inspect(
+            target, source=source, identity_locator=identity_locator
+        )
         graph = _reachable_graph(target)
         capture_holder: dict[str, _Capture | None] = {"capture": None}
         tool_risks: dict[str, tuple[bool, bool]] = {}

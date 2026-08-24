@@ -274,6 +274,23 @@ def parse_entrypoint(value: str) -> ParsedEntrypoint:
     )
 
 
+def portable_entrypoint(root: Path, entrypoint: str) -> str:
+    """Return the entrypoint as a canonical target-relative POSIX locator.
+
+    Target identity must not move because a configuration spelled the same file
+    differently -- ``./src/agent.py`` and ``src//agent.py`` name one module --
+    or because the host uses another path separator. Resolving through
+    ``entrypoint_location`` and re-relativizing against the resolved root also
+    makes a symlinked checkout produce the same locator as the real directory.
+    """
+
+    resolved_root = root.resolve()
+    source, attribute = entrypoint_location(root, entrypoint)
+    relative = source.relative_to(resolved_root).as_posix()
+    suffix = "()" if parse_entrypoint(entrypoint).factory else ""
+    return f"{relative}:{attribute}{suffix}"
+
+
 def entrypoint_location(root: Path, entrypoint: str) -> tuple[Path, str]:
     """Resolve a contained entrypoint without requiring the source to exist.
 

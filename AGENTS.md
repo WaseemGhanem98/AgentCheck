@@ -43,6 +43,7 @@ Breaking any of these is a correctness bug, not a style issue:
 | `agentcheck/replay/` | Manifests, source binding, filesets. |
 | `agentcheck/report/`, `agentcheck/baseline/`, `agentcheck/review/` | Reporting, CI gating, human decisions on findings. |
 | `agentcheck/regression/` | Run-to-run behavioral comparison over stored artifacts. Executes nothing. |
+| `agentcheck/identity.py` | Portable target identity and its bounded legacy compatibility path. |
 | `agentcheck/redaction.py`, `agentcheck/privacy.py` | Credential redaction for artifacts and logs. |
 | `agentcheck/cli.py` | The `agentcheck` command. |
 

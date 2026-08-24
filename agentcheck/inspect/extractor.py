@@ -578,13 +578,28 @@ def load_target(target: str | Path) -> tuple[Any, str]:
     return value, f"{module_path}:{attribute}"
 
 
+def portable_locator(target: str | Path) -> str:
+    """Return the target-relative POSIX locator used for spec identity.
+
+    Resolution matches the evaluation pipeline, so a library caller and the CLI
+    derive the same identity for the same target instead of disagreeing because
+    one of them saw an absolute path.
+    """
+
+    module_path, attribute, root, factory = _resolve_target(target)
+    relative = module_path.relative_to(root).as_posix()
+    return f"{relative}:{attribute}{'()' if factory else ''}"
+
+
 def inspect_target(target: str | Path) -> Any:
     """Load and inspect a supported local agent through the OpenAI adapter."""
 
     from agentcheck.adapters.openai_agents import OpenAIAgentsAdapter
 
     agent, source = load_target(target)
-    return OpenAIAgentsAdapter().inspect(agent, source=source)
+    return OpenAIAgentsAdapter().inspect(
+        agent, source=source, identity_locator=portable_locator(target)
+    )
 
 
 __all__ = [
@@ -592,5 +607,6 @@ __all__ = [
     "enable_contained_target_imports",
     "inspect_target",
     "load_target",
+    "portable_locator",
     "resolve_entrypoint",
 ]

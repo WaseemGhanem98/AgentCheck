@@ -12,7 +12,11 @@ import pytest
 
 from agentcheck.adapters import OpenAIAgentsAdapter
 from agentcheck.cli import main
-from agentcheck.config import apply_python_executable, load_config
+from agentcheck.config import (
+    apply_python_executable,
+    load_config,
+    portable_entrypoint,
+)
 from agentcheck.errors import ConfigurationError
 from agentcheck.initialize import write_initial_config
 from agentcheck.inspect import TargetLoadError, load_target
@@ -167,11 +171,27 @@ def test_module_level_agent_still_loads(tmp_path: Path) -> None:
 
 
 def test_account_agent_spec_id_remains_stable() -> None:
+    """In-process and worker inspection must agree on identity.
+
+    They agree only when both derive it the same way, so this also pins the
+    relationship between the two identity modes: supplying the portable
+    locator yields the pipeline's ``spec_id``, and omitting it reproduces
+    exactly the location-bound value the worker records as ``legacy_spec_id``.
+    """
+
     loaded, source = load_target(EXAMPLE)
-    expected = OpenAIAgentsAdapter().inspect(loaded, source=source)
     root, config = load_config(EXAMPLE)
+    portable = OpenAIAgentsAdapter().inspect(
+        loaded, source=source, identity_locator=portable_entrypoint(root, config.entrypoint)
+    )
+    location_bound = OpenAIAgentsAdapter().inspect(loaded, source=source)
+
     result = inspect_in_subprocess(root, config)
-    assert result.require_value().spec_id == expected.spec_id
+    worker_spec = result.require_value()
+
+    assert worker_spec.spec_id == portable.spec_id
+    assert worker_spec.legacy_spec_id == location_bound.spec_id
+    assert worker_spec.spec_id != worker_spec.legacy_spec_id
 
 
 def test_missing_dependency_fails_clearly_without_pip(

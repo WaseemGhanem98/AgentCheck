@@ -9,6 +9,7 @@ from pathlib import Path
 from agentcheck.artifacts import create_private_file, replace_private_file
 from agentcheck.config import contained_path
 from agentcheck.errors import ConfigurationError
+from agentcheck.identity import identity_mismatch_hint, spec_identity_matches
 from agentcheck.privacy import redact_log_text
 from agentcheck.report.load import load_report_config, load_stored_run
 
@@ -77,9 +78,14 @@ def check_baseline(
     baseline = load_baseline(root, baseline_path)
     loaded = load_stored_run(target, run_id=run_id, latest=latest)
     current = baseline_from_loaded(loaded)
-    if baseline.spec_id != current.spec_id:
+    # `current.spec_id` comes from this run's stored agent-spec.json, so a
+    # baseline and a run recorded under the same identity contract compare
+    # directly. A baseline written before portable identity is recognized only
+    # when this run reproduces that location-bound identity.
+    if not spec_identity_matches(loaded.spec, baseline.spec_id):
         raise ConfigurationError(
             "baseline spec_id does not match the current run; refusing comparison"
+            + identity_mismatch_hint(loaded.spec, baseline.spec_id)
         )
     comparison = compare_baselines(baseline, current)
     return CheckedBaseline(

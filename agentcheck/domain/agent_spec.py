@@ -210,6 +210,12 @@ class AgentSpec(ContractModel):
 
     contract_version: Literal["agentcheck.agent_spec.v1"] = AGENT_SPEC_CONTRACT_VERSION
     spec_id: str = Field(min_length=1, max_length=200)
+    # The identity this same inspection would have produced under the
+    # pre-portable contract, where the absolute entrypoint path was hashed into
+    # spec_id. It exists only so an artifact created before portable identity
+    # can still be recognized at the location that produced it. It is never a
+    # new binding, and it is absent when no distinct legacy identity exists.
+    legacy_spec_id: str | None = Field(default=None, max_length=200)
     identity: IdentitySpec
     interface: InterfaceSpec
     instructions: InstructionsSpec

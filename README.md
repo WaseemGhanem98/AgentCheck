@@ -194,6 +194,7 @@ and read the [CI trust model](docs/ci-trust-model.md).
 - [PydanticAI setup and offline evaluation](docs/pydantic-ai.md)
 - [Custom Python agent contract](docs/custom-agents.md)
 - [Validation evidence and claim boundaries](docs/validation-evidence.md)
+- [Portable target identity](docs/portable-identity.md)
 - [Declared behavioral coverage](docs/behavioral-coverage.md)
 - [Behavioral regression comparison](docs/behavioral-regression.md)
 - [CI trust model](docs/ci-trust-model.md)

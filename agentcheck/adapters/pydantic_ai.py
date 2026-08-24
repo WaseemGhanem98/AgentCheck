@@ -56,6 +56,7 @@ from agentcheck.domain.scenario import ConversationRole, ConversationTurn
 from agentcheck.inspect.capabilities import extract_capabilities
 
 from .base import (
+    portable_identity,
     AdapterDependencyError,
     EventSinkProtocol,
     FrameworkAdapter,
@@ -853,7 +854,13 @@ class PydanticAIAdapter(FrameworkAdapter):
 
     framework = FRAMEWORK_NAME
 
-    def inspect(self, target: Any, *, source: str | None = None) -> AgentSpec:
+    def inspect(
+        self,
+        target: Any,
+        *,
+        source: str | None = None,
+        identity_locator: str | None = None,
+    ) -> AgentSpec:
         _require_sdk()
         locator = source or f"{type(target).__module__}.{type(target).__name__}"
         framework_version = _sdk_version()
@@ -907,10 +914,15 @@ class PydanticAIAdapter(FrameworkAdapter):
             ),
             "tools": fingerprint_tools,
         }
-        spec_id = f"agentspec-{canonical_hash(fingerprint).split(':', 1)[1][:24]}"
+        spec_id, legacy_spec_id = portable_identity(
+            fingerprint,
+            location_locator=locator,
+            identity_locator=identity_locator,
+        )
 
         return AgentSpec(
             spec_id=spec_id,
+            legacy_spec_id=legacy_spec_id,
             identity=IdentitySpec(
                 name=_property(
                     getattr(target, "name", None) or "agent",
@@ -1226,12 +1238,15 @@ class PydanticAIAdapter(FrameworkAdapter):
         world_state: Any = None,
         event_sink: EventSinkProtocol | None = None,
         source: str | None = None,
+        identity_locator: str | None = None,
         controlled_model: bool = False,
     ) -> PreparedTarget:
         _require_sdk()
         report = self.preflight(target)
         report.require_supported()
-        spec = self.inspect(target, source=source)
+        spec = self.inspect(
+            target, source=source, identity_locator=identity_locator
+        )
 
         capture_holder: dict[str, _Capture | None] = {"capture": None}
         tool_risks: dict[str, tuple[bool, bool]] = {}

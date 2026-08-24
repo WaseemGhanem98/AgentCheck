@@ -89,6 +89,7 @@ from agentcheck.runner.tool_gateway import ToolCallBlockedError
 from agentcheck.schema_safety import UnsafeSchemaReference, offline_validator
 
 from .base import (
+    portable_identity,
     AdapterRuntimeError,
     EventSinkProtocol,
     FrameworkAdapter,
@@ -691,7 +692,13 @@ class CustomAgentAdapter(FrameworkAdapter):
 
     # -- inspection ---------------------------------------------------------
 
-    def inspect(self, target: Any, *, source: str | None = None) -> AgentSpec:
+    def inspect(
+        self,
+        target: Any,
+        *,
+        source: str | None = None,
+        identity_locator: str | None = None,
+    ) -> AgentSpec:
         """Describe the declared surface. Nothing on the target is executed.
 
         The declaration *is* the specification here, which is what makes this
@@ -761,10 +768,15 @@ class CustomAgentAdapter(FrameworkAdapter):
             ),
             "tools": fingerprint_tools,
         }
-        spec_id = f"agentspec-{canonical_hash(fingerprint).split(':', 1)[1][:24]}"
+        spec_id, legacy_spec_id = portable_identity(
+            fingerprint,
+            location_locator=locator,
+            identity_locator=identity_locator,
+        )
 
         return AgentSpec(
             spec_id=spec_id,
+            legacy_spec_id=legacy_spec_id,
             identity=IdentitySpec(
                 name=_property(
                     agent_name,
@@ -1122,6 +1134,7 @@ class CustomAgentAdapter(FrameworkAdapter):
         world_state: Any = None,
         event_sink: EventSinkProtocol | None = None,
         source: str | None = None,
+        identity_locator: str | None = None,
         controlled_model: bool = False,
     ) -> PreparedTarget:
         """Bind the declared agent to a gateway, or refuse before it runs.
@@ -1160,7 +1173,9 @@ class CustomAgentAdapter(FrameworkAdapter):
             )
         report = self.preflight(target)
         report.require_supported()
-        spec = self.inspect(target, source=source)
+        spec = self.inspect(
+            target, source=source, identity_locator=identity_locator
+        )
 
         tool_risks: dict[str, tuple[bool, bool]] = {}
         for item in spec.tools.items:
