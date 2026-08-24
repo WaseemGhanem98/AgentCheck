@@ -83,6 +83,9 @@ COMPATIBILITY_SUITE: dict[str, dict[str, object]] = {
         ),
         "files": (
             "tests/agentcheck/test_prerequisite_fixtures.py",
+            # Decision-stage relations are derived from recorded event
+            # ordering across staged child-process execution.
+            "tests/agentcheck/test_behavioral_launch.py",
             "tests/agentcheck/test_interactive_scenarios.py",
             "tests/agentcheck/test_confirmation_variant_cases.py",
         ),

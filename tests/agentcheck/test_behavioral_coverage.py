@@ -739,10 +739,11 @@ def test_prerequisite_coverage_stays_conservative_until_order_is_observable() ->
     )
     assert success_requirement.status is BehavioralCoverageStatus.PARTIAL
     assert success_requirement.reason_code == "calls_asserted_but_order_unobservable"
+    # Ordering is evaluable now, so an absent ordering oracle is an actionable
+    # gap in this suite rather than a limit of the evaluator.
     ordering = _requirement(success_report, BehavioralDimension.ORDERING, subject)
-    assert ordering.status is BehavioralCoverageStatus.UNSUPPORTED
-    assert "scenario:prerequisite-success" in ordering.evidence
-    assert "fixture:prerequisite-lookup" in ordering.evidence
+    assert ordering.status is BehavioralCoverageStatus.MISSING
+    assert ordering.reason_code == "ordering_case_missing"
 
     vacuous_report = analyze_behavioral_coverage(spec, (failure_vacuous,))
     assert _requirement(
@@ -754,7 +755,9 @@ def test_prerequisite_coverage_stays_conservative_until_order_is_observable() ->
     ).status is BehavioralCoverageStatus.COVERED
 
 
-def test_arbitrary_ordering_is_explicitly_unsupported() -> None:
+def test_ordering_without_a_named_prerequisite_is_only_partial() -> None:
+    """A constraint that names no prerequisite states no checkable relation."""
+
     tool = _tool("act")
     scenario = _scenario(
         "ordering",
@@ -763,8 +766,53 @@ def test_arbitrary_ordering_is_explicitly_unsupported() -> None:
     report = analyze_behavioral_coverage(_spec((tool, True)), (scenario,))
 
     requirement = _requirement(report, BehavioralDimension.ORDERING, "tool:act")
-    assert requirement.status is BehavioralCoverageStatus.UNSUPPORTED
-    assert _family(report, BehavioralDimension.ORDERING).applicable == 0
+    assert requirement.status is BehavioralCoverageStatus.PARTIAL
+    assert requirement.reason_code == "ordering_prerequisite_not_declared"
+    assert _family(report, BehavioralDimension.ORDERING).applicable == 1
+
+
+def test_ordering_is_covered_only_when_both_tools_are_reachable() -> None:
+    """Without a controlled prerequisite outcome there is nothing to observe."""
+
+    focal = _tool("act", state_changing=True)
+    prerequisite = _tool("lookup")
+    spec = _spec((focal, True), (prerequisite, True))
+    constraint = _trajectory(
+        TrajectoryConstraintKind.ORDERING,
+        "act",
+        extra={"required_before": "lookup"},
+    )
+
+    unreachable = _scenario(
+        "ordering-unreachable",
+        fixtures=(_fixture("act", SimulatedToolStatus.SUCCESS, fixture_id="focal"),),
+        required=(_required("act"),),
+        trajectory=(constraint,),
+    )
+    reachable = _scenario(
+        "ordering-reachable",
+        fixtures=(
+            _fixture("lookup", SimulatedToolStatus.SUCCESS, fixture_id="prior"),
+            _fixture("act", SimulatedToolStatus.SUCCESS, fixture_id="focal"),
+        ),
+        required=(
+            _required("lookup", criterion_id="require-lookup"),
+            _required("act", criterion_id="require-act"),
+        ),
+        trajectory=(constraint,),
+        seed=2,
+    )
+
+    assert _requirement(
+        analyze_behavioral_coverage(spec, (unreachable,)),
+        BehavioralDimension.ORDERING,
+        "tool:act",
+    ).reason_code == "ordering_lacks_controlled_outcome_for_both_tools"
+    assert _requirement(
+        analyze_behavioral_coverage(spec, (reachable,)),
+        BehavioralDimension.ORDERING,
+        "tool:act",
+    ).status is BehavioralCoverageStatus.COVERED
 
 
 def test_reference_pool_preserves_denominator_and_must_contain_actual_sources() -> None:

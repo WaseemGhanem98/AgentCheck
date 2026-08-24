@@ -620,7 +620,7 @@ def _seed_from_scenarios(
                     seeds,
                     BehavioralDimension.ORDERING,
                     subject,
-                    _Applicability.UNSUPPORTED,
+                    _Applicability.APPLICABLE,
                     tool_name=trajectory_tool,
                 )
 
@@ -655,7 +655,7 @@ def _seed_from_scenarios(
                 seeds,
                 BehavioralDimension.ORDERING,
                 subject,
-                _Applicability.UNSUPPORTED,
+                _Applicability.APPLICABLE,
                 tool_name=focal_tool,
                 prerequisite_tool_name=prerequisite_tool,
             )
@@ -1553,6 +1553,75 @@ def _duplicate_outcome(
     return _best(candidates, "duplicate_action_case_missing")
 
 
+def _ordering_outcome(
+    scenarios: Sequence[Scenario],
+    tools: Mapping[str, ToolDefinition],
+    tool_name: str | None,
+) -> _Outcome:
+    """Report whether a declared ordering relation can actually be observed.
+
+    The evaluator proves ordering from what the agent had observed when it
+    decided to act, so coverage requires both tools to be reachable under
+    control: without a controlled outcome for the prerequisite there is no
+    observation for the dependent call to have followed.
+    """
+
+    candidates: list[_Outcome] = []
+    for scenario in scenarios:
+        constraints = _matching_trajectory(
+            scenario, tool_name, {TrajectoryConstraintKind.ORDERING}
+        )
+        if not constraints:
+            continue
+        if tool_name is None:
+            candidates.append(
+                _Outcome(
+                    BehavioralCoverageStatus.PARTIAL,
+                    "ordering_oracle_without_declared_tool_signature",
+                    _scenario_evidence(scenario, criteria=constraints),
+                )
+            )
+            continue
+        required, allowed, _ = _action_contracts(scenario, tool_name)
+        traces = _traces_for_constraints(scenario, tools, (*required, *allowed), 1)
+        dependent_reachable = any(trace for _, trace in traces)
+        for constraint in constraints:
+            before = constraint.parameters.get("required_before")
+            if not isinstance(before, str) or not before:
+                candidates.append(
+                    _Outcome(
+                        BehavioralCoverageStatus.PARTIAL,
+                        "ordering_prerequisite_not_declared",
+                        _scenario_evidence(scenario, criteria=(constraint,)),
+                    )
+                )
+                continue
+            prior_required, prior_allowed, _ = _action_contracts(scenario, before)
+            prior_traces = _traces_for_constraints(
+                scenario, tools, (*prior_required, *prior_allowed), 1
+            )
+            prior_reachable = any(trace for _, trace in prior_traces)
+            hard = constraint.required and _criterion_is_authoritative(
+                scenario, constraint
+            )
+            evidence = _scenario_evidence(
+                scenario,
+                criteria=(constraint,),
+                slots=(*_trace_slots(traces), *_trace_slots(prior_traces)),
+            )
+            if not (dependent_reachable and prior_reachable):
+                status = BehavioralCoverageStatus.PARTIAL
+                reason = "ordering_lacks_controlled_outcome_for_both_tools"
+            elif hard:
+                status = BehavioralCoverageStatus.COVERED
+                reason = "required_ordering_is_observable"
+            else:
+                status = BehavioralCoverageStatus.PARTIAL
+                reason = "nonauthoritative_ordering_oracle"
+            candidates.append(_Outcome(status, reason, evidence))
+    return _best(candidates, "ordering_case_missing")
+
+
 def _has_explicit_confirmation(scenario: Scenario) -> bool:
     return any(
         turn.metadata.get("explicit_confirmation") is True
@@ -1857,6 +1926,8 @@ def _evaluate_seed(
         return _retry_outcome(scoped, tools, tool_name)
     if seed.dimension is BehavioralDimension.DUPLICATE_ACTION:
         return _duplicate_outcome(scoped, tools, tool_name)
+    if seed.dimension is BehavioralDimension.ORDERING:
+        return _ordering_outcome(scoped, tools, tool_name)
     if (
         seed.dimension is BehavioralDimension.CONFIRMATION_WITHOUT_CONSENT
         and tool_name is not None

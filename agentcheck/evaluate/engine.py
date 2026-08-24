@@ -26,6 +26,7 @@ from agentcheck.domain import (
     Verdict,
     utc_now,
 )
+from agentcheck.evaluate.launch import analyze_launches
 from agentcheck.schema_safety import UnsafeSchemaReference, offline_validator
 from agentcheck.runner.world import WorldSimulator, WorldStateError
 
@@ -669,6 +670,84 @@ def _evaluate_trajectory(builder: _EvaluationBuilder, constraint: TrajectoryCons
             return
         passed = turns <= maximum
         data.update({"model_turns": turns, "maximum": maximum})
+    elif constraint.kind == TrajectoryConstraintKind.ORDERING:
+        required_before = constraint.parameters.get("required_before")
+        if not isinstance(required_before, str) or not required_before:
+            builder.add_assertion(
+                constraint.criterion_id,
+                constraint.description,
+                Verdict.INCONCLUSIVE,
+                constraint.oracle_ids,
+                (
+                    "This ordering constraint does not name the tool whose "
+                    "result had to be observed first, so there is no relation "
+                    "to check."
+                ),
+                required=constraint.required,
+                missing=("required_before tool name",),
+            )
+            return
+        analysis = analyze_launches(builder.run)
+        prior = [
+            attempt
+            for attempt in builder.run.tool_attempts
+            if attempt.tool_name == required_before
+        ]
+        violations: list[str] = []
+        unproven: list[str] = []
+        for dependent in attempts:
+            if not prior:
+                # The prerequisite never ran, so no evidence about decision
+                # order is needed to know it was not observed first.
+                violations.append(dependent.attempt_id)
+                continue
+            relations = [
+                analysis.observed_before(earlier.attempt_id, dependent.attempt_id)
+                for earlier in prior
+            ]
+            if any(relation is True for relation in relations):
+                continue
+            if any(relation is None for relation in relations):
+                # Some candidate might have been observed first and this run
+                # cannot say. Partial ignorance is not proof of a violation.
+                unproven.append(dependent.attempt_id)
+            else:
+                violations.append(dependent.attempt_id)
+        data.update(
+            {
+                "required_before": required_before,
+                "violating_attempt_ids": violations,
+                "unproven_attempt_ids": unproven,
+                "same_stage_attempt_ids": [
+                    dependent.attempt_id
+                    for dependent in attempts
+                    for earlier in prior
+                    if analysis.same_launch_group(
+                        earlier.attempt_id, dependent.attempt_id
+                    )
+                    is True
+                ],
+            }
+        )
+        if violations:
+            passed = False
+        elif unproven:
+            builder.add_assertion(
+                constraint.criterion_id,
+                constraint.description,
+                Verdict.INCONCLUSIVE,
+                constraint.oracle_ids,
+                (
+                    "This run does not record which model decision launched "
+                    f"{tool_name!r}, so whether {required_before!r} had already "
+                    "been observed is unknown."
+                ),
+                required=constraint.required,
+                missing=("observed model response for the dependent call",),
+            )
+            return
+        else:
+            passed = True
     elif constraint.kind == TrajectoryConstraintKind.MAX_TOOL_CALLS:
         maximum = int(constraint.parameters.get("maximum", builder.scenario.resource_budgets.max_tool_calls))
         passed = len(builder.run.tool_attempts) <= maximum
