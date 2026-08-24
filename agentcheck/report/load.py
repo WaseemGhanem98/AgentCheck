@@ -40,6 +40,7 @@ from agentcheck.domain import (
     Scenario,
 )
 from agentcheck.errors import ConfigurationError
+from agentcheck.identity import spec_identity_matches
 from agentcheck.generate.suite import FrozenSuite, configured_frozen_suite
 from agentcheck.generate.selection import SelectionPlan
 from agentcheck.store import (
@@ -373,7 +374,7 @@ def _optional_frozen_suite(
     if configured is None:
         return None
     _, frozen = configured
-    if frozen.spec_id != spec.spec_id:
+    if not spec_identity_matches(spec, frozen.spec_id):
         return None
     if not _digest_equal(frozen.fingerprint, recorded_fingerprint):
         return None

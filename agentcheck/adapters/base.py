@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 from importlib import metadata as importlib_metadata
 from typing import TYPE_CHECKING, Any, Awaitable, Protocol, runtime_checkable
 
+from agentcheck.domain import canonical_hash
+
 if TYPE_CHECKING:
     from agentcheck.domain.agent_spec import AgentSpec
     from agentcheck.domain.run import CanonicalRun
@@ -299,14 +301,60 @@ class PreparedTarget:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
+def portable_identity(
+    fingerprint: dict[str, Any],
+    *,
+    location_locator: str | None,
+    identity_locator: str | None,
+) -> tuple[str, str | None]:
+    """Return ``(spec_id, legacy_spec_id)`` for one inspected fingerprint.
+
+    ``fingerprint`` arrives with every semantic input already populated: name,
+    framework version, model, instructions digest, declared tools, and any
+    handoff graph. Only the locator differs between the two identities, so the
+    legacy value is the same semantic surface hashed with the location-bound
+    locator restored.
+
+    Returning the legacy identity is what lets an artifact created before this
+    contract still be recognized at the location that produced it, without ever
+    treating a different location as equivalent. When no portable locator was
+    supplied there is no separate legacy identity to record.
+    """
+
+    if identity_locator is None:
+        return _spec_id(fingerprint, location_locator), None
+    portable = _spec_id(fingerprint, identity_locator)
+    legacy = _spec_id(fingerprint, location_locator)
+    return portable, (None if legacy == portable else legacy)
+
+
+def _spec_id(fingerprint: dict[str, Any], locator: str | None) -> str:
+    # canonical_hash sorts keys, so replacing the locator reproduces the exact
+    # bytes the location-bound contract hashed.
+    return f"agentspec-{canonical_hash({**fingerprint, 'source': locator}).split(':', 1)[1][:24]}"
+
+
 class FrameworkAdapter(ABC):
     """Contract implemented by every supported agent framework."""
 
     framework: str
 
     @abstractmethod
-    def inspect(self, target: Any, *, source: str | None = None) -> "AgentSpec":
-        """Extract an explicit, versioned specification without running the model."""
+    def inspect(
+        self,
+        target: Any,
+        *,
+        source: str | None = None,
+        identity_locator: str | None = None,
+    ) -> "AgentSpec":
+        """Extract an explicit, versioned specification without running the model.
+
+        ``source`` locates the target for evidence and diagnostics and may be an
+        absolute path. ``identity_locator`` is the portable entrypoint, relative
+        to the target root, and is the only locator allowed to influence
+        ``spec_id``. When it is omitted the caller has not established a target
+        root, so identity falls back to ``source`` and stays location-bound.
+        """
 
     @abstractmethod
     def preflight(self, target: Any) -> PreflightReport:
@@ -321,6 +369,7 @@ class FrameworkAdapter(ABC):
         world_state: Any = None,
         event_sink: EventSinkProtocol | None = None,
         source: str | None = None,
+        identity_locator: str | None = None,
         controlled_model: bool = False,
     ) -> PreparedTarget:
         """Return a sanitized runtime target or fail before model execution.

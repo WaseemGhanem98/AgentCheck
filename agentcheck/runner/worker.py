@@ -19,7 +19,11 @@ from agentcheck.adapters import (
     PydanticAIAdapter,
     encode_preflight_report,
 )
-from agentcheck.config import AgentCheckConfig, resolve_entrypoint
+from agentcheck.config import (
+    AgentCheckConfig,
+    portable_entrypoint,
+    resolve_entrypoint,
+)
 from agentcheck.domain import (
     FaultType,
     InfrastructureError,
@@ -237,7 +241,13 @@ def _inspect(
 ) -> tuple[Any, dict[str, Any], dict[str, Any] | None]:
     target, source = _load_agent(root, config)
     adapter = _adapter_for(config)
-    spec = adapter.inspect(target, source=source)
+    # A canonical target-relative locator for the same module `source` points
+    # at, carrying no checkout location and no spelling of the same path.
+    spec = adapter.inspect(
+        target,
+        source=source,
+        identity_locator=portable_entrypoint(root, config.entrypoint),
+    )
     preflight = encode_preflight_report(adapter.preflight(target))
     topology = adapter.describe_topology(target, source=source)
     return spec, preflight, topology
@@ -246,7 +256,11 @@ def _inspect(
 def _run(root: Path, config: AgentCheckConfig, scenario: Scenario, run_id: str) -> Any:
     target, source = _load_agent(root, config)
     adapter = _adapter_for(config)
-    spec = adapter.inspect(target, source=source)
+    spec = adapter.inspect(
+        target,
+        source=source,
+        identity_locator=portable_entrypoint(root, config.entrypoint),
+    )
     tools = tuple(item.value for item in spec.tools.items)
     world = WorldSimulator(scenario.initial_world_state)
     gateway = ToolGateway(
@@ -261,6 +275,7 @@ def _run(root: Path, config: AgentCheckConfig, scenario: Scenario, run_id: str) 
         gateway,
         world_state=gateway.world,
         source=source,
+        identity_locator=portable_entrypoint(root, config.entrypoint),
         controlled_model=config.controlled_model,
     )
     return asyncio.run(

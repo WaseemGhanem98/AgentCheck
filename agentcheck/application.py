@@ -41,6 +41,7 @@ from agentcheck.fixtures import (
     load_representative_inputs,
     load_scenario_requests,
 )
+from agentcheck.identity import identity_mismatch_hint, spec_identity_matches
 from agentcheck.errors import (
     ConfigurationError,
     IncompatibleSuiteError,
@@ -381,11 +382,12 @@ def execute_suite(
         )
     else:
         suite_path, frozen = configured
-        if frozen.spec_id != spec.spec_id:
+        if not spec_identity_matches(spec, frozen.spec_id):
             raise ConfigurationError(
                 f"frozen suite {suite_path.name} was generated for target "
                 f"{frozen.spec_id}, but this target inspects as {spec.spec_id}; "
                 "re-run agentcheck generate"
+                + identity_mismatch_hint(spec, frozen.spec_id)
             )
         if seed is not None and seed != frozen.seed:
             raise ConfigurationError(

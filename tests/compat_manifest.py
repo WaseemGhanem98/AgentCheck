@@ -129,6 +129,9 @@ COMPATIBILITY_SUITE: dict[str, dict[str, object]] = {
             # interpreters, and this contract must hold on every version the
             # package claims to support.
             "tests/agentcheck/test_custom_agent_contract.py",
+            # Target identity is derived from a path resolved and relativized by
+            # the interpreter, so its normalization is a cross-version surface.
+            "tests/agentcheck/test_portable_identity.py",
         ),
         "symbols": ("main", "import"),
     },
