@@ -195,6 +195,7 @@ and read the [CI trust model](docs/ci-trust-model.md).
 - [Custom Python agent contract](docs/custom-agents.md)
 - [Validation evidence and claim boundaries](docs/validation-evidence.md)
 - [Declared behavioral coverage](docs/behavioral-coverage.md)
+- [Behavioral regression comparison](docs/behavioral-regression.md)
 - [CI trust model](docs/ci-trust-model.md)
 - [PyPI package](https://pypi.org/project/agentcheck-ai/)
 

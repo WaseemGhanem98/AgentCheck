@@ -52,6 +52,7 @@ from agentcheck.generate.selection import MAX_CASES
 from agentcheck.initialize import DEFAULT_ADAPTER, SUPPORTED_ADAPTERS, write_initial_config
 from agentcheck.inspect.capabilities import ExtractedCapability, extract_capabilities
 from agentcheck.privacy import redact_artifact, redact_log_text
+from agentcheck.regression import compare_stored_runs, encode_run_comparison
 from agentcheck.report import render_stored_run
 from agentcheck.review import HUMAN_DECISIONS, HumanDecision
 from agentcheck.review.service import record_finding_review
@@ -497,6 +498,43 @@ def _parser() -> argparse.ArgumentParser:
         help="replace an existing fixtures file instead of refusing",
     )
     _add_python_option(fixtures_init)
+
+    compare_parser = commands.add_parser(
+        "compare",
+        help="classify behavioral differences between two stored runs",
+        description=(
+            "Compare two stored runs of one target without executing anything. "
+            "Scenarios are matched by structural fingerprint, never by array "
+            "position. Exit 1 for an attributable behavioral regression, 2 for "
+            "an outcome AgentCheck could not certify, and 3 when the two runs "
+            "are incomparable. A verdict pair is evidence about two executions; "
+            "AgentCheck does not replay model output, so it is not proof that a "
+            "behavior is deterministic. This is not the baseline gate: it needs "
+            "nothing committed and accepts no curated failure list."
+        ),
+    )
+    compare_parser.add_argument("target", nargs="?", default=".")
+    compare_parser.add_argument(
+        "--base",
+        required=True,
+        type=_run_id,
+        help="stored run ID to compare from",
+    )
+    compare_parser.add_argument(
+        "--head",
+        type=_run_id,
+        help="stored run ID to compare to",
+    )
+    compare_parser.add_argument(
+        "--latest",
+        action="store_true",
+        help="compare to the most recently indexed run instead of --head",
+    )
+    compare_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="write agentcheck.run_comparison.v1 JSON to stdout",
+    )
 
     baseline_parser = commands.add_parser(
         "baseline",
@@ -1647,6 +1685,28 @@ def _baseline_check_command(
     return checked.exit_code
 
 
+def _compare_command(
+    target: str,
+    *,
+    base: str,
+    head: str | None,
+    latest: bool,
+    as_json: bool,
+) -> int:
+    checked = compare_stored_runs(
+        target,
+        base_run_id=base,
+        head_run_id=head,
+        latest=latest,
+    )
+    if as_json:
+        print(checked.summary, end="", file=sys.stderr)
+        print(encode_run_comparison(checked.comparison))
+    else:
+        print(checked.summary, end="")
+    return checked.exit_code
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
@@ -1727,6 +1787,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     force=args.force,
                     python_executable=args.python_executable,
                 )
+        if args.command == "compare":
+            return _compare_command(
+                args.target,
+                base=args.base,
+                head=args.head,
+                latest=args.latest,
+                as_json=args.json,
+            )
         if args.command == "baseline":
             if args.baseline_command == "create":
                 return _baseline_create_command(

@@ -37,10 +37,12 @@ Breaking any of these is a correctness bug, not a style issue:
 | `agentcheck/adapters/` | The only layer allowed to import a framework SDK. |
 | `agentcheck/inspect/` | Import a target and extract an `AgentSpec` without running a turn. |
 | `agentcheck/generate/` | Derive, lint, select, and freeze suites. |
+| `agentcheck/coverage/` | Derived behavioral coverage over a spec and a scenario set. Pure contract analysis; imports no target. |
 | `agentcheck/runner/` | Orchestrator, worker, tool gateway, simulated world, budgets, network guard. |
 | `agentcheck/evaluate/` | Oracle evaluation and verdict assignment. |
 | `agentcheck/replay/` | Manifests, source binding, filesets. |
 | `agentcheck/report/`, `agentcheck/baseline/`, `agentcheck/review/` | Reporting, CI gating, human decisions on findings. |
+| `agentcheck/regression/` | Run-to-run behavioral comparison over stored artifacts. Executes nothing. |
 | `agentcheck/redaction.py`, `agentcheck/privacy.py` | Credential redaction for artifacts and logs. |
 | `agentcheck/cli.py` | The `agentcheck` command. |
 
