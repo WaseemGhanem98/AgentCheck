@@ -45,6 +45,10 @@ COMPATIBILITY_SUITE: dict[str, dict[str, object]] = {
             "tests/agentcheck/test_artifacts.py",
             "tests/agentcheck/test_suite_compatibility.py",
             "tests/agentcheck/test_behavioral_coverage.py",
+            # The run comparison contract types one field as a union of
+            # Literals resolved from a string annotation, which is exactly the
+            # typing surface that can differ between interpreters.
+            "tests/agentcheck/test_behavioral_regression.py",
         ),
         "symbols": ("fingerprint", "model_dump", "IncompatibleSuiteError", "redact"),
     },
