@@ -11,6 +11,7 @@ from collections import Counter
 from html.parser import HTMLParser
 from pathlib import Path
 
+from agentcheck.coverage import BehavioralCoverage
 from agentcheck.domain import (
     AgentSpec,
     CanonicalRun,
@@ -224,6 +225,11 @@ def test_offline_cli_runs_complete_phase1_flow_with_intercepted_tools(
     assert "Failed:        5" in execution.stdout
     assert "Inconclusive:  0" in execution.stdout
     assert "Infra errors:  0" in execution.stdout
+    assert "Declared behavioral coverage:" in execution.stdout
+    coverage_output = execution.stdout.split("Declared behavioral coverage:", 1)[1]
+    coverage_output = coverage_output.split("High-confidence failures discovered:", 1)[0]
+    assert "%" not in coverage_output
+    assert "complete coverage" not in coverage_output.casefold()
 
     run_root = target / ".agentcheck" / "runs" / RUN_ID
     assert {path.name for path in run_root.iterdir()} == EXPECTED_ARTIFACTS
@@ -323,6 +329,13 @@ def test_offline_cli_runs_complete_phase1_flow_with_intercepted_tools(
     assert len(set(worker_pids)) == 14
 
     summary = json.loads((run_root / "summary.json").read_text(encoding="utf-8"))
+    behavioral_coverage = BehavioralCoverage.model_validate_json(
+        json.dumps(summary.pop("behavioral_coverage"))
+    )
+    assert behavioral_coverage.spec_id == inspected_spec.spec_id
+    assert behavioral_coverage.scenario_count == len(scenarios)
+    assert behavioral_coverage.suite_fingerprint is None
+    assert behavioral_coverage.families
     assert summary == {
         "schema_version": "agentcheck.summary.v1",
         "run_id": RUN_ID,

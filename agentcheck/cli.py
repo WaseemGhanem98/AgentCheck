@@ -24,6 +24,11 @@ from agentcheck.application import (
 from agentcheck.baseline.contract import DEFAULT_BASELINE_FILENAME
 from agentcheck.baseline.service import check_baseline, create_baseline, encode_comparison
 from agentcheck.config import DEFAULT_ENTRYPOINT, contained_path, entrypoint_location
+from agentcheck.coverage import (
+    BehavioralCoverage,
+    BehavioralCoverageReferenceScope,
+    BehavioralCoverageStatus,
+)
 from agentcheck.fixtures import (
     DEFAULT_FIXTURES_FILENAME,
     FIXTURE_PACK_CONTRACT_VERSION,
@@ -62,6 +67,8 @@ _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,119}$")
 _CONSOLE_ERROR_CODE_CHARS = 80
 _CONSOLE_ERROR_MESSAGE_CHARS = 320
 _CONSOLE_SCENARIO_TITLE_CHARS = 96
+_CONSOLE_COVERAGE_SUBJECT_CHARS = 500
+_CONSOLE_COVERAGE_REASON_CHARS = 100
 _TEST_PROGRESS_HEARTBEAT_SECONDS = 10.0
 _TEST_PROGRESS_RESULT_COLUMN = 72
 _TRUNCATION_MARKER = "...[TRUNCATED]"
@@ -799,6 +806,93 @@ def _print_action_path_coverage(coverage: Any, target: Any) -> None:
         print(f"  Add representative test data:  agentcheck fixtures init {target}")
 
 
+_UNCOVERED_BEHAVIORAL_STATUSES = (
+    BehavioralCoverageStatus.PARTIAL,
+    BehavioralCoverageStatus.MISSING,
+    BehavioralCoverageStatus.UNKNOWN,
+    BehavioralCoverageStatus.UNSUPPORTED,
+)
+
+
+def _print_declared_behavioral_coverage(coverage: BehavioralCoverage) -> None:
+    """Render declared suite coverage without implying overall completeness.
+
+    ``unknown`` and ``unsupported`` requirements are deliberately outside the
+    applicable denominator.  They remain visible beside exact requirement
+    subjects so a zero denominator cannot be mistaken for complete coverage.
+    """
+
+    print()
+    print("Declared behavioral coverage:")
+    print(
+        f"  Evidence scenarios: {coverage.scenario_count} / "
+        f"{coverage.reference_scenario_count} reference scenarios"
+    )
+    if (
+        coverage.reference_scope
+        is BehavioralCoverageReferenceScope.AVAILABLE_SCENARIOS_ONLY
+    ):
+        print(
+            "  Warning: the reference scope contains available scenarios only; "
+            "unavailable scenario contracts may add behavioral requirements."
+        )
+    families = tuple(
+        family
+        for family in coverage.families
+        if sum(
+            (
+                family.covered,
+                family.partial,
+                family.missing,
+                family.unknown,
+                family.unsupported,
+            )
+        )
+        > 0
+    )
+    if not families:
+        print("  No declared behavioral requirements were identified.")
+        return
+
+    for family in families:
+        label = family.dimension.value.replace("_", " ").capitalize()
+        print(
+            f"  {label}: {family.covered} covered / "
+            f"{family.applicable} applicable; "
+            f"partial {family.partial}; missing {family.missing}; "
+            f"unknown {family.unknown}; unsupported {family.unsupported}"
+        )
+        for status in _UNCOVERED_BEHAVIORAL_STATUSES:
+            requirements = (
+                requirement
+                for requirement in family.requirements
+                if requirement.status is status
+            )
+            for requirement in requirements:
+                subject = _bounded_console_diagnostic(
+                    requirement.subject,
+                    max_chars=_CONSOLE_COVERAGE_SUBJECT_CHARS,
+                )
+                reason_code = _bounded_console_diagnostic(
+                    requirement.reason_code,
+                    max_chars=_CONSOLE_COVERAGE_REASON_CHARS,
+                )
+                print(
+                    f"    {status.value}: {subject} [{reason_code}]"
+                )
+
+        visible_counts = Counter(
+            requirement.status for requirement in family.requirements
+        )
+        for status in _UNCOVERED_BEHAVIORAL_STATUSES:
+            hidden = getattr(family, status.value) - visible_counts[status]
+            if hidden:
+                print(
+                    f"    {status.value}: {hidden} additional requirement "
+                    f"subject(s) omitted from the bounded coverage record"
+                )
+
+
 def _print_inspection(
     spec: AgentSpec,
     *,
@@ -1196,6 +1290,7 @@ def _generate_command(
     if realized:
         print(f"Realized:     {realized} display overlay(s)")
     print(f"Fingerprint:  {generation.suite.fingerprint}")
+    _print_declared_behavioral_coverage(generation.behavioral_coverage)
     _print_action_path_coverage(generation.suite.coverage, generation.target_root)
     print()
     print("Next steps:")
@@ -1291,6 +1386,7 @@ def _test_command(
     print(f"Failed:        {counts[Verdict.FAIL]}")
     print(f"Inconclusive:  {counts[Verdict.INCONCLUSIVE]}")
     print(f"Infra errors:  {counts[Verdict.INFRA_ERROR]}")
+    _print_declared_behavioral_coverage(execution.behavioral_coverage)
     _print_action_path_exercise(execution)
 
     severity_counts = Counter(item.severity for item in execution.findings)

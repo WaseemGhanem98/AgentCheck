@@ -268,6 +268,12 @@ class FrozenSuite(ContractModel):
         fingerprints = [case.scenario.fingerprint for case in self.cases]
         if len(fingerprints) != len(set(fingerprints)):
             raise ValueError("frozen suite scenarios must be deduplicated")
+        if self.selection is not None and set(scenario_ids) != set(
+            self.selection.selected_ids
+        ):
+            raise ValueError(
+                "frozen suite cases must match selection plan selected IDs"
+            )
 
         expected = self.expected_fingerprint()
         if self.fingerprint and not _digest_equal(self.fingerprint, expected):
@@ -429,8 +435,16 @@ def build_frozen_suite(
     representative_inputs: Mapping[str, Mapping[str, Any]] | None = None,
     scenario_requests: Mapping[str, str] | None = None,
     prerequisite_outcomes: Mapping[str, Any] | None = None,
+    _reference_scenarios: list[Scenario] | None = None,
 ) -> FrozenSuite:
-    """Derive, deduplicate, lint, and freeze every supported case for a target."""
+    """Derive, deduplicate, lint, and freeze every supported case for a target.
+
+    ``_reference_scenarios`` is an internal collector for the pre-selection case
+    set. Behavioral coverage needs that complete requirement universe, and a
+    bounded suite discards it before freezing. It is not returned or stored
+    because adding it to ``FrozenSuite`` would re-identify every existing suite
+    fingerprint.
+    """
 
     if max_mutations is not None and not include_mutations:
         raise ValueError("max_mutations requires include_mutations=True")
@@ -661,6 +675,15 @@ def build_frozen_suite(
         raise ScenarioValidationError(
             "No valid scenarios remain after linting; refusing to freeze a suite "
             "that cannot produce a verdict."
+        )
+
+    if _reference_scenarios is not None:
+        if _reference_scenarios:
+            raise ValueError(
+                "internal reference_scenarios collector must be empty"
+            )
+        _reference_scenarios.extend(
+            case.scenario for case in cases
         )
 
     selection: SelectionPlan | None = None

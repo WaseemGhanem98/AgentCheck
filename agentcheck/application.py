@@ -20,6 +20,11 @@ from agentcheck.config import (
     contained_path,
     load_config,
 )
+from agentcheck.coverage import (
+    BehavioralCoverage,
+    BehavioralCoverageReferenceScope,
+    analyze_behavioral_coverage,
+)
 from agentcheck.domain import (
     AgentSpec,
     CanonicalRun,
@@ -126,6 +131,7 @@ class SuiteGeneration:
     spec: AgentSpec
     suite: FrozenSuite
     suite_path: Path
+    behavioral_coverage: BehavioralCoverage
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +166,7 @@ class SuiteExecution:
     findings: tuple[Finding, ...]
     artifact_directory: Path
     report_path: Path
+    behavioral_coverage: BehavioralCoverage
     selection: SelectionPlan | None = None
     replay_manifest_path: Path | None = None
 
@@ -273,6 +280,7 @@ def generate_suite(
     representative_inputs = load_representative_inputs(root, spec)
     scenario_requests = load_scenario_requests(root, spec)
     prerequisite_outcomes = load_prerequisite_outcomes(root, spec)
+    coverage_reference_scenarios: list[Scenario] = []
     suite = build_frozen_suite(
         spec,
         config,
@@ -285,6 +293,13 @@ def generate_suite(
         representative_inputs=representative_inputs,
         scenario_requests=scenario_requests,
         prerequisite_outcomes=prerequisite_outcomes,
+        _reference_scenarios=coverage_reference_scenarios,
+    )
+    behavioral_coverage = analyze_behavioral_coverage(
+        spec,
+        suite.scenarios,
+        suite_fingerprint=suite.fingerprint,
+        reference_scenarios=tuple(coverage_reference_scenarios),
     )
     write_frozen_suite(destination, suite, force=force)
     return SuiteGeneration(
@@ -293,6 +308,7 @@ def generate_suite(
         spec=spec,
         suite=suite,
         suite_path=destination,
+        behavioral_coverage=behavioral_coverage,
     )
 
 
@@ -403,6 +419,17 @@ def execute_suite(
             "No valid scenarios remain after linting; no agent verdict was produced."
         )
 
+    reference_scenarios = tuple(valid)
+    bounded_frozen = (
+        frozen is not None
+        and frozen.selection is not None
+        and bool(frozen.selection.excluded_ids)
+    )
+    reference_scope = (
+        BehavioralCoverageReferenceScope.AVAILABLE_SCENARIOS_ONLY
+        if bounded_frozen
+        else BehavioralCoverageReferenceScope.COMPLETE
+    )
     selection_plan: SelectionPlan | None = None if frozen is None else frozen.selection
     if select == "coverage":
         extra_tags: dict[str, Sequence[str]] = {}
@@ -430,6 +457,12 @@ def execute_suite(
                 "no agent verdict was produced."
             )
 
+    if reference_scope is BehavioralCoverageReferenceScope.AVAILABLE_SCENARIOS_ONLY:
+        # A persisted pruned suite cannot supply the cases it discarded before
+        # freezing, so the reference set can only be what actually survived.
+        # Re-read it here so a further runtime selection is reflected too.
+        reference_scenarios = tuple(valid)
+
     if on_prepared is not None:
         excluded_by_selection = (
             len(selection_plan.excluded_ids) if selection_plan is not None else 0
@@ -445,6 +478,8 @@ def execute_suite(
         revision=revision,
         valid=tuple(valid),
         invalid=tuple(invalid),
+        reference_scenarios=reference_scenarios,
+        reference_scope=reference_scope,
         frozen=frozen,
         selection_plan=selection_plan,
         progress=progress,
@@ -511,6 +546,8 @@ def replay_suite(
         revision=revision,
         valid=tuple(valid),
         invalid=(),
+        reference_scenarios=tuple(valid),
+        reference_scope=BehavioralCoverageReferenceScope.COMPLETE,
         frozen=None,
         selection_plan=None,
         progress=progress,
@@ -767,12 +804,22 @@ def _execute_valid_scenarios(
     revision: str | None,
     valid: tuple[Scenario, ...],
     invalid: tuple[InvalidScenario, ...],
+    reference_scenarios: tuple[Scenario, ...],
+    reference_scope: BehavioralCoverageReferenceScope,
     frozen: FrozenSuite | None,
     selection_plan: SelectionPlan | None,
     progress: ProgressCallback | None,
     persist_store: bool,
     policy_pack_ids: tuple[str, ...],
 ) -> SuiteExecution:
+    valid_scenarios = tuple(valid)
+    behavioral_coverage = analyze_behavioral_coverage(
+        spec,
+        valid_scenarios,
+        reference_scenarios=reference_scenarios,
+        reference_scope=reference_scope,
+        suite_fingerprint=frozen.fingerprint if frozen is not None else None,
+    )
     indexed_results: dict[int, tuple[CanonicalRun | None, CaseEvaluation]] = {}
     with ThreadPoolExecutor(
         max_workers=min(config.max_concurrency, max(1, len(valid))),
@@ -823,7 +870,6 @@ def _execute_valid_scenarios(
     ordered = tuple(indexed_results[index] for index in range(len(valid)))
     runs = tuple(case_run for case_run, _ in ordered if case_run is not None)
     evaluations = tuple(evaluation for _, evaluation in ordered)
-    valid_scenarios = tuple(valid)
     findings = analyze_failures(valid_scenarios, evaluations)
     artifacts = ArtifactStore(root, config.artifacts_directory, suite_run_id)
     artifacts.write_json("agent-spec.json", spec)
@@ -862,6 +908,7 @@ def _execute_valid_scenarios(
         "counts": {verdict.value: counts[verdict] for verdict in Verdict},
         "finding_count": len(findings),
         "seed": effective_seed,
+        "behavioral_coverage": behavioral_coverage.model_dump(mode="json"),
     }
     if selection_plan is not None:
         summary["excluded_by_selection"] = len(selection_plan.excluded_ids)
@@ -884,6 +931,8 @@ def _execute_valid_scenarios(
         seed=effective_seed,
         frozen_suite=frozen,
         selection_plan=selection_plan,
+        behavioral_coverage=behavioral_coverage,
+        _coverage_reference_scenarios=reference_scenarios,
     )
     report_path = artifacts.write_text("report.html", report)
     replay_path = _emit_replay_manifest(
@@ -912,6 +961,7 @@ def _execute_valid_scenarios(
         artifact_directory=artifacts.root,
         report_path=report_path,
         selection=selection_plan,
+        behavioral_coverage=behavioral_coverage,
         replay_manifest_path=replay_path,
     )
     if persist_store:

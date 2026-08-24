@@ -9,6 +9,11 @@ from typing import TypeVar
 import pytest
 
 from agentcheck.artifacts import ArtifactStore
+from agentcheck.coverage import (
+    BehavioralCoverage,
+    BehavioralCoverageReferenceScope,
+    analyze_behavioral_coverage,
+)
 from agentcheck.cli import main
 from agentcheck.domain import (
     AgentProperty,
@@ -42,7 +47,9 @@ from agentcheck.generate import (
     FrozenSuite,
     build_account_support_suite,
 )
+from agentcheck.report.render import _behavioral_coverage_html
 from agentcheck.generate.suite import GeneratorProvenance, SuiteCoverage
+from agentcheck.generate.selection import SelectionDecision, SelectionPlan
 from agentcheck.report import load_stored_run, render_report, render_stored_run
 from agentcheck.store import SqliteEvaluationStore, StoredRun
 
@@ -82,6 +89,74 @@ def test_report_escapes_xss_and_hides_system_prompt() -> None:
     assert "<script" not in report.casefold()
     assert "https://" not in report
     assert "Content-Security-Policy" in report
+
+
+def test_declared_behavioral_coverage_suppresses_all_zero_families() -> None:
+    report = render_report(
+        run_id="run",
+        target="target",
+        git_revision=None,
+        spec=_spec("agent"),
+        scenarios=(),
+        runs=(),
+        evaluations=(),
+        findings=(),
+    )
+
+    assert "Declared behavioral coverage" in report
+    assert "No declared behavioral coverage requirements were derived." in report
+    assert "<h4>Success path</h4>" not in report
+    assert "Unknown and unsupported requirements remain explicit." in report
+
+
+def test_declared_behavioral_coverage_is_escaped_and_avoids_a_percentage() -> None:
+    hostile = '<script>coverage</script><img src=x onerror="alert(1)">'
+    spec = _spec("agent")
+    payload = analyze_behavioral_coverage(spec, ()).model_dump(mode="json")
+    payload["families"] = [
+        {
+            "dimension": "failure_handling",
+            "missing": 1,
+            "requirements": [
+                {
+                    "subject": hostile,
+                    "status": "missing",
+                    "reason_code": hostile,
+                }
+            ],
+        }
+    ]
+    payload.pop("fingerprint")
+    coverage = BehavioralCoverage.model_validate_json(json.dumps(payload))
+
+    subsection = _behavioral_coverage_html(coverage)
+    assert hostile not in subsection
+    assert "&lt;script&gt;coverage&lt;/script&gt;" in subsection
+    assert "Applicable: 1" in subsection
+    assert "Missing: 1" in subsection
+    assert "%" not in subsection
+    assert "does not prove that the agent exercised an action path" in subsection
+    assert "complete coverage of real-world behavioral risks" in subsection
+
+
+def test_render_report_rejects_coverage_bound_to_another_spec() -> None:
+    spec = _spec("agent")
+    coverage = analyze_behavioral_coverage(spec, ()).model_copy(
+        update={"spec_id": "different-spec"}
+    )
+
+    with pytest.raises(ValueError):
+        render_report(
+            run_id="run",
+            target="target",
+            git_revision=None,
+            spec=spec,
+            scenarios=(),
+            runs=(),
+            evaluations=(),
+            findings=(),
+            behavioral_coverage=coverage,
+        )
 
 
 def test_report_redacts_secrets_in_instructions_and_structured_state() -> None:
@@ -244,6 +319,207 @@ def _write_run(
     return artifacts.root
 
 
+def _selection_plan(selected_id: str, excluded_id: str) -> SelectionPlan:
+    return SelectionPlan(
+        selected_ids=(selected_id,),
+        excluded_ids=(excluded_id,),
+        decisions=(
+            SelectionDecision(
+                scenario_id=selected_id,
+                selected=True,
+                reason="selected for coverage",
+            ),
+            SelectionDecision(
+                scenario_id=excluded_id,
+                selected=False,
+                reason="excluded by coverage selection",
+            ),
+        ),
+    )
+
+
+def test_old_summary_derives_behavioral_coverage_from_stored_artifacts(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "target"
+    root.mkdir()
+    _write_run(root, "run-old-summary")
+
+    loaded = load_stored_run(root, run_id="run-old-summary")
+
+    assert loaded.behavioral_coverage == analyze_behavioral_coverage(
+        loaded.spec, loaded.scenarios
+    )
+    generated = render_stored_run(root, run_id="run-old-summary")
+    report = generated.report_path.read_text(encoding="utf-8")
+    assert "Declared behavioral coverage" in report
+    assert "structural suite-design analysis" in report
+
+
+def test_old_selected_summary_marks_available_denominator_incomplete(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "target"
+    root.mkdir()
+    reference = build_account_support_suite(seed=SEED)[:2]
+    directory = _write_run(
+        root,
+        "run-old-selected-summary",
+        scenario=reference[0],
+    )
+    summary_path = directory / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["selection"] = _selection_plan(
+        reference[0].scenario_id, reference[1].scenario_id
+    ).model_dump(mode="json")
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    loaded = load_stored_run(root, run_id="run-old-selected-summary")
+
+    assert (
+        loaded.behavioral_coverage.reference_scope
+        is BehavioralCoverageReferenceScope.AVAILABLE_SCENARIOS_ONLY
+    )
+    generated = render_stored_run(root, run_id="run-old-selected-summary")
+    report = generated.report_path.read_text(encoding="utf-8")
+    assert "Incomplete denominator" in report
+    assert "reference scope is available scenarios only" in report
+    assert "may undercount missing risks" in report
+
+    summary["selection"] = _selection_plan(
+        reference[1].scenario_id, reference[0].scenario_id
+    ).model_dump(mode="json")
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="selection binding"):
+        load_stored_run(root, run_id="run-old-selected-summary")
+
+
+def test_stored_complete_coverage_is_not_downgraded_by_selection(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "target"
+    root.mkdir()
+    spec = _spec("Account Support Agent")
+    reference = build_account_support_suite(seed=SEED)[:2]
+    selected = (reference[0],)
+    directory = _write_run(
+        root,
+        "run-complete-selected-summary",
+        spec=spec,
+        scenario=selected[0],
+    )
+    coverage = analyze_behavioral_coverage(
+        spec,
+        selected,
+        reference_scenarios=reference,
+    )
+    summary_path = directory / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["selection"] = _selection_plan(
+        reference[0].scenario_id, reference[1].scenario_id
+    ).model_dump(mode="json")
+    summary["behavioral_coverage"] = coverage.model_dump(mode="json")
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    loaded = load_stored_run(root, run_id="run-complete-selected-summary")
+
+    assert (
+        loaded.behavioral_coverage.reference_scope
+        is BehavioralCoverageReferenceScope.COMPLETE
+    )
+    generated = render_stored_run(root, run_id="run-complete-selected-summary")
+    report = generated.report_path.read_text(encoding="utf-8")
+    assert "Incomplete denominator" not in report
+    assert "tool:update_email" in report
+
+    coverage_document = summary["behavioral_coverage"]
+    coverage_document["reference_scenario_count"] = 1
+    coverage_document["reference_scenario_digest"] = coverage_document[
+        "scenario_digest"
+    ]
+    coverage_document.pop("fingerprint")
+    rebound = BehavioralCoverage.model_validate_json(json.dumps(coverage_document))
+    summary["behavioral_coverage"] = rebound.model_dump(mode="json")
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="behavioral coverage|selection binding"):
+        load_stored_run(root, run_id="run-complete-selected-summary")
+
+
+def test_stored_summary_rejects_explicit_null_behavioral_coverage(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "target"
+    root.mkdir()
+    directory = _write_run(root, "run-null-coverage")
+    summary_path = directory / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["behavioral_coverage"] = None
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="behavioral coverage"):
+        load_stored_run(root, run_id="run-null-coverage")
+
+
+def test_stored_summary_loads_bound_behavioral_coverage(tmp_path: Path) -> None:
+    root = tmp_path / "target"
+    root.mkdir()
+    directory = _write_run(root, "run-with-coverage")
+    legacy = load_stored_run(root, run_id="run-with-coverage")
+    summary_path = directory / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["behavioral_coverage"] = legacy.behavioral_coverage.model_dump(mode="json")
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    loaded = load_stored_run(root, run_id="run-with-coverage")
+
+    assert loaded.behavioral_coverage == legacy.behavioral_coverage
+
+
+def test_stored_summary_rejects_behavioral_coverage_bound_to_another_spec(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "target"
+    root.mkdir()
+    directory = _write_run(root, "run-mismatched-coverage")
+    legacy = load_stored_run(root, run_id="run-mismatched-coverage")
+    summary_path = directory / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["behavioral_coverage"] = legacy.behavioral_coverage.model_dump(mode="json")
+    summary["behavioral_coverage"]["spec_id"] = "different-spec"
+    summary["behavioral_coverage"].pop("fingerprint")
+    rebound = BehavioralCoverage.model_validate_json(
+        json.dumps(summary["behavioral_coverage"])
+    )
+    summary["behavioral_coverage"] = rebound.model_dump(mode="json")
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="behavioral coverage"):
+        load_stored_run(root, run_id="run-mismatched-coverage")
+
+
+def test_stored_summary_rejects_behavioral_coverage_bound_to_other_scenarios(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "target"
+    root.mkdir()
+    directory = _write_run(root, "run-mismatched-scenarios")
+    legacy = load_stored_run(root, run_id="run-mismatched-scenarios")
+    summary_path = directory / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["behavioral_coverage"] = legacy.behavioral_coverage.model_dump(mode="json")
+    summary["behavioral_coverage"]["scenario_digest"] = "sha256:different"
+    summary["behavioral_coverage"]["reference_scenario_digest"] = "sha256:different"
+    summary["behavioral_coverage"].pop("fingerprint")
+    rebound = BehavioralCoverage.model_validate_json(
+        json.dumps(summary["behavioral_coverage"])
+    )
+    summary["behavioral_coverage"] = rebound.model_dump(mode="json")
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="behavioral coverage"):
+        load_stored_run(root, run_id="run-mismatched-scenarios")
+
+
 def _index_run(root: Path, run_id: str, *, recorded_at: str) -> None:
     SqliteEvaluationStore(root / ".agentcheck" / "agentcheck.sqlite").record_run(
         StoredRun(
@@ -346,6 +622,142 @@ def test_render_report_shows_lineage_coverage_and_policy_when_available() -> Non
     assert "Seed 1729" in report
 
 
+def test_direct_report_uses_frozen_suite_as_behavioral_requirement_universe() -> None:
+    reference = build_account_support_suite(seed=SEED)[:2]
+    selected = (reference[0],)
+    spec = _spec("Account Support Agent")
+    frozen = FrozenSuite(
+        spec_id=spec.spec_id,
+        seed=SEED,
+        provenance=GeneratorProvenance(
+            generator="test",
+            generator_version="1",
+            sources=("test",),
+        ),
+        cases=tuple(
+            FrozenCase(
+                scenario=scenario,
+                lineage=CaseLineage(origin=CaseOrigin.BUILT_IN),
+            )
+            for scenario in reference
+        ),
+    )
+
+    report = render_report(
+        run_id="run",
+        target="target",
+        git_revision=None,
+        spec=spec,
+        scenarios=selected,
+        runs=(),
+        evaluations=(),
+        findings=(),
+        seed=SEED,
+        frozen_suite=frozen,
+        _coverage_reference_scenarios=reference,
+    )
+
+    subsection = report.split("<h3>Declared behavioral coverage</h3>", 1)[1].split(
+        "<p>1 valid scenario", 1
+    )[0]
+    assert "<h4>Fabricated success after failure</h4>" in subsection
+    assert "Evidence scenarios: 1 · Reference scenarios: 2" in subsection
+    assert "Applicable: 1 · Covered: 0 · Partial: 0 · Missing: 1" in subsection
+    assert "tool:update_email" in subsection
+
+    conservative_report = render_report(
+        run_id="run",
+        target="target",
+        git_revision=None,
+        spec=spec,
+        scenarios=selected,
+        runs=(),
+        evaluations=(),
+        findings=(),
+        seed=SEED,
+        frozen_suite=frozen,
+    )
+    conservative_subsection = conservative_report.split(
+        "<h3>Declared behavioral coverage</h3>", 1
+    )[1].split("<p>1 valid scenario", 1)[0]
+    assert "Incomplete denominator" in conservative_subsection
+    assert "Evidence scenarios: 1 · Reference scenarios: 1" in conservative_subsection
+    assert "tool:update_email" not in conservative_subsection
+
+    other_denominator = analyze_behavioral_coverage(
+        spec,
+        selected,
+        reference_scenarios=selected,
+        suite_fingerprint=frozen.fingerprint,
+    )
+    with pytest.raises(ValueError, match="reference_scenario"):
+        render_report(
+            run_id="run",
+            target="target",
+            git_revision=None,
+            spec=spec,
+            scenarios=selected,
+            runs=(),
+            evaluations=(),
+            findings=(),
+            seed=SEED,
+            frozen_suite=frozen,
+            behavioral_coverage=other_denominator,
+        )
+
+
+def test_direct_selected_report_caveats_unavailable_requirement_universe() -> None:
+    reference = build_account_support_suite(seed=SEED)[:2]
+    selected = (reference[0],)
+    plan = _selection_plan(reference[0].scenario_id, reference[1].scenario_id)
+
+    report = render_report(
+        run_id="run",
+        target="target",
+        git_revision=None,
+        spec=_spec("Account Support Agent"),
+        scenarios=selected,
+        runs=(),
+        evaluations=(),
+        findings=(),
+        seed=SEED,
+        selection_plan=plan,
+    )
+
+    subsection = report.split("<h3>Declared behavioral coverage</h3>", 1)[1].split(
+        "<p>1 valid scenario", 1
+    )[0]
+    assert "Incomplete denominator" in subsection
+    assert "Evidence scenarios: 1 · Reference scenarios: 1" in subsection
+    assert "reference scope is available scenarios only" in subsection
+    assert "may undercount missing risks" in subsection
+    assert "tool:update_email" not in subsection
+
+
+def test_direct_report_without_frozen_suite_rejects_suite_bound_coverage() -> None:
+    scenario = build_account_support_suite(seed=SEED)[0]
+    spec = _spec("Account Support Agent")
+    coverage = analyze_behavioral_coverage(
+        spec,
+        (scenario,),
+        suite_fingerprint="sha256:unavailable-suite",
+    )
+
+    with pytest.raises(ValueError, match="suite_fingerprint"):
+        render_report(
+            run_id="run",
+            target="target",
+            git_revision=None,
+            spec=spec,
+            scenarios=(scenario,),
+            runs=(),
+            evaluations=(),
+            findings=(),
+            seed=SEED,
+            behavioral_coverage=coverage,
+        )
+
+
 def test_report_cli_help_discloses_read_only_behavior(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -390,6 +802,7 @@ def test_explicit_run_report_does_not_execute_the_target(
     assert "Content-Security-Policy" in report
     assert "<script" not in report.casefold()
     assert "Account Support Agent" in report
+    assert "Declared behavioral coverage" in report
     assert "Seed 1729" in report
 
 

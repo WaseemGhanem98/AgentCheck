@@ -50,6 +50,7 @@ from agentcheck.generate import (
     FROZEN_SUITE_CONTRACT_VERSION,
     CaseOrigin,
     FrozenSuite,
+    SelectionPlan,
     build_boundary_cases,
     build_frozen_suite,
     configured_frozen_suite,
@@ -59,7 +60,9 @@ from agentcheck.generate import (
     write_frozen_suite,
 )
 from agentcheck.generate.boundaries import BoundaryKind
+from agentcheck.generate.selection import SelectionDecision
 from agentcheck.inspect import load_target
+from agentcheck.report import load_stored_run, render_stored_run
 from agentcheck.runner import ToolGateway
 from agentcheck.runner.orchestrator import ProcessResult
 
@@ -206,6 +209,27 @@ def test_frozen_suite_round_trips_and_keeps_stable_identity() -> None:
         for case in first.cases
         if case.lineage.origin is CaseOrigin.SCHEMA_BOUNDARY
     )
+
+
+def test_frozen_suite_rejects_selection_not_bound_to_cases() -> None:
+    suite = build_frozen_suite(_example_spec(), AgentCheckConfig(), seed=SEED)
+    selected_id = suite.cases[0].scenario.scenario_id
+    selection = SelectionPlan(
+        max_cases=1,
+        selected_ids=(selected_id,),
+        decisions=(
+            SelectionDecision(
+                scenario_id=selected_id,
+                selected=True,
+                reason="selected for malformed fixture",
+            ),
+        ),
+    )
+
+    with pytest.raises(
+        ValidationError, match="cases must match selection plan selected IDs"
+    ):
+        _reissue(suite, selection=selection.model_dump(mode="json"))
 
 
 def test_same_seed_same_suite_and_different_seed_changes_identity() -> None:
@@ -422,6 +446,115 @@ def test_lint_failure_rejects_a_frozen_suite_before_execution(
     assert called == []
 
 
+def test_selected_lint_invalid_frozen_case_loads_and_renders(
+    tmp_path: Path,
+) -> None:
+    target = _copy_example(tmp_path)
+    generation = application.generate_suite(target, seed=SEED, force=True)
+    suite = generation.suite
+    valid_case = next(
+        case for case in suite.cases if case.scenario.scenario_id == "happy_lookup"
+    )
+    invalid_case = next(
+        case for case in suite.cases if case.scenario.scenario_id != "happy_lookup"
+    )
+    invalid_data = invalid_case.scenario.model_dump(mode="json")
+    invalid_data["scenario_id"] = "lint-invalid-frozen-case"
+    for group in (
+        "tool_fixtures",
+        "required_tool_behavior",
+        "allowed_tool_behavior",
+        "forbidden_tool_behavior",
+    ):
+        for item in invalid_data[group]:
+            item["tool_name"] = "missing_tool"
+    invalid_data["fingerprint"] = ""
+    invalid_scenario = Scenario.model_validate_json(json.dumps(invalid_data))
+    excluded_case = next(
+        case
+        for case in suite.cases
+        if case.scenario.scenario_id
+        not in {valid_case.scenario.scenario_id, invalid_case.scenario.scenario_id}
+    )
+    selection = SelectionPlan(
+        max_cases=2,
+        selected_ids=(
+            valid_case.scenario.scenario_id,
+            invalid_scenario.scenario_id,
+        ),
+        excluded_ids=(excluded_case.scenario.scenario_id,),
+        decisions=(
+            SelectionDecision(
+                scenario_id=valid_case.scenario.scenario_id,
+                selected=True,
+                reason="selected before lint",
+            ),
+            SelectionDecision(
+                scenario_id=invalid_scenario.scenario_id,
+                selected=True,
+                reason="selected before lint",
+            ),
+            SelectionDecision(
+                scenario_id=excluded_case.scenario.scenario_id,
+                selected=False,
+                reason="excluded before lint",
+            ),
+        ),
+    )
+    partial = _reissue(
+        suite,
+        cases=[
+            json.loads(valid_case.model_dump_json()),
+            {
+                "scenario": json.loads(invalid_scenario.model_dump_json()),
+                "lineage": json.loads(invalid_case.lineage.model_dump_json()),
+            },
+        ],
+        selection=selection.model_dump(mode="json"),
+    )
+    write_frozen_suite(target / DEFAULT_SUITE_FILENAME, partial, force=True)
+
+    execution = application.execute_suite(
+        target,
+        run_id="partial-invalid-frozen",
+        persist_store=False,
+    )
+
+    assert tuple(scenario.scenario_id for scenario in execution.scenarios) == (
+        "happy_lookup",
+    )
+    assert len(execution.invalid_scenarios) == 1
+    assert execution.behavioral_coverage.scenario_count == 1
+    assert execution.behavioral_coverage.reference_scenario_count == 1
+    assert execution.report_path.is_file()
+    assert "Declared behavioral coverage" in execution.report_path.read_text(
+        encoding="utf-8"
+    )
+    assert execution.selection == selection
+    loaded = load_stored_run(target, run_id=execution.run_id)
+    assert loaded.selection == selection
+    assert loaded.behavioral_coverage == execution.behavioral_coverage
+
+    invalid_path = execution.artifact_directory / "invalid-scenarios.json"
+    original_invalid = json.loads(invalid_path.read_text(encoding="utf-8"))
+    duplicate_invalid = json.loads(json.dumps(original_invalid))
+    duplicate_invalid["items"].append(duplicate_invalid["items"][0])
+    invalid_path.write_text(json.dumps(duplicate_invalid), encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="scenario IDs must be unique"):
+        load_stored_run(target, run_id=execution.run_id)
+
+    unexpected_invalid = json.loads(json.dumps(original_invalid))
+    unexpected_invalid["items"][0]["scenario"]["scenario_id"] = (
+        "unexpected-invalid-id"
+    )
+    invalid_path.write_text(json.dumps(unexpected_invalid), encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="selection binding"):
+        load_stored_run(target, run_id=execution.run_id)
+
+    invalid_path.write_text(json.dumps(original_invalid), encoding="utf-8")
+    stored = render_stored_run(target, run_id=execution.run_id)
+    assert stored.report_path.is_file()
+
 def test_suite_path_config_selects_the_frozen_file(tmp_path: Path) -> None:
     target = _copy_example(tmp_path)
     spec = _example_spec()
@@ -466,6 +599,11 @@ def test_cli_generate_writes_a_suite_and_honors_force(
     assert str(target / DEFAULT_SUITE_FILENAME) in output.out
     assert "Cases:" in output.out
     assert "Rejected:     0" in output.out
+    assert "Declared behavioral coverage:" in output.out
+    coverage_output = output.out.split("Declared behavioral coverage:", 1)[1]
+    coverage_output = coverage_output.split("Action-path coverage:", 1)[0]
+    assert "%" not in coverage_output
+    assert "complete coverage" not in coverage_output.casefold()
     assert f"- agentcheck test {target}" in output.out
 
     assert main(["generate", str(target)]) == 2

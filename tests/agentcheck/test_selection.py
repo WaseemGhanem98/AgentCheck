@@ -12,6 +12,10 @@ import agentcheck.application as application
 from agentcheck.adapters import OpenAIAgentsAdapter
 from agentcheck.cli import main
 from agentcheck.config import AgentCheckConfig, load_config
+from agentcheck.coverage import (
+    BehavioralCoverage,
+    BehavioralCoverageReferenceScope,
+)
 from agentcheck.domain import Verdict
 from agentcheck.errors import ConfigurationError
 from agentcheck.generate import (
@@ -249,6 +253,44 @@ def test_generate_max_cases_records_lineage_and_same_seed_identity() -> None:
     )
 
 
+def test_max_cases_coverage_keeps_or_discloses_reference_universe(
+    tmp_path: Path,
+) -> None:
+    target = _copy_example(tmp_path)
+    generation = application.generate_suite(
+        target,
+        seed=SEED,
+        max_cases=8,
+        force=True,
+    )
+    selection = generation.suite.selection
+    assert selection is not None
+    selected_count = len(selection.selected_ids)
+    candidate_count = len(selection.decisions)
+    assert candidate_count == selected_count + len(selection.excluded_ids)
+    assert candidate_count > selected_count
+
+    generated = generation.behavioral_coverage
+    assert generated.reference_scope is BehavioralCoverageReferenceScope.COMPLETE
+    assert generated.scenario_count == selected_count
+    assert generated.reference_scenario_count == candidate_count
+    assert generated.reference_scenario_digest != generated.scenario_digest
+
+    execution = application.execute_suite(
+        target,
+        run_id="bounded-coverage-scope",
+        persist_store=False,
+    )
+    executed = execution.behavioral_coverage
+    assert executed.scenario_count == selected_count
+    assert (
+        executed.reference_scope
+        is BehavioralCoverageReferenceScope.AVAILABLE_SCENARIOS_ONLY
+    )
+    assert executed.reference_scenario_count == selected_count
+    assert executed.reference_scenario_digest == executed.scenario_digest
+
+
 def test_config_max_cases_is_optional_and_keeps_v1(tmp_path: Path) -> None:
     (tmp_path / "agent.py").write_text("agent = object()\n", encoding="utf-8")
     (tmp_path / "agentcheck.json").write_text(
@@ -290,6 +332,14 @@ def test_cli_generate_max_cases_and_test_select_coverage(tmp_path: Path) -> None
     assert summary["excluded_by_selection"] > 0
     assert "selection" in summary
     assert "coverage" in summary
+    behavioral = BehavioralCoverage.model_validate_json(
+        json.dumps(summary["behavioral_coverage"])
+    )
+    assert behavioral == execution.behavioral_coverage
+    assert behavioral.scenario_count == len(execution.scenarios)
+    assert behavioral.suite_fingerprint == generation.suite.fingerprint
+    assert generation.behavioral_coverage.suite_fingerprint == generation.suite.fingerprint
+    assert generation.suite.fingerprint == generation.suite.expected_fingerprint()
     excluded = set(summary["selection"]["excluded_ids"])
     evaluated = {item.scenario_id for item in execution.evaluations}
     assert excluded.isdisjoint(evaluated)
