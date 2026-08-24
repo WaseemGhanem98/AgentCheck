@@ -8,11 +8,30 @@ from types import SimpleNamespace
 import pytest
 
 import agentcheck.cli as cli
+from agentcheck.coverage import (
+    BehavioralCoverage,
+    BehavioralCoverageFamily,
+    BehavioralCoverageReferenceScope,
+    BehavioralCoverageRequirement,
+    BehavioralCoverageStatus,
+    BehavioralDimension,
+)
 from agentcheck.domain import Scenario, Verdict
 from agentcheck.evaluate import infrastructure_evaluation
 from agentcheck.errors import ConfigurationError
 from agentcheck.generate import build_account_support_suite
 from agentcheck.initialize import write_initial_config
+
+
+def _empty_behavioral_coverage() -> BehavioralCoverage:
+    return BehavioralCoverage(
+        spec_id="test-spec",
+        spec_digest="sha256:test-spec",
+        scenario_count=1,
+        scenario_digest="sha256:test-scenarios",
+        reference_scenario_count=1,
+        reference_scenario_digest="sha256:test-scenarios",
+    )
 
 
 def _infra_execution(
@@ -39,6 +58,7 @@ def _infra_execution(
         runs=(),
         findings=(),
         report_path=Path("report.html"),
+        behavioral_coverage=_empty_behavioral_coverage(),
         replay_manifest_path=None,
     )
 
@@ -70,6 +90,7 @@ def _execution_for_verdict(
         runs=(),
         findings=(),
         report_path=Path("report.html"),
+        behavioral_coverage=_empty_behavioral_coverage(),
         replay_manifest_path=None,
     )
 
@@ -107,6 +128,146 @@ def _execute_with_progress(execution: SimpleNamespace):
         return execution
 
     return execute
+
+
+def test_declared_behavioral_coverage_prints_counts_and_exact_open_subjects(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    requirements = tuple(
+        BehavioralCoverageRequirement(
+            subject=subject,
+            status=status,
+            reason_code=f"reason_{status.value}",
+        )
+        for subject, status in (
+            ("tool:covered", BehavioralCoverageStatus.COVERED),
+            ("tool:partial", BehavioralCoverageStatus.PARTIAL),
+            ("tool:missing", BehavioralCoverageStatus.MISSING),
+            ("tool:unknown", BehavioralCoverageStatus.UNKNOWN),
+            ("tool:unsupported", BehavioralCoverageStatus.UNSUPPORTED),
+        )
+    )
+    coverage = BehavioralCoverage(
+        spec_id="test-spec",
+        spec_digest="sha256:test-spec",
+        scenario_count=5,
+        scenario_digest="sha256:test-scenarios",
+        reference_scenario_count=7,
+        reference_scenario_digest="sha256:test-reference-scenarios",
+        families=(
+            BehavioralCoverageFamily(dimension=BehavioralDimension.SUCCESS_PATH),
+            BehavioralCoverageFamily(
+                dimension=BehavioralDimension.FAILURE_HANDLING,
+                covered=1,
+                partial=1,
+                missing=1,
+                unknown=1,
+                unsupported=1,
+                requirements=requirements,
+            ),
+        ),
+    )
+
+    cli._print_declared_behavioral_coverage(coverage)
+
+    output = capsys.readouterr().out
+    assert "Declared behavioral coverage:" in output
+    assert "Evidence scenarios: 5 / 7 reference scenarios" in output
+    assert (
+        "Failure handling: 1 covered / 3 applicable; partial 1; missing 1; "
+        "unknown 1; unsupported 1"
+    ) in output
+    assert "partial: tool:partial [reason_partial]" in output
+    assert "missing: tool:missing [reason_missing]" in output
+    assert "unknown: tool:unknown [reason_unknown]" in output
+    assert "unsupported: tool:unsupported [reason_unsupported]" in output
+    assert "tool:covered" not in output
+    assert "Success path:" not in output
+    assert "%" not in output
+    assert "complete coverage" not in output.casefold()
+
+
+def test_declared_behavioral_coverage_redacts_bounded_requirement_identifiers(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    raw_subject_secret = "sk-secretvalue123"
+    secret_subject = f"tool:{raw_subject_secret}"
+    secret_reason = "sk-reasonsecret123"
+    coverage = BehavioralCoverage(
+        spec_id="test-spec",
+        spec_digest="sha256:test-spec",
+        scenario_count=1,
+        scenario_digest="sha256:test-scenarios",
+        reference_scenario_count=1,
+        reference_scenario_digest="sha256:test-scenarios",
+        families=(
+            BehavioralCoverageFamily(
+                dimension=BehavioralDimension.RETRY_CONTROL,
+                unknown=1,
+                requirements=(
+                    BehavioralCoverageRequirement(
+                        subject=secret_subject,
+                        status=BehavioralCoverageStatus.UNKNOWN,
+                        reason_code=secret_reason,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+    cli._print_declared_behavioral_coverage(coverage)
+
+    output = capsys.readouterr().out
+    assert secret_subject not in output
+    assert raw_subject_secret not in output
+    assert secret_reason not in output
+    assert "[REDACTED]" in output
+
+
+def test_declared_behavioral_coverage_collapses_all_empty_families(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    coverage = BehavioralCoverage(
+        spec_id="test-spec",
+        spec_digest="sha256:test-spec",
+        scenario_count=0,
+        scenario_digest="sha256:test-scenarios",
+        reference_scenario_count=0,
+        reference_scenario_digest="sha256:test-scenarios",
+        families=(
+            BehavioralCoverageFamily(dimension=BehavioralDimension.SUCCESS_PATH),
+            BehavioralCoverageFamily(dimension=BehavioralDimension.ORDERING),
+        ),
+    )
+
+    cli._print_declared_behavioral_coverage(coverage)
+
+    output = capsys.readouterr().out
+    assert "No declared behavioral requirements were identified." in output
+    assert "Success path:" not in output
+    assert "Ordering:" not in output
+
+
+def test_declared_behavioral_coverage_warns_when_reference_scope_is_incomplete(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    coverage = BehavioralCoverage(
+        spec_id="test-spec",
+        spec_digest="sha256:test-spec",
+        scenario_count=1,
+        scenario_digest="sha256:test-scenarios",
+        reference_scenario_count=1,
+        reference_scenario_digest="sha256:test-scenarios",
+        reference_scope=BehavioralCoverageReferenceScope.AVAILABLE_SCENARIOS_ONLY,
+    )
+
+    cli._print_declared_behavioral_coverage(coverage)
+
+    output = capsys.readouterr().out
+    assert "Evidence scenarios: 1 / 1 reference scenarios" in output
+    assert "reference scope contains available scenarios only" in output
+    assert "unavailable scenario contracts may add behavioral requirements" in output
+    assert "%" not in output
 
 
 @pytest.mark.parametrize(
@@ -207,6 +368,7 @@ def test_test_progress_renders_each_verdict_without_changing_exit_semantics(
     output = capsys.readouterr().out
     result_line = next(line for line in output.splitlines() if line.startswith("[1/1]"))
     assert result_line.endswith(verdict.value)
+    assert "Declared behavioral coverage:" in output
 
 
 def test_test_progress_heartbeat_is_readable_without_a_tty() -> None:

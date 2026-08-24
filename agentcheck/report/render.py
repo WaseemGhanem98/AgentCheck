@@ -6,6 +6,12 @@ import statistics
 from collections import Counter
 from typing import Any, Iterable
 
+from agentcheck.coverage import (
+    BehavioralCoverage,
+    BehavioralCoverageReferenceScope,
+    analyze_behavioral_coverage,
+    verify_behavioral_coverage_binding,
+)
 from agentcheck.domain import (
     AgentSpec,
     CanonicalRun,
@@ -108,6 +114,75 @@ def _cards(items: Iterable[tuple[str, str]]) -> str:
     )
 
 
+def _coverage_label(value: str) -> str:
+    return value.replace("_", " ").replace("-", " ").capitalize()
+
+
+def _behavioral_coverage_html(coverage: BehavioralCoverage) -> str:
+    family_html: list[str] = []
+    detail_statuses = {"missing", "partial", "unknown", "unsupported"}
+    for family in coverage.families:
+        total = (
+            family.covered
+            + family.partial
+            + family.missing
+            + family.unknown
+            + family.unsupported
+        )
+        if total == 0:
+            continue
+
+        details = "".join(
+            "<li><span class=\"mono\">"
+            f"{_escape(requirement.subject)}</span> — "
+            f"{_escape(_coverage_label(requirement.status.value))}: "
+            f"{_escape(_coverage_label(requirement.reason_code))}</li>"
+            for requirement in family.requirements
+            if requirement.status.value in detail_statuses
+        )
+        if family.omitted:
+            details += (
+                f'<li class="muted">{_escape(family.omitted)} additional '
+                "requirement detail(s) omitted from this bounded artifact.</li>"
+            )
+        detail_html = f"<ul>{details}</ul>" if details else ""
+        family_html.append(
+            '<div class="coverage-family">'
+            f"<h4>{_escape(_coverage_label(family.dimension.value))}</h4>"
+            f"<p>Applicable: {_escape(family.applicable)} · "
+            f"Covered: {_escape(family.covered)} · "
+            f"Partial: {_escape(family.partial)} · "
+            f"Missing: {_escape(family.missing)} · "
+            f"Unknown: {_escape(family.unknown)} · "
+            f"Unsupported: {_escape(family.unsupported)}</p>"
+            f"{detail_html}</div>"
+        )
+    body = "".join(family_html) or (
+        '<p class="muted">No declared behavioral coverage requirements were derived.</p>'
+    )
+    reference_scope_html = ""
+    if (
+        coverage.reference_scope
+        is BehavioralCoverageReferenceScope.AVAILABLE_SCENARIOS_ONLY
+    ):
+        reference_scope_html = (
+            '<p><b>Incomplete denominator:</b> reference scope is available '
+            "scenarios only. Unavailable scenario contracts may contain additional "
+            "behavioral requirements, so this report may undercount missing risks.</p>"
+        )
+    return (
+        "<h3>Declared behavioral coverage</h3>"
+        f"<p>Evidence scenarios: {_escape(coverage.scenario_count)} · Reference "
+        f"scenarios: {_escape(coverage.reference_scenario_count)}</p>"
+        f"{reference_scope_html}"
+        f"{body}"
+        '<p class="muted">This structural suite-design analysis does not prove '
+        "that the agent exercised an action path and does not establish complete "
+        "coverage of real-world behavioral risks. Unknown and unsupported "
+        "requirements remain explicit.</p>"
+    )
+
+
 def render_report(
     *,
     run_id: str,
@@ -122,7 +197,10 @@ def render_report(
     seed: int | None = None,
     frozen_suite: FrozenSuite | None = None,
     selection_plan: SelectionPlan | None = None,
+    behavioral_coverage: BehavioralCoverage | None = None,
     reviews: tuple[HumanReview, ...] = (),
+    _coverage_reference_scenarios: tuple[Scenario, ...] | None = None,
+    _verify_frozen_coverage_binding: bool = True,
 ) -> str:
     """Render a single escaped HTML file with no external resources or JavaScript."""
 
@@ -136,6 +214,78 @@ def render_report(
     dimensions = sorted({tag for scenario in scenarios for tag in scenario.dimension_tags})
     tools = [item.value for item in spec.tools.items]
     capabilities = [item.value for item in spec.capabilities.items]
+    frozen_reference_differs = (
+        _coverage_reference_scenarios is None
+        and frozen_suite is not None
+        and Counter(
+            (scenario.scenario_id, scenario.fingerprint)
+            for scenario in frozen_suite.scenarios
+        )
+        != Counter(
+            (scenario.scenario_id, scenario.fingerprint) for scenario in scenarios
+        )
+    )
+    incomplete_reference = (
+        frozen_suite is not None
+        and frozen_suite.selection is not None
+        and bool(frozen_suite.selection.excluded_ids)
+    ) or (
+        _coverage_reference_scenarios is None
+        and frozen_suite is None
+        and selection_plan is not None
+        and bool(selection_plan.excluded_ids)
+    ) or frozen_reference_differs
+
+    if behavioral_coverage is None:
+        behavioral_coverage = analyze_behavioral_coverage(
+            spec,
+            scenarios,
+            reference_scenarios=_coverage_reference_scenarios,
+            suite_fingerprint=(
+                frozen_suite.fingerprint if frozen_suite is not None else None
+            ),
+            reference_scope=(
+                BehavioralCoverageReferenceScope.AVAILABLE_SCENARIOS_ONLY
+                if incomplete_reference
+                else BehavioralCoverageReferenceScope.COMPLETE
+            ),
+        )
+    else:
+        if _verify_frozen_coverage_binding:
+            if _coverage_reference_scenarios is None:
+                if (
+                    behavioral_coverage.reference_scenario_count
+                    > behavioral_coverage.scenario_count
+                    or (
+                        incomplete_reference
+                        and behavioral_coverage.reference_scope
+                        is BehavioralCoverageReferenceScope.COMPLETE
+                    )
+                ):
+                    raise ValueError(
+                        "behavioral coverage reference_scenarios are required "
+                        "to verify the complete requirement universe"
+                    )
+                reference_keywords: dict[str, Any] = {}
+            else:
+                reference_keywords = {
+                    "reference_scenarios": _coverage_reference_scenarios
+                }
+            verify_behavioral_coverage_binding(
+                behavioral_coverage,
+                spec,
+                scenarios,
+                suite_fingerprint=(
+                    frozen_suite.fingerprint
+                    if frozen_suite is not None
+                    else None
+                ),
+                **reference_keywords,
+            )
+        else:
+            verify_behavioral_coverage_binding(behavioral_coverage, spec, scenarios)
+    behavioral_coverage_html = _behavioral_coverage_html(behavioral_coverage)
+
     evaluation_by_scenario = {item.scenario_id: item for item in evaluations}
     run_by_scenario = {item.scenario_id: item for item in runs}
     findings_by_scenario: dict[str, list[Finding]] = {}
@@ -384,7 +534,7 @@ def render_report(
       ('Known cost', _reported_total(cost_values, len(runs), ' USD')),
   ))}</section>
   <section class="panel"><h2>Target and AgentSpec</h2><p>Framework: {_escape(spec.identity.framework.value)} {_escape(spec.identity.framework_version.value or '')} · Model: {_escape(spec.identity.model.value or 'Unknown')}</p><p>Tools ({len(tools)}): {_escape(', '.join(tool.name for tool in tools))}</p><p>Capabilities ({len(capabilities)}): {_escape(', '.join(item.name for item in capabilities) or 'None derived')}</p><p>Unknown properties: {len(spec.unknowns)}</p>{policy_html}<h3>Instructions</h3>{instruction_html}</section>
-  <section class="panel"><h2>Coverage and reproducibility</h2><p>{len(scenarios)} valid scenarios · {len(dimensions)} distinct dimension tags</p><p>{_escape(', '.join(dimensions))}</p>{origin_html}{coverage_extra}{exercise_html}{selection_html}<p>Every case records its generation seed and structural fingerprint. Invalid scenarios are excluded from these counts. Cases excluded by coverage selection are listed above and are not scored as passing.</p></section>
+  <section class="panel"><h2>Coverage and reproducibility</h2>{behavioral_coverage_html}<p>{len(scenarios)} valid scenarios · {len(dimensions)} distinct dimension tags</p><p>{_escape(', '.join(dimensions))}</p>{origin_html}{coverage_extra}{exercise_html}{selection_html}<p>Every case records its generation seed and structural fingerprint. Invalid scenarios are excluded from these counts. Cases excluded by coverage selection are listed above and are not scored as passing.</p></section>
   <section><h2>Findings</h2>{finding_html}</section>
   <section><h2>Scenarios</h2>{''.join(cases)}</section>
 </main></body></html>"""

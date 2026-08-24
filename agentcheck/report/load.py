@@ -21,6 +21,12 @@ from agentcheck.config import (
     contained_path,
     normalize_target,
 )
+from agentcheck.coverage import (
+    BehavioralCoverage,
+    BehavioralCoverageReferenceScope,
+    analyze_behavioral_coverage,
+    verify_behavioral_coverage_binding,
+)
 from agentcheck.domain import (
     AGENT_SPEC_CONTRACT_VERSION,
     CANONICAL_RUN_CONTRACT_VERSION,
@@ -60,6 +66,8 @@ _REQUIRED_ARTIFACTS = (
 )
 _SUITE_CONTRACT = "agentcheck.suite.v1"
 _SUMMARY_CONTRACT = "agentcheck.summary.v1"
+_INVALID_SCENARIOS_CONTRACT = "agentcheck.invalid_scenarios.v1"
+_MISSING_BEHAVIORAL_COVERAGE = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +87,7 @@ class LoadedRun:
     git_revision: str | None
     frozen_suite: FrozenSuite | None
     selection: SelectionPlan | None
+    behavioral_coverage: BehavioralCoverage
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,7 +148,17 @@ def load_stored_run(
     directory = _run_directory(root, config, resolved_id, source=source)
     spec = _load_spec(directory / "agent-spec.json")
     seed, scenarios = _load_suite(directory / "suite.json", resolved_id)
-    git_revision, selection = _load_summary(directory / "summary.json", resolved_id, seed)
+    invalid_scenario_ids = _load_invalid_scenario_ids(
+        directory / "invalid-scenarios.json"
+    )
+    git_revision, selection, behavioral_coverage = _load_summary(
+        directory / "summary.json",
+        resolved_id,
+        seed,
+        spec=spec,
+        scenarios=scenarios,
+        invalid_scenario_ids=invalid_scenario_ids,
+    )
     evaluations = _load_jsonl(
         directory / "evaluations.jsonl",
         CaseEvaluation,
@@ -170,6 +189,7 @@ def load_stored_run(
         git_revision=git_revision,
         frozen_suite=frozen,
         selection=selection,
+        behavioral_coverage=behavioral_coverage,
     )
 
 
@@ -182,6 +202,9 @@ def render_stored_run(
 ) -> StoredReport:
     loaded = load_stored_run(target, run_id=run_id, latest=latest)
     reviews = load_reviews_for_run(loaded.root, loaded.config, loaded.run_id)
+    # This configured frozen suite may postdate the stored run. It remains
+    # useful display metadata, but must not become a new source binding after
+    # the loader has verified coverage against the persisted artifacts.
     html = render_report(
         run_id=loaded.run_id,
         target=str(loaded.root),
@@ -195,7 +218,9 @@ def render_stored_run(
         seed=loaded.seed,
         frozen_suite=loaded.frozen_suite,
         selection_plan=loaded.selection,
+        behavioral_coverage=loaded.behavioral_coverage,
         reviews=reviews,
+        _verify_frozen_coverage_binding=False,
     )
     destination = _report_destination(loaded, out)
     try:
@@ -360,7 +385,58 @@ def _load_suite(path: Path, run_id: str) -> tuple[int, tuple[Scenario, ...]]:
     return seed, tuple(scenarios)
 
 
-def _load_summary(path: Path, run_id: str, seed: int) -> tuple[str | None, SelectionPlan | None]:
+def _load_invalid_scenario_ids(path: Path) -> tuple[str, ...] | None:
+    if not path.exists():
+        return None
+    document = _read_json_object(path, max_bytes=_MAX_JSON_BYTES)
+    _require_contract(
+        document,
+        field="schema_version",
+        expected=_INVALID_SCENARIOS_CONTRACT,
+        filename=path.name,
+    )
+    raw_items = document.get("items")
+    if not isinstance(raw_items, list):
+        raise ConfigurationError(f"invalid {path.name}: items must be a list")
+    scenario_ids: list[str] = []
+    for index, item in enumerate(raw_items):
+        if not isinstance(item, dict):
+            raise ConfigurationError(f"invalid {path.name} item {index}")
+        try:
+            scenario = Scenario.model_validate_json(json.dumps(item.get("scenario")))
+        except (TypeError, ValueError) as exc:
+            raise ConfigurationError(
+                f"invalid {path.name} scenario at index {index}: {exc}"
+            ) from exc
+        issues = item.get("issues")
+        if not isinstance(issues, list) or not issues:
+            raise ConfigurationError(
+                f"invalid {path.name} issues at index {index}: expected a non-empty list"
+            )
+        if any(
+            not isinstance(issue, dict)
+            or any(
+                not isinstance(issue.get(field), str)
+                for field in ("code", "message", "severity")
+            )
+            for issue in issues
+        ):
+            raise ConfigurationError(f"invalid {path.name} issues at index {index}")
+        scenario_ids.append(scenario.scenario_id)
+    if len(scenario_ids) != len(set(scenario_ids)):
+        raise ConfigurationError(f"invalid {path.name}: scenario IDs must be unique")
+    return tuple(scenario_ids)
+
+
+def _load_summary(
+    path: Path,
+    run_id: str,
+    seed: int,
+    *,
+    spec: AgentSpec,
+    invalid_scenario_ids: tuple[str, ...] | None,
+    scenarios: tuple[Scenario, ...],
+) -> tuple[str | None, SelectionPlan | None, BehavioralCoverage]:
     document = _read_json_object(path, max_bytes=_MAX_JSON_BYTES)
     _require_contract(
         document, field="schema_version", expected=_SUMMARY_CONTRACT, filename=path.name
@@ -371,11 +447,57 @@ def _load_summary(path: Path, run_id: str, seed: int) -> tuple[str | None, Selec
         )
     if document.get("seed") != seed:
         raise ConfigurationError(f"{path.name} seed does not match suite.json")
+    raw_invalid_count = document.get("invalid_scenarios", 0)
+    if (
+        isinstance(raw_invalid_count, bool)
+        or not isinstance(raw_invalid_count, int)
+        or raw_invalid_count < 0
+    ):
+        raise ConfigurationError(
+            f"invalid {path.name}: invalid_scenarios must be a non-negative integer"
+        )
+    if invalid_scenario_ids is None:
+        if raw_invalid_count:
+            raise ConfigurationError(
+                f"invalid {path.name}: invalid-scenarios.json is required when "
+                "invalid scenarios were recorded"
+            )
+        persisted_invalid_ids: tuple[str, ...] = ()
+    else:
+        persisted_invalid_ids = invalid_scenario_ids
+        if raw_invalid_count != len(persisted_invalid_ids):
+            raise ConfigurationError(
+                f"invalid {path.name}: invalid scenario count does not match "
+                "invalid-scenarios.json"
+            )
+    valid_ids = {scenario.scenario_id for scenario in scenarios}
+    if valid_ids.intersection(persisted_invalid_ids):
+        raise ConfigurationError(
+            f"invalid {path.name}: valid and invalid scenario IDs overlap"
+        )
     revision = document.get("git_revision")
     selection = _optional_selection(document.get("selection"), filename=path.name)
+    behavioral_coverage = _optional_behavioral_coverage(
+        document.get("behavioral_coverage", _MISSING_BEHAVIORAL_COVERAGE),
+        filename=path.name,
+        spec=spec,
+        scenarios=scenarios,
+        reference_scope=(
+            BehavioralCoverageReferenceScope.AVAILABLE_SCENARIOS_ONLY
+            if selection is not None and selection.excluded_ids
+            else BehavioralCoverageReferenceScope.COMPLETE
+        ),
+    )
+    _validate_selection_coverage_binding(
+        selection,
+        behavioral_coverage,
+        scenarios,
+        invalid_scenario_ids=persisted_invalid_ids,
+        filename=path.name,
+    )
     if revision is None:
-        return None, selection
-    return str(revision), selection
+        return None, selection, behavioral_coverage
+    return str(revision), selection, behavioral_coverage
 
 
 def _optional_selection(value: object, *, filename: str) -> SelectionPlan | None:
@@ -385,6 +507,88 @@ def _optional_selection(value: object, *, filename: str) -> SelectionPlan | None
         return SelectionPlan.model_validate_json(json.dumps(value))
     except (TypeError, ValueError) as exc:
         raise ConfigurationError(f"invalid {filename} selection plan: {exc}") from exc
+
+
+def _optional_behavioral_coverage(
+    value: object,
+    *,
+    filename: str,
+    spec: AgentSpec,
+    scenarios: tuple[Scenario, ...],
+    reference_scope: BehavioralCoverageReferenceScope,
+) -> BehavioralCoverage:
+    if value is _MISSING_BEHAVIORAL_COVERAGE:
+        # Behavioral coverage was added without changing the summary contract,
+        # so reports created before the field existed remain readable. Derive
+        # only from this run's artifacts; a currently configured frozen suite
+        # may have changed since the run. When selection discarded cases before
+        # persistence, explicitly retain that the available denominator is
+        # incomplete instead of presenting the selected subset as the universe.
+        return analyze_behavioral_coverage(
+            spec, scenarios, reference_scope=reference_scope
+        )
+    try:
+        coverage = BehavioralCoverage.model_validate_json(json.dumps(value))
+        verify_behavioral_coverage_binding(coverage, spec, scenarios)
+    except (TypeError, ValueError) as exc:
+        raise ConfigurationError(
+            f"invalid {filename} behavioral coverage: {exc}"
+        ) from exc
+    return coverage
+
+
+def _validate_selection_coverage_binding(
+    selection: SelectionPlan | None,
+    coverage: BehavioralCoverage,
+    scenarios: tuple[Scenario, ...],
+    *,
+    invalid_scenario_ids: tuple[str, ...],
+    filename: str,
+) -> None:
+    if selection is None:
+        return
+    scenario_ids = tuple(scenario.scenario_id for scenario in scenarios)
+    if len(scenario_ids) != len(set(scenario_ids)):
+        raise ConfigurationError(
+            f"invalid {filename} selection binding: suite.json scenario IDs "
+            "must be unique"
+        )
+    valid_ids = set(scenario_ids)
+    invalid_ids = set(invalid_scenario_ids)
+    selected_ids = set(selection.selected_ids)
+    decision_ids = {item.scenario_id for item in selection.decisions}
+    invalid_in_plan = invalid_ids.intersection(decision_ids)
+    if invalid_in_plan and invalid_in_plan != invalid_ids:
+        raise ConfigurationError(
+            f"invalid {filename} selection binding: invalid scenario IDs are "
+            "only partially represented by the selection plan"
+        )
+    if invalid_in_plan.intersection(selection.excluded_ids):
+        raise ConfigurationError(
+            f"invalid {filename} selection binding: a persisted invalid scenario "
+            "cannot be excluded by the selection plan"
+        )
+    if selected_ids != valid_ids.union(invalid_in_plan):
+        raise ConfigurationError(
+            f"invalid {filename} selection binding: selected scenario IDs do not "
+            "match persisted valid and invalid scenarios"
+        )
+    if coverage.scenario_count != len(scenario_ids):
+        raise ConfigurationError(
+            f"invalid {filename} selection binding: behavioral coverage scenario "
+            "count does not match lint-valid scenarios"
+        )
+    expected_reference_count = (
+        len(scenario_ids)
+        if coverage.reference_scope
+        is BehavioralCoverageReferenceScope.AVAILABLE_SCENARIOS_ONLY
+        else len(selection.decisions) - len(invalid_in_plan)
+    )
+    if coverage.reference_scenario_count != expected_reference_count:
+        raise ConfigurationError(
+            f"invalid {filename} selection binding: behavioral coverage reference "
+            "count does not match the lint-valid selection universe"
+        )
 
 
 def _load_findings(path: Path) -> tuple[Finding, ...]:

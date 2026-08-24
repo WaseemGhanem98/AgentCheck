@@ -44,6 +44,7 @@ COMPATIBILITY_SUITE: dict[str, dict[str, object]] = {
             "tests/agentcheck/test_domain.py",
             "tests/agentcheck/test_artifacts.py",
             "tests/agentcheck/test_suite_compatibility.py",
+            "tests/agentcheck/test_behavioral_coverage.py",
         ),
         "symbols": ("fingerprint", "model_dump", "IncompatibleSuiteError", "redact"),
     },

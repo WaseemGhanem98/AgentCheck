@@ -174,6 +174,12 @@ failed assertions, simulated state where available, and a replay manifest.
 Review artifacts before sharing them; they may contain prompts, model output,
 tool inputs, and absolute paths.
 
+The `generate` command and run reports also show [declared behavioral
+coverage](docs/behavioral-coverage.md): which declared-tool success, failure,
+and timeout requirements—and which explicitly represented retry, confirmation,
+duplicate-action, and prerequisite contracts—the suite covers or leaves
+missing. This is not a claim that every real-world behavior was observed.
+
 Replay is a source-bound re-execution recipe. It verifies recorded source,
 configuration, specification, and scenario bindings before running again. It
 reproduces inputs and harness behavior; it does not capture provider output or
@@ -188,6 +194,7 @@ and read the [CI trust model](docs/ci-trust-model.md).
 - [PydanticAI setup and offline evaluation](docs/pydantic-ai.md)
 - [Custom Python agent contract](docs/custom-agents.md)
 - [Validation evidence and claim boundaries](docs/validation-evidence.md)
+- [Declared behavioral coverage](docs/behavioral-coverage.md)
 - [CI trust model](docs/ci-trust-model.md)
 - [PyPI package](https://pypi.org/project/agentcheck-ai/)
 
