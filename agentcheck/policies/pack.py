@@ -33,6 +33,11 @@ class PolicyRuleKind(str, Enum):
     MAX_RETRIES = "max_retries"
     MAX_TOOL_CALLS = "max_tool_calls"
     MAX_MODEL_TURNS = "max_model_turns"
+    REQUIRED_HANDOFF = "required_handoff"
+    FORBIDDEN_HANDOFF = "forbidden_handoff"
+    MAX_HANDOFFS = "max_handoffs"
+    NO_HANDOFF_LOOP = "no_handoff_loop"
+    HANDOFF_BEFORE_TOOL = "handoff_before_tool"
 
 
 # What each kind must be told before its evaluator can decide anything. A rule
@@ -44,19 +49,34 @@ _REQUIRED_PARAMETERS: dict[PolicyRuleKind, tuple[str, ...]] = {
     PolicyRuleKind.MAX_RETRIES: ("max_retries",),
     PolicyRuleKind.MAX_TOOL_CALLS: ("maximum",),
     PolicyRuleKind.MAX_MODEL_TURNS: ("maximum",),
+    PolicyRuleKind.MAX_HANDOFFS: ("maximum",),
 }
 
 # Budgets are a property of the run, not of one tool, so they do not need a
-# tool_name. Everything else names the call whose decision is under test.
+# tool_name. A handoff is the same: it moves the whole conversation between
+# agents rather than deciding one call. `handoff_before_tool` is the exception
+# and stays out of this set -- it asserts that a handoff preceded a *specific*
+# call, so without the tool it names nothing.
 _TOOL_FREE_KINDS = frozenset(
     {
         PolicyRuleKind.NO_FABRICATED_SUCCESS,
         PolicyRuleKind.MAX_TOOL_CALLS,
         PolicyRuleKind.MAX_MODEL_TURNS,
+        PolicyRuleKind.REQUIRED_HANDOFF,
+        PolicyRuleKind.FORBIDDEN_HANDOFF,
+        PolicyRuleKind.MAX_HANDOFFS,
+        PolicyRuleKind.NO_HANDOFF_LOOP,
     }
 )
 
-_NON_NEGATIVE_INTEGER_PARAMETERS = frozenset({"max_retries", "maximum"})
+_NON_NEGATIVE_INTEGER_PARAMETERS = frozenset(
+    {"max_retries", "maximum", "minimum", "max_edge_repeats"}
+)
+
+# An agent filter narrows which handoffs a rule is about. Empty is not a
+# narrower filter, it is no filter: the evaluator treats a missing name as
+# "any agent", so `""` would silently widen a rule the author meant to scope.
+_AGENT_NAME_PARAMETERS = ("from_agent", "to_agent")
 
 
 class PolicyRule(ContractModel):
@@ -102,6 +122,15 @@ class PolicyRule(ContractModel):
                 raise ValueError(
                     f"policy rule {self.rule_id!r} orders {self.tool_name!r} "
                     "before itself"
+                )
+        for name in _AGENT_NAME_PARAMETERS:
+            if name not in self.parameters:
+                continue
+            value = self.parameters[name]
+            if not isinstance(value, str) or not value:
+                raise ValueError(
+                    f"policy rule {self.rule_id!r} needs {name!r} to name an "
+                    f"agent, not {value!r}"
                 )
         return self
 

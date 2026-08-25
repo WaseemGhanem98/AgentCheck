@@ -265,11 +265,26 @@ def _add_oracle_to_criterion(item: dict[str, Any], oracle_id: str) -> bool:
 # Budgets bound the run rather than one call, so they attach to every case and
 # carry no tool_name.
 _RUN_SCOPED_KINDS = frozenset(
-    {PolicyRuleKind.MAX_TOOL_CALLS, PolicyRuleKind.MAX_MODEL_TURNS}
+    {
+        PolicyRuleKind.MAX_TOOL_CALLS,
+        PolicyRuleKind.MAX_MODEL_TURNS,
+        PolicyRuleKind.REQUIRED_HANDOFF,
+        PolicyRuleKind.FORBIDDEN_HANDOFF,
+        PolicyRuleKind.MAX_HANDOFFS,
+        PolicyRuleKind.NO_HANDOFF_LOOP,
+    }
 )
 
 
-_DISCRIMINATING_PARAMETERS = ("required_before", "max_retries", "maximum")
+_DISCRIMINATING_PARAMETERS = (
+    "required_before",
+    "max_retries",
+    "maximum",
+    "minimum",
+    "max_edge_repeats",
+    "from_agent",
+    "to_agent",
+)
 
 
 def _apply_trajectory_rule(
