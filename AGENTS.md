@@ -58,10 +58,23 @@ These are hashed or stored, so changing them re-identifies existing artifacts:
 - `Scenario.expected_fingerprint()` hashes the scenario document minus display
   identity.
 - `FrozenSuite.expected_fingerprint()` hashes the whole suite document, which
-  **includes `provenance.generator_version`** — that is `agentcheck.__version__`.
-  Bumping the package version therefore moves every suite fingerprint. It is a
-  compatibility event, not a routine bump.
-- Replay manifests, baselines, and review records embed the same version.
+  includes `provenance.generator_version`. That is
+  **`GENERATOR_COMPATIBILITY_VERSION`, not `agentcheck.__version__`** — the two
+  are deliberately different things and must not be conflated again.
+  - `agentcheck.__version__` is the distribution release. It appears in
+    `--version`, and in run, baseline, replay and review records as "which build
+    executed this". Releasing must not re-identify a suite that asserts exactly
+    the same thing, so it is not part of suite provenance.
+  - `GENERATOR_COMPATIBILITY_VERSION` (in `agentcheck/generate/suite.py`) is the
+    generation semantics. Raise it when a change *should* re-identify otherwise
+    equivalent suites: a new case family, a changed default budget, different
+    fixture wiring, altered lint or selection behaviour. Adding an unused field,
+    renaming the package, or cutting a release does not qualify.
+  - Raising it never invalidates an artifact already on disk: a stored suite
+    validates against the `generator_version` it recorded, not against today's.
+- Replay manifests, baselines, and review records embed `agentcheck.__version__`
+  as execution provenance. That is a record of the run, not of what a suite
+  asserts, and it is not suite identity.
 
 If a fingerprint changes and you did not intend a contract change, stop and find
 out why rather than re-freezing the expected values.
