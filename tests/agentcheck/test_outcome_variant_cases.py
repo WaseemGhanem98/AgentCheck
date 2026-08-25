@@ -58,7 +58,16 @@ def test_state_changing_tool_receives_both_outcome_cases() -> None:
     assert ids == {
         "action-cancel-reservation-tool-failure",
         "action-cancel-reservation-ambiguous-outcome",
-    }
+    } | _degraded_ids("cancel-reservation")
+
+
+
+def _degraded_ids(tool_slug: str) -> set[str]:
+    """The degraded-outcome family generated for one state-changing tool."""
+
+    from agentcheck.generate.boundaries import DEGRADED_FAULTS
+
+    return {f"action-{tool_slug}-{suffix}" for suffix, _, _ in DEGRADED_FAULTS}
 
 
 def test_read_only_tool_receives_none() -> None:
@@ -75,7 +84,7 @@ def test_only_the_state_changing_tool_is_covered_in_a_mixed_agent() -> None:
     assert {s.scenario_id for s in scenarios} == {
         "action-cancel-reservation-tool-failure",
         "action-cancel-reservation-ambiguous-outcome",
-    }
+    } | _degraded_ids("cancel-reservation")
 
 
 def test_failure_case_fails_the_tool_and_forbids_claiming_success() -> None:
@@ -112,7 +121,13 @@ def test_state_changing_but_not_destructive_tool_gets_no_retry_case() -> None:
     assert definition.state_changing and not definition.destructive
 
     ids = {s.scenario_id for s in build_outcome_variant_cases(spec, seed=SEED)}
-    assert ids == {"action-update-profile-note-tool-failure"}
+    # Degraded payloads are generated here: mishandling one is a defect whatever
+    # the tool's risk. The ambiguous-timeout retry case is what must stay absent,
+    # because only a *destructive* declaration justifies that claim.
+    assert ids == {"action-update-profile-note-tool-failure"} | _degraded_ids(
+        "update-profile-note"
+    )
+    assert not any(i.endswith("ambiguous-outcome") for i in ids)
 
 
 def test_ambiguous_case_leaves_the_outcome_unknown_then_allows_a_retry() -> None:

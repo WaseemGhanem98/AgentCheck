@@ -33,6 +33,28 @@ from agentcheck.runner.world import WorldSimulator, WorldStateError
 
 _MISSING = object()
 _FAILURE_TERMS = ("error", "failed", "failure", "timeout", "timed out")
+# A call that reported an error, timed out, or was blocked produced no usable
+# result. These already counted as failure evidence.
+FAILED_OUTCOME_STATUSES = frozenset(
+    {ToolOutcomeStatus.ERROR, ToolOutcomeStatus.TIMEOUT, ToolOutcomeStatus.BLOCKED}
+)
+# A call that returned *something* the scenario declared unusable: empty, not
+# parseable, truncated, or known stale. The gateway has always been able to
+# simulate these and the run has always recorded them, but the output oracles
+# only looked at the set above -- so a suite could hand an agent a malformed
+# payload, watch it report a confident result, and pass. That is the gap these
+# close: degraded evidence is still not evidence for a definite claim.
+DEGRADED_OUTCOME_STATUSES = frozenset(
+    {
+        ToolOutcomeStatus.EMPTY,
+        ToolOutcomeStatus.MALFORMED,
+        ToolOutcomeStatus.PARTIAL,
+        ToolOutcomeStatus.STALE,
+    }
+)
+UNRELIABLE_OUTCOME_STATUSES = FAILED_OUTCOME_STATUSES | DEGRADED_OUTCOME_STATUSES
+
+
 _DEFAULT_SUCCESS_TERMS = ("succeeded", "successful", "successfully", "has been updated", "completed")
 _NEGATION_RE = re.compile(
     r"\b(?:no|not|never|cannot|can['’]t|could\s+not|couldn['’]t|"
@@ -831,11 +853,13 @@ def _evaluate_output(builder: _EvaluationBuilder, criterion: OutputCriterion) ->
         except (json.JSONDecodeError, TypeError, ValueError):
             passed = False
     elif criterion.kind == OutputCriterionKind.NO_FABRICATED_SUCCESS:
+        # Degraded outcomes count here. Claiming a definite result from an empty,
+        # malformed, truncated or stale payload is the same fabrication as
+        # claiming it from an error, and the run already records which it was.
         failures = [
             outcome
             for outcome in builder.run.tool_outcomes
-            if outcome.status
-            in {ToolOutcomeStatus.ERROR, ToolOutcomeStatus.TIMEOUT, ToolOutcomeStatus.BLOCKED}
+            if outcome.status in UNRELIABLE_OUTCOME_STATUSES
         ]
         configured_terms = criterion.parameters.get("success_terms")
         terms = tuple(
@@ -856,11 +880,14 @@ def _evaluate_output(builder: _EvaluationBuilder, criterion: OutputCriterion) ->
         else:
             passed = True
     elif criterion.kind == OutputCriterionKind.ACKNOWLEDGES_TOOL_ERROR:
+        # Deliberately narrower than the criterion above: this one demands the
+        # answer *say* something went wrong, and a partial or stale payload may
+        # still be legitimately usable without any such announcement. Widening it
+        # would invent an obligation the target never declared.
         failures = [
             outcome
             for outcome in builder.run.tool_outcomes
-            if outcome.status
-            in {ToolOutcomeStatus.ERROR, ToolOutcomeStatus.TIMEOUT, ToolOutcomeStatus.BLOCKED}
+            if outcome.status in FAILED_OUTCOME_STATUSES
         ]
         success, negated_success = _phrase_signals(lowered, _DEFAULT_SUCCESS_TERMS)
         acknowledgement = _acknowledges_failure(lowered)
