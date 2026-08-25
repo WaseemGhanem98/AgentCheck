@@ -260,6 +260,18 @@ def _add_oracle_to_criterion(item: dict[str, Any], oracle_id: str) -> bool:
     return True
 
 
+# Parameters that change what a constraint of the same kind on the same tool
+# actually asserts, so two rules differing only here must stay separate.
+# Budgets bound the run rather than one call, so they attach to every case and
+# carry no tool_name.
+_RUN_SCOPED_KINDS = frozenset(
+    {PolicyRuleKind.MAX_TOOL_CALLS, PolicyRuleKind.MAX_MODEL_TURNS}
+)
+
+
+_DISCRIMINATING_PARAMETERS = ("required_before", "max_retries", "maximum")
+
+
 def _apply_trajectory_rule(
     data: dict[str, Any],
     pack: PolicyPack,
@@ -268,16 +280,47 @@ def _apply_trajectory_rule(
     declared: bool,
 ) -> bool:
     tool_name = rule.tool_name
-    if not tool_name or tool_name not in _referenced_tools(data):
+    if tool_name:
+        # A rule about a tool attaches only where the case is about that tool.
+        if tool_name not in _referenced_tools(data):
+            return False
+        # Deliberately no reachability check on an ordering rule's prerequisite.
+        # Refusing to attach where the earlier call has no fixture would leave a
+        # declared policy silently doing nothing, which reads as enforced and is
+        # the worse failure. Neither outcome there is a false pass: an agent that
+        # skips the prerequisite fails the relation honestly, and one that tries
+        # it without a fixture stops as INFRA_ERROR rather than as a verdict.
+        # Pair an ordering rule with a prerequisite fixture so the safe path is
+        # executable -- see docs/behavioral-policies.md.
+    elif rule.kind not in _RUN_SCOPED_KINDS:
         return False
     oracle_id = _ensure_oracle(data, policy_oracle(pack, rule, declared=declared))
     kind = rule.kind.value
+    # The rule's own parameters are what the evaluator needs to decide anything:
+    # which tool must come first, how many retries are tolerated, what the
+    # ceiling is. Dropping them left a constraint the evaluator could only call
+    # INCONCLUSIVE, which reads like an enforced policy and is not one.
+    # tool_name is written last so a parameter block cannot redirect the rule at
+    # a tool the pack did not declare.
+    parameters = {**rule.parameters}
+    if tool_name:
+        parameters["tool_name"] = tool_name
     for item in data.get("trajectory_constraints") or []:
         if not isinstance(item, dict):
             continue
         if item.get("kind") != kind:
             continue
-        if (item.get("parameters") or {}).get("tool_name") != tool_name:
+        existing = item.get("parameters") or {}
+        if existing.get("tool_name") != tool_name:
+            continue
+        # Two rules of one kind on one tool are still distinct when they say
+        # different things -- "verify before refund" and "authorize before
+        # refund" are not the same constraint.
+        if any(
+            existing.get(name) != parameters.get(name)
+            for name in _DISCRIMINATING_PARAMETERS
+            if name in parameters or name in existing
+        ):
             continue
         return _add_oracle_to_criterion(item, oracle_id)
     data.setdefault("trajectory_constraints", []).append(
@@ -287,7 +330,7 @@ def _apply_trajectory_rule(
             ),
             "kind": kind,
             "description": rule.description,
-            "parameters": {"tool_name": tool_name},
+            "parameters": parameters,
             "required": True,
             "oracle_ids": [oracle_id],
         }
