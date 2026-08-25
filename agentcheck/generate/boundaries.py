@@ -392,7 +392,21 @@ def _analyze(tool: ToolDefinition) -> _Analysis:
     if surface.truncated:
         reasons.append("the declared parameter list was truncated during extraction")
     if not surface.parameters:
-        return _Analysis((), (*reasons, "the declared schema exposes no parameters"))
+        # Nothing to probe at the schema boundary -- that much was always right.
+        # But "no invalid call can be constructed" is not "no valid call can be
+        # constructed": a schema declaring no parameters admits exactly one
+        # in-contract call, the empty one. Withholding it here also withheld the
+        # baseline the behavioural generators need, so a zero-argument
+        # destructive action such as `cancel_trip()` got no tool-failure, no
+        # degraded-evidence and no ambiguous-timeout case at all.
+        #
+        # Still validated rather than assumed. A schema that rejects `{}` -- it
+        # requires a property it never declared, say -- yields no baseline, and
+        # the generators skip it as before.
+        without_parameters = (*reasons, "the declared schema exposes no parameters")
+        if validator.is_valid({}):
+            return _Analysis((), without_parameters, baseline={})
+        return _Analysis((), without_parameters)
 
     baseline: dict[str, Any] = {}
     for parameter in surface.parameters:
