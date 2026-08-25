@@ -62,6 +62,18 @@ Point `agentcheck.json` at a pack file:
 | `no_fabricated_success` | no definite claim on unusable evidence | — |
 | `max_tool_calls` | the run stayed within a call budget | `maximum` |
 | `max_model_turns` | the run stayed within a turn budget | `maximum` |
+| `required_handoff` | the conversation reached another agent | `to_agent`/`from_agent`, `minimum` |
+| `forbidden_handoff` | it never reached one | `to_agent`/`from_agent` |
+| `max_handoffs` | the run stayed within a handoff budget | `maximum` |
+| `no_handoff_loop` | two agents did not pass the customer back and forth | `max_edge_repeats` |
+| `handoff_before_tool` | a handoff preceded a specific call | `tool_name`, `to_agent`/`from_agent` |
+
+The five handoff kinds are run-scoped except `handoff_before_tool`, which
+asserts that a handoff preceded one named call and therefore needs a
+`tool_name`. `from_agent` and `to_agent` narrow which handoffs a rule is
+about; omitting both means "any handoff". Omitting is how you say that --
+an empty string is rejected, because the evaluator reads a missing name as
+"any agent" and `""` would quietly widen a rule that was meant to be scoped.
 
 Budgets bound the run rather than one call, so they take no `tool_name`.
 
