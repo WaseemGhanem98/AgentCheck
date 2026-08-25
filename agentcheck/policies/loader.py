@@ -362,9 +362,23 @@ def _apply_output_rule(
 ) -> bool:
     oracle_id = _ensure_oracle(data, policy_oracle(pack, rule, declared=declared))
     kind = rule.kind.value
+    # The rule's parameters are what the evaluator needs to decide anything.
+    # `no_fabricated_success` gates its hard verdict on exactly one of them:
+    # without `success_terms` it can only reach INCONCLUSIVE, however confident
+    # the answer's phrasing was. Dropping them here left a declared rule that
+    # attaches without error, reads as enforced, and can never fail -- the same
+    # defect policies v1 fixed for trajectory constraints and missed here.
     for item in data.get("output_criteria") or []:
         if isinstance(item, dict) and item.get("kind") == kind:
-            return _add_oracle_to_criterion(item, oracle_id)
+            attached = _add_oracle_to_criterion(item, oracle_id)
+            if rule.parameters:
+                # A generated criterion of this kind carries no parameters, so
+                # the declared ones are additive rather than overriding.
+                merged = {**(item.get("parameters") or {}), **rule.parameters}
+                if merged != (item.get("parameters") or {}):
+                    item["parameters"] = merged
+                    attached = True
+            return attached
     data.setdefault("output_criteria", []).append(
         {
             "criterion_id": _unique_criterion_id(
@@ -372,7 +386,7 @@ def _apply_output_rule(
             ),
             "kind": kind,
             "description": rule.description,
-            "parameters": {},
+            "parameters": {**rule.parameters},
             "required": True,
             "oracle_ids": [oracle_id],
         }
