@@ -1107,7 +1107,14 @@ def build_outcome_variant_cases(
     ):
         if not definition.state_changing:
             continue
-        if len(scenarios) >= _MAX_POSITIVE_SCENARIOS_PER_SPEC:
+        if len(scenarios) >= MAX_FAULT_VARIANT_SCENARIOS:
+            # The fault family's own bound. This used to break on
+            # _MAX_POSITIVE_SCENARIOS_PER_SPEC, a constant named for a different
+            # loop, which fired first and always -- so the documented cap of
+            # MAX_FAULT_VARIANT_SCENARIOS was unreachable and generation
+            # silently stopped at 24. On a 16-tool target that cost
+            # `modify_user_address` its entire fault family while the real cap
+            # still had 38 scenarios of room.
             break
         analysis = _analyze(definition)
         if analysis.baseline is None:
