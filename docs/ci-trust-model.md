@@ -51,6 +51,57 @@ No AgentCheck test requires a provider credential. Fork PRs must never receive
 repository secrets, write tokens, deployment environments, or PyPI publishing
 authority.
 
+## Required status checks
+
+Branch protection should require exactly one CI status: **`Required CI`**.
+
+It is a gate job that depends on `scope`, `tests` and `checks`, runs under
+`if: always()` so it reports even when the matrix is skipped, and resolves the
+workflow through `scripts/check_required_ci.py`. `always()` makes it report; it
+does not make it lenient. The script refuses a skipped matrix on a code change,
+refuses a failed or cancelled matrix in any scope, requires `scope` and `checks`
+to have succeeded, and treats an unreadable classification as a code change.
+
+Requiring the matrix jobs by name does not work, and the failure mode is quiet.
+`Tests (Python 3.10 | 3.11 | 3.12)` are skipped by design on documentation-only
+pull requests, and a skipped job never reports a status, so a required matrix
+name leaves those pull requests stuck at *"Waiting for status to be reported"*
+with nothing failing and nothing to fix.
+
+### Migrating the ruleset
+
+The `main integrity and CI` ruleset currently requires these six contexts:
+
+```
+Classify change scope
+Tests (Python 3.10)
+Tests (Python 3.11)
+Tests (Python 3.12)
+Quality, packaging, extras, and workflow trust
+dependency-review
+```
+
+After this change, **remove the three `Tests (Python …)` entries and add
+`Required CI`**, leaving:
+
+```
+Classify change scope
+Quality, packaging, extras, and workflow trust
+dependency-review
+Required CI
+```
+
+Nothing is weakened by the removal. `Required CI` fails whenever any of those
+three matrix jobs fails or is cancelled, and additionally fails if the matrix is
+skipped on a change that was not documentation-only — a case the per-name
+requirements could not express at all. Keeping `Classify change scope` and the
+quality job listed is redundant but harmless, since the gate already requires
+both; they are worth keeping so a deleted gate job cannot silently leave `main`
+with no required check.
+
+Do the ruleset edit only after this workflow is on `main`, so `Required CI` has
+reported at least once and is selectable in the ruleset UI.
+
 ## Release boundary
 
 `.github/workflows/release.yml` runs only for a published, non-prerelease GitHub
