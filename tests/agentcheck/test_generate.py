@@ -838,9 +838,16 @@ def test_zero_argument_function_tool_generates_an_empty_invocation() -> None:
     assert list(schema.get("required") or []) == []
 
     suite = build_frozen_suite(spec, AgentCheckConfig(), seed=SEED)
-    assert len(suite.cases) == 1
-    case = suite.cases[0]
-    assert case.lineage.origin is CaseOrigin.ZERO_INPUT_INVOCATION
+    # A zero-parameter schema is in-contract with the empty object, so the tool
+    # also earns an action-path case. The zero-input invocation is still its own
+    # case and is the one this test follows through the gateway.
+    zero_input = [
+        case
+        for case in suite.cases
+        if case.lineage.origin is CaseOrigin.ZERO_INPUT_INVOCATION
+    ]
+    assert len(zero_input) == 1
+    case = zero_input[0]
     assert case.lineage.tool_name == "ping"
     scenario = case.scenario
     assert scenario.scenario_id == "zero-input-ping"
@@ -848,11 +855,7 @@ def test_zero_argument_function_tool_generates_an_empty_invocation() -> None:
     assert scenario.required_tool_behavior[0].arguments_match == {}
     assert "source:zero_input_invocation" in scenario.dimension_tags
     assert lint_scenario(scenario, spec) == ()
-    assert suite.provenance.sources == (
-        "built_in",
-        "schema_boundary",
-        "zero_input_invocation",
-    )
+    assert "zero_input_invocation" in suite.provenance.sources
     assert suite.coverage.tools == ("ping",)
     assert suite.coverage.tools_without_boundary_cases == ()
 
@@ -925,8 +928,15 @@ agent = Agent(
     assert "Frozen suite written." in output
     assert not (target / "HANDLER_RAN").exists()
     suite = load_frozen_suite(target / DEFAULT_SUITE_FILENAME)
-    assert len(suite.cases) == 1
-    case = suite.cases[0]
-    assert case.lineage.origin is CaseOrigin.ZERO_INPUT_INVOCATION
+    zero_input = [
+        case
+        for case in suite.cases
+        if case.lineage.origin is CaseOrigin.ZERO_INPUT_INVOCATION
+    ]
+    assert len(zero_input) == 1
+    case = zero_input[0]
     assert case.scenario.tool_fixtures[0].arguments_match == {}
     assert case.scenario.required_tool_behavior[0].arguments_match == {}
+    # The tripwire above still holds: no case, action path included, ran the
+    # original handler.
+    assert not (target / "HANDLER_RAN").exists()

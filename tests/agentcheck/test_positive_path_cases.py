@@ -129,15 +129,38 @@ def test_one_case_per_tool_with_a_constructible_baseline() -> None:
 
 
 def test_tools_without_a_constructible_baseline_are_omitted() -> None:
-    """Fail conservatively: no invented semantics for an unreadable contract."""
+    """Fail conservatively: no invented semantics for an unreadable contract.
+
+    The example used to be a zero-parameter tool, on the reasoning that "exposes
+    no parameters" meant "no baseline exists". Those are different claims: a
+    schema declaring no parameters has a perfectly constructible baseline, the
+    empty object. A required parameter whose type cannot be resolved is the
+    genuinely unconstructible case, and it is the one this guarantee is for.
+    """
 
     @function_tool
-    def opaque() -> str:
-        """Takes nothing."""
+    def opaque(payload: Any) -> str:
+        """Takes a payload whose declared type cannot be resolved."""
         raise AssertionError("original handler must never run")
 
-    # A zero-parameter tool exposes no parameters, so no baseline exists.
     assert _positive(_spec(opaque)) == ()
+
+
+def test_a_zero_parameter_tool_has_a_constructible_baseline() -> None:
+    """The empty object is in-contract, so the action path is reachable."""
+
+    @function_tool
+    def cancel_trip() -> str:
+        """Cancel the traveller's upcoming trip."""
+        raise AssertionError("original handler must never run")
+
+    cases = _positive(_spec(cancel_trip))
+
+    assert len(cases) == 1
+    # Calling stays optional -- declining is not a defect -- so the contract is
+    # an allowed call, bound to the empty object rather than invented arguments.
+    allowed = cases[0].allowed_tool_behavior
+    assert [(b.tool_name, b.arguments_match) for b in allowed] == [("cancel_trip", {})]
 
 
 def test_generation_is_deterministic() -> None:
