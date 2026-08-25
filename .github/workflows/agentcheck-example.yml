@@ -65,36 +65,21 @@ jobs:
           python -m pip install --upgrade "pip==26.1.2" "setuptools==83.0.0"
           python -m pip install ".[openai-agents]"
 
-      - name: Run deterministic AgentCheck tests
+      - name: Gate the change on agent behaviour
+        # One command for the whole flow: run the frozen suite, compare it to
+        # the trusted baseline, and return one status.
+        #
+        #   0  no new behavioural failure -- historical failures the baseline
+        #      already accepts do not block
+        #   1  a behavioural failure is new against the baseline
+        #   2  the run is not certifiable (infrastructure, or a suite / source /
+        #      baseline mismatch). Deliberately not reported as a regression:
+        #      a suite that could not execute has not said anything about the
+        #      agent, and calling that a behavioural result is how a broken
+        #      harness becomes a green build.
+        #   3  the suite could not decide. Never treated as a pass.
         run: |
-          set +e
-          agentcheck test "$AGENTCHECK_TARGET" --no-store --run-id "ci-${{ github.run_id }}"
-          status=$?
-          set -e
-          # Historical FAILs (1) and INCONCLUSIVE (3) are not release blockers.
-          # The baseline check decides whether any FAIL is new. Infrastructure (2)
-          # still fails the job.
-          if [ "$status" -eq 2 ] || [ "$status" -eq 130 ]; then
-            exit "$status"
-          fi
-          if [ "$status" -gt 3 ]; then
-            exit "$status"
-          fi
-
-      - name: Require a committed baseline
-        run: |
-          baseline="$AGENTCHECK_TARGET/$AGENTCHECK_BASELINE"
-          if [ ! -f "$baseline" ]; then
-            echo "No trusted baseline at $baseline"
-            echo "Create one explicitly with:"
-            echo "  agentcheck baseline create \"$AGENTCHECK_TARGET\" --latest --out $AGENTCHECK_BASELINE"
-            echo "A failing test run is never an implicit baseline."
-            exit 2
-          fi
-
-      - name: Fail on new authoritative regressions
-        run: |
-          agentcheck baseline check "$AGENTCHECK_TARGET" \
+          agentcheck gate "$AGENTCHECK_TARGET" \
             --baseline "$AGENTCHECK_BASELINE" \
             --run-id "ci-${{ github.run_id }}" \
             --json
