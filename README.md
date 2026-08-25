@@ -56,6 +56,17 @@ agentcheck test .
 - `generate` creates a frozen behavioral test suite.
 - `test` runs the agent against that suite and evaluates its behavior.
 
+In CI, one command covers the release question:
+
+```bash
+agentcheck gate .
+```
+
+It runs the frozen suite, compares the result against a trusted baseline, and
+returns a single status: `0` allow, `1` a behavioral failure is new, `2` the run
+was not certifiable, `3` the suite could not decide. Failures a baseline already
+accepts do not block. See [the CI gate](docs/ci-gate.md).
+
 The target directory must already exist. `generate` and `test` may inspect the
 target again because each command independently validates current source instead
 of trusting stale state. PydanticAI and Custom Python targets require an explicit
@@ -78,6 +89,13 @@ Finalizing report...
 
 Each scenario ends as `PASS`, `FAIL`, `INCONCLUSIVE`, or `INFRA_ERROR`; harness
 failures are never presented as behavioral failures or passes.
+
+Generated suites also include fault cases — the tool errors, times out, or
+returns an empty, unparseable, truncated or stale payload — so the suite asks
+what the agent does when a tool does not cooperate, not only when it does. What
+gets generated follows the tool's *declared* risk, never its name. See
+[fault testing](docs/fault-testing.md) and, to declare your own contracts,
+[behavioral policies](docs/behavioral-policies.md).
 
 ## What AgentCheck catches
 
@@ -197,6 +215,9 @@ and read the [CI trust model](docs/ci-trust-model.md).
 - [Portable target identity](docs/portable-identity.md)
 - [Decision stages and happens-before](docs/behavioral-launch.md)
 - [Declared behavioral coverage](docs/behavioral-coverage.md)
+- [Fault testing](docs/fault-testing.md)
+- [Behavioral policies](docs/behavioral-policies.md)
+- [The CI gate](docs/ci-gate.md)
 - [Behavioral regression comparison](docs/behavioral-regression.md)
 - [CI trust model](docs/ci-trust-model.md)
 - [PyPI package](https://pypi.org/project/agentcheck-ai/)
