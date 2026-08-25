@@ -220,6 +220,7 @@ and read the [CI trust model](docs/ci-trust-model.md).
 - [The CI gate](docs/ci-gate.md)
 - [Behavioral regression comparison](docs/behavioral-regression.md)
 - [CI trust model](docs/ci-trust-model.md)
+- [Changelog](CHANGELOG.md)
 - [PyPI package](https://pypi.org/project/agentcheck-ai/)
 
 ## Contributing
