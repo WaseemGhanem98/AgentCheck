@@ -264,6 +264,26 @@ def _evaluate_tool_behavior(
         sensitive=True,
     )
     result = Verdict.PASS if passed else Verdict.FAIL
+    if (
+        not passed
+        and not forbidden
+        and count == 0
+        and not builder.run.tool_attempts
+    ):
+        # The run attempted no tool at all, so the suite observed nothing about
+        # how this agent decides. A required-call constraint reads that silence
+        # as a violation, which turns absent evidence into a definite negative
+        # verdict -- the one conversion this evaluator is not allowed to make.
+        #
+        # Deliberately narrow. A call with the wrong arguments, too many calls,
+        # or a call to some other tool are all choices the run did observe, and
+        # each stays a FAIL. Only "nothing happened" becomes undecided.
+        #
+        # This is not a softening: INCONCLUSIVE is not a pass, and `gate` still
+        # refuses the run (exit 3). It stops the report from blaming the agent
+        # for a silence that AgentCheck's own neutral offline model produces on
+        # every zero-argument tool, since ControlledModel never chooses a tool.
+        result = Verdict.INCONCLUSIVE
     label = "forbidden" if forbidden else "required"
     builder.add_assertion(
         constraint.criterion_id,
@@ -273,9 +293,19 @@ def _evaluate_tool_behavior(
         (
             f"Observed call count and arguments satisfy the {label} tool constraint."
             if passed
-            else f"Observed call count or arguments violate the {label} tool constraint."
+            else (
+                "No tool was attempted at all, so the run establishes nothing "
+                f"about the {label} {constraint.tool_name} constraint."
+                if result is Verdict.INCONCLUSIVE
+                else f"Observed call count or arguments violate the {label} tool constraint."
+            )
         ),
         (evidence_id,),
+        missing=(
+            (f"any tool attempt from which {constraint.tool_name} behavior could be read",)
+            if result is Verdict.INCONCLUSIVE
+            else ()
+        ),
     )
     if constraint.confirmation_required_before_call and matching:
         confirmed = all(
