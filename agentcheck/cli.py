@@ -23,6 +23,7 @@ from agentcheck.application import (
 )
 from agentcheck.baseline.contract import DEFAULT_BASELINE_FILENAME
 from agentcheck.baseline.service import check_baseline, create_baseline, encode_comparison
+from agentcheck.gate import EXIT_NOT_CERTIFIABLE, gate_error_result, run_gate
 from agentcheck.config import DEFAULT_ENTRYPOINT, contained_path, entrypoint_location
 from agentcheck.coverage import (
     BehavioralCoverage,
@@ -324,6 +325,38 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     _add_python_option(test_parser)
+
+    gate_parser = commands.add_parser(
+        "gate",
+        help="run the trusted suite and decide whether CI should block",
+        description=(
+            "Run the frozen suite, compare it against the trusted baseline, and "
+            "return one CI status. A run that could not execute is reported as "
+            "not certifiable rather than as a pass or a regression, and an "
+            "inconclusive suite is never reported as a pass. Exit codes match "
+            "agentcheck test: 0 pass, 1 behavioural failure, 2 not certifiable, "
+            "3 inconclusive."
+        ),
+    )
+    gate_parser.add_argument("target", nargs="?", default=".")
+    gate_parser.add_argument(
+        "--baseline",
+        help=(
+            "relative path to the trusted baseline inside the target "
+            "(defaults to agentcheck-baseline.json)"
+        ),
+    )
+    gate_parser.add_argument("--seed", type=_seed, help="override the configured suite seed")
+    gate_parser.add_argument(
+        "--run-id", type=_run_id, help="set a safe artifact run ID"
+    )
+    gate_parser.add_argument(
+        "--no-store", action="store_true", help="skip writing the local SQLite index"
+    )
+    gate_parser.add_argument(
+        "--json", action="store_true", help="print the decision as JSON on stdout"
+    )
+    _add_python_option(gate_parser)
 
     report_parser = commands.add_parser(
         "report",
@@ -1663,6 +1696,65 @@ def _baseline_create_command(
     return 0
 
 
+def _gate_command(
+    target: str,
+    *,
+    baseline: str | None,
+    seed: int | None,
+    run_id: str | None,
+    persist_store: bool,
+    as_json: bool,
+    python_executable: str | None,
+) -> int:
+    reporter = _TestProgressReporter(stream=sys.stderr if as_json else sys.stdout)
+
+    def on_inspected(spec: AgentSpec) -> None:
+        reporter.inspection_complete()
+
+    def on_prepared(
+        frozen: Any, total: int, invalid: int, excluded_by_selection: int
+    ) -> None:
+        reporter.suite_ready(frozen, total, invalid, excluded_by_selection)
+
+    reporter.start()
+    try:
+        result = run_gate(
+            target,
+            baseline=baseline,
+            seed=seed,
+            run_id=run_id,
+            persist_store=persist_store,
+            python_executable=python_executable,
+            progress=reporter.case_completed,
+            on_inspected=on_inspected,
+            on_prepared=on_prepared,
+        )
+    except Exception as exc:
+        # A suite that could not load or no longer matches its target raises
+        # before any scenario runs. The top-level handler already reports that
+        # to a human on stderr with exit 2, but under `--json` it would leave
+        # stdout empty -- and a CI step piping this into a parser would fail on
+        # an empty document instead of reading the not-certifiable decision.
+        if not as_json:
+            raise
+        message = redact_log_text(str(exc)) or type(exc).__name__
+        # Keep the human line on stderr as well, so a CI log reads the same
+        # whether or not the step asked for JSON.
+        print(f"AgentCheck error: {message}", file=sys.stderr)
+        print(gate_error_result(message).to_json())
+        return EXIT_NOT_CERTIFIABLE
+    finally:
+        reporter.close()
+
+    if as_json:
+        print(result.render(), end="", file=sys.stderr)
+        print(result.to_json())
+    else:
+        print()
+        print(result.render(), end="")
+    return result.exit_code
+
+
 def _baseline_check_command(
     target: str,
     *,
@@ -1743,6 +1835,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 run_id=args.run_id,
                 persist_store=not args.no_store,
                 select=args.select,
+                python_executable=args.python_executable,
+            )
+        if args.command == "gate":
+            return _gate_command(
+                args.target,
+                baseline=args.baseline,
+                seed=args.seed,
+                run_id=args.run_id,
+                persist_store=not args.no_store,
+                as_json=args.json,
                 python_executable=args.python_executable,
             )
         if args.command == "report":

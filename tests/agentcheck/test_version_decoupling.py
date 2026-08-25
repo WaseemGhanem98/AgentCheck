@@ -218,3 +218,29 @@ def test_the_cli_still_reports_the_package_release() -> None:
     assert result.returncode == 0, result.stderr
     assert agentcheck.__version__ in (result.stdout + result.stderr)
     assert GENERATOR_COMPATIBILITY_VERSION not in result.stdout.split()[-1:]
+
+
+# --- the two hand-maintained declarations must not drift apart -------------
+
+
+def test_the_release_version_is_declared_once_in_effect() -> None:
+    """``pyproject.toml`` and ``agentcheck.__version__`` are edited by hand.
+
+    Nothing generates one from the other, so a bump that touches only one leaves
+    the wheel's metadata disagreeing with what ``--version`` prints and with what
+    ``provenance.release_version`` records. That is silent: both files are
+    individually valid.
+    """
+    import re
+
+    pyproject = Path(__file__).resolve().parents[2] / "pyproject.toml"
+    text = pyproject.read_text(encoding="utf-8")
+
+    # Match the project table's own key, not a pinned dependency's version.
+    match = re.search(r"(?m)^version = \"([^\"]+)\"$", text)
+    assert match is not None, "no top-level version key in pyproject.toml"
+
+    assert match.group(1) == agentcheck.__version__, (
+        f"pyproject.toml declares {match.group(1)!r} but "
+        f"agentcheck.__version__ is {agentcheck.__version__!r}"
+    )

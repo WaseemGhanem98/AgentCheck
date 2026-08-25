@@ -14,11 +14,11 @@ build-backend = "setuptools.build_meta"
 #
 #     pip install 'agentcheck-ai[all]'    import agentcheck    agentcheck --help
 name = "agentcheck-ai"
-# This release version is also recorded as `provenance.generator_version` in
-# newly frozen suites and participates in their fingerprints. Existing suites
-# remain loadable, but a routine package bump can re-identify otherwise-equivalent
-# newly generated suites. Separating those concepts is known technical debt.
-version = "0.1.1"
+# Release provenance only. Suite identity is versioned separately by
+# `agentcheck.generate.GENERATOR_COMPATIBILITY_VERSION`, so bumping this line
+# does not move scenario fingerprints or re-identify equivalent suites.
+# `tests/agentcheck/test_version_decoupling.py` holds that guarantee.
+version = "0.2.0"
 description = "Behavioral testing for AI agents"
 readme = "README.md"
 license = "Apache-2.0"
@@ -83,6 +83,7 @@ agentcheck = "agentcheck.cli:main"
 [project.urls]
 Homepage = "https://github.com/WaseemGhanem98/AgentCheck"
 Documentation = "https://github.com/WaseemGhanem98/AgentCheck#readme"
+Changelog = "https://github.com/WaseemGhanem98/AgentCheck/blob/main/CHANGELOG.md"
 Issues = "https://github.com/WaseemGhanem98/AgentCheck/issues"
 Source = "https://github.com/WaseemGhanem98/AgentCheck"
 

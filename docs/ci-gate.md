@@ -1,0 +1,77 @@
+# The CI gate
+
+```bash
+agentcheck gate .
+```
+
+One command for the release question: run the trusted suite, compare it to the
+trusted baseline, and return one status CI can branch on. It orchestrates the
+existing operations — the same `test` execution and the same `baseline check`
+comparison — rather than reimplementing either.
+
+## Exit codes
+
+The contract `agentcheck test` already publishes, reused unchanged:
+
+| Code | Meaning | CI should |
+| --- | --- | --- |
+| `0` | no new behavioural failure | allow |
+| `1` | a behavioural failure is new against the baseline | block |
+| `2` | the run is **not certifiable** | block |
+| `3` | the suite could not decide | block |
+
+## Why "not certifiable" is its own answer
+
+A case that stopped on infrastructure — a missing fixture, a worker that could
+not start, a suite or source or baseline that does not match — has said nothing
+about the agent. Reporting that as a pass hides a broken harness behind a green
+build. Reporting it as a regression blames the agent for something it did not
+do. So it is neither: exit `2`, and the gate does not consult the baseline at
+all, because there is nothing trustworthy to compare.
+
+An infrastructure error outranks a failure in the same run. A suite that only
+half executed cannot certify the half that did.
+
+`INCONCLUSIVE` is never quietly a pass either. Where the evidence a criterion
+needs was not observed, the gate blocks with exit `3` and says so.
+
+## Historical failures do not block
+
+A baseline records the failures you have already accepted. The gate blocks on
+what is **new** against it, so a target with known defects stays green until its
+behaviour changes:
+
+```bash
+agentcheck test . --no-store
+agentcheck baseline create . --latest --out agentcheck-baseline.json
+```
+
+Record a baseline from an explicit command, never from a failing CI run. Without
+one the gate still answers the weaker question it can — it blocks on any failure
+and tells you how to record a baseline — and says plainly that nothing was
+compared.
+
+## Machine-readable output
+
+```bash
+agentcheck gate . --json
+```
+
+Prints the decision, exit code, reason, verdict counts, run ID, suite
+fingerprint and report path as JSON on stdout, with the human summary on stderr
+so both are usable in the same step.
+
+Every exit path prints a document, including the one where the suite never ran
+at all -- a frozen suite that no longer matches its target, or a config the CLI
+could not resolve. That case is the one a parsing step most needs, because it is
+where a broken harness would otherwise look like nothing happened. It reports
+`"decision": "block"` with exit code 2, and `"counts": {}` rather than zeroed
+counts: no scenario executed, so `"fail": 0` would be a claim this run cannot
+make.
+
+## In GitHub Actions
+
+`.github/workflows/agentcheck-example.yml` is a copyable template. It runs on a
+GitHub-hosted runner with `contents: read`, no secrets, and no provider
+credentials: the suite runs against simulated tools, so nothing in it needs a
+model key.

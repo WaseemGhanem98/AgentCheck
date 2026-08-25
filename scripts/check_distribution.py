@@ -47,6 +47,7 @@ SDIST_ALLOWED_ROOTS = frozenset(
     {
         ".github",
         "AGENTS.md",
+        "CHANGELOG.md",
         "CONTRIBUTING.md",
         "LICENSE",
         "MANIFEST.in",

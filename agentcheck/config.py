@@ -314,7 +314,15 @@ def entrypoint_location(root: Path, entrypoint: str) -> tuple[Path, str]:
 def resolve_entrypoint(root: Path, entrypoint: str) -> tuple[Path, str]:
     source, attribute = entrypoint_location(root, entrypoint)
     if not source.is_file():
-        raise ConfigurationError(f"entrypoint source does not exist: {source}")
+        # This is the first error a new user is likely to see, so it says what
+        # to do rather than only what is missing.
+        raise ConfigurationError(
+            f"entrypoint source does not exist: {source}\n"
+            f"  agentcheck.json points at {entrypoint!r}, relative to {root}.\n"
+            "  Either create that file, or point the config at the module that "
+            "builds your agent:\n"
+            f"    agentcheck init {root} --entrypoint path/to/agent.py:agent --force"
+        )
     return source, attribute
 
 
