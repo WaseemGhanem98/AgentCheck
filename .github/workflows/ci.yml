@@ -281,3 +281,35 @@ jobs:
           "$RUNNER_TEMP/wheel-venv/bin/python" -c "import agentcheck; print(agentcheck.__version__)"
           "$RUNNER_TEMP/wheel-venv/bin/agentcheck" --help > /dev/null
           echo "wheel install smoke passed"
+
+  required:
+    # The single status branch protection should require. The matrix cannot play
+    # that role: it is skipped by design on documentation-only pull requests, and
+    # a skipped job never reports, so requiring it by name leaves those pull
+    # requests waiting forever for a status that will never arrive.
+    #
+    # always() is what makes this report at all when an upstream job is skipped.
+    # It deliberately does not mean "pass anyway": the script refuses a skipped
+    # matrix on a code change, refuses a failed or cancelled matrix in any scope,
+    # and treats an unreadable classification as a code change.
+    name: Required CI
+    needs: [scope, tests, checks]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Resolve required job results
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          TESTS_RESULT: ${{ needs.tests.result }}
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          EXPENSIVE: ${{ needs.scope.outputs.expensive }}
+        # Standard library only, so the gate does not depend on an install
+        # succeeding in order to report that something failed.
+        run: python3 scripts/check_required_ci.py
