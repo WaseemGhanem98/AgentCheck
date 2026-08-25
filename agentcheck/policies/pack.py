@@ -16,12 +16,47 @@ POLICY_PACK_CONTRACT_VERSION: Literal["agentcheck.policy_pack.v1"] = (
 
 
 class PolicyRuleKind(str, Enum):
-    """Maps onto existing deterministic evaluators; there is no second engine."""
+    """Maps onto existing deterministic evaluators; there is no second engine.
+
+    Every member here names a trajectory or output evaluator that already
+    exists. The four added for policies v1 were evaluable long before they were
+    authorable: the evaluator understood an ordering relation or a retry ceiling,
+    but no declared rule could reach it, so the only way to assert one was to
+    hand-write a scenario.
+    """
 
     CONFIRMATION_BEFORE_TOOL = "confirmation_before_tool"
     NO_RETRY_AFTER_AMBIGUOUS_TIMEOUT = "no_retry_after_ambiguous_timeout"
     NO_FABRICATED_SUCCESS = "no_fabricated_success"
     NO_DUPLICATE_SIDE_EFFECT = "no_duplicate_side_effect"
+    ORDERING = "ordering"
+    MAX_RETRIES = "max_retries"
+    MAX_TOOL_CALLS = "max_tool_calls"
+    MAX_MODEL_TURNS = "max_model_turns"
+
+
+# What each kind must be told before its evaluator can decide anything. A rule
+# missing these does not become a lenient rule -- the evaluator would return
+# INCONCLUSIVE for every run, which reads like a policy that is being enforced
+# and is not. Rejecting it at parse time is the honest failure.
+_REQUIRED_PARAMETERS: dict[PolicyRuleKind, tuple[str, ...]] = {
+    PolicyRuleKind.ORDERING: ("required_before",),
+    PolicyRuleKind.MAX_RETRIES: ("max_retries",),
+    PolicyRuleKind.MAX_TOOL_CALLS: ("maximum",),
+    PolicyRuleKind.MAX_MODEL_TURNS: ("maximum",),
+}
+
+# Budgets are a property of the run, not of one tool, so they do not need a
+# tool_name. Everything else names the call whose decision is under test.
+_TOOL_FREE_KINDS = frozenset(
+    {
+        PolicyRuleKind.NO_FABRICATED_SUCCESS,
+        PolicyRuleKind.MAX_TOOL_CALLS,
+        PolicyRuleKind.MAX_MODEL_TURNS,
+    }
+)
+
+_NON_NEGATIVE_INTEGER_PARAMETERS = frozenset({"max_retries", "maximum"})
 
 
 class PolicyRule(ContractModel):
@@ -36,11 +71,38 @@ class PolicyRule(ContractModel):
 
     @model_validator(mode="after")
     def require_declared_tool_when_needed(self) -> "PolicyRule":
-        if self.kind is not PolicyRuleKind.NO_FABRICATED_SUCCESS and not self.tool_name:
+        if self.kind not in _TOOL_FREE_KINDS and not self.tool_name:
             raise ValueError(
                 f"policy rule {self.rule_id!r} of kind {self.kind.value!r} "
                 "requires a declared tool_name"
             )
+        for name in _REQUIRED_PARAMETERS.get(self.kind, ()):
+            if name not in self.parameters:
+                raise ValueError(
+                    f"policy rule {self.rule_id!r} of kind {self.kind.value!r} "
+                    f"requires the {name!r} parameter"
+                )
+        for name in _NON_NEGATIVE_INTEGER_PARAMETERS:
+            if name not in self.parameters:
+                continue
+            value = self.parameters[name]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(
+                    f"policy rule {self.rule_id!r} needs {name!r} to be a "
+                    f"non-negative integer, not {value!r}"
+                )
+        if "required_before" in self.parameters:
+            required_before = self.parameters["required_before"]
+            if not isinstance(required_before, str) or not required_before:
+                raise ValueError(
+                    f"policy rule {self.rule_id!r} needs 'required_before' to name "
+                    "the tool that must be observed first"
+                )
+            if required_before == self.tool_name:
+                raise ValueError(
+                    f"policy rule {self.rule_id!r} orders {self.tool_name!r} "
+                    "before itself"
+                )
         return self
 
 

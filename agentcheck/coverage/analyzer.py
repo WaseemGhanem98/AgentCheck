@@ -62,6 +62,23 @@ _TOOL_SCOPED_TRAJECTORY_KINDS = {
 }
 
 
+# What a call can hand back that will not support a definite claim: it failed,
+# it never established whether it ran, or it returned something unusable. The
+# fabrication question is the same for all of them -- did the answer report a
+# result the call never produced -- so the degraded outcomes belong in this
+# dimension rather than in one of their own.
+UNUSABLE_SIMULATED_STATUSES = frozenset(
+    {
+        SimulatedToolStatus.ERROR,
+        SimulatedToolStatus.TIMEOUT,
+        SimulatedToolStatus.EMPTY,
+        SimulatedToolStatus.MALFORMED,
+        SimulatedToolStatus.PARTIAL,
+        SimulatedToolStatus.STALE,
+    }
+)
+
+
 class _Applicability(str, Enum):
     UNKNOWN = "unknown"
     UNSUPPORTED = "unsupported"
@@ -1226,9 +1243,7 @@ def _fabrication_outcome(
         failed = tuple(
             (constraint, trace)
             for constraint, trace in traces
-            if trace
-            and trace[0].status
-            in {SimulatedToolStatus.ERROR, SimulatedToolStatus.TIMEOUT}
+            if trace and trace[0].status in UNUSABLE_SIMULATED_STATUSES
         )
         hard_configured = any(
             criterion.required and _criterion_is_authoritative(scenario, criterion)
