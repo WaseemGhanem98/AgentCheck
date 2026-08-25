@@ -53,7 +53,7 @@ from agentcheck.domain.run import (
     UsageMetrics,
 )
 from agentcheck.domain.scenario import ConversationRole, ConversationTurn
-from agentcheck.inspect.capabilities import extract_capabilities
+from agentcheck.inspect.capabilities import classify_tool, extract_capabilities
 
 from .base import (
     portable_identity,
@@ -240,13 +240,26 @@ def _tool_definition(name: str, tool: Any) -> ToolDefinition:
     tool_def = getattr(tool, "tool_def", None)
     schema = getattr(tool_def, "parameters_json_schema", None)
     description = getattr(tool_def, "description", None)
+    resolved = description if isinstance(description, str) and description else None
+    # The same shared classifier the OpenAI Agents adapter uses. These two flags
+    # were hardcoded False here, and everything downstream reads them: fault
+    # generation skips a tool that is not state-changing, and the
+    # ambiguous-timeout case is destructive-only. A PydanticAI target therefore
+    # received no fault family for any tool, while `inspect` printed a summary
+    # of zero state-changing actions directly above a capability listing that
+    # described the same tool as state-changing -- capability extraction
+    # classifies independently, so only the adapter disagreed.
+    #
+    # Still inferred, still not authoritative, and reported as such. This buys
+    # parity with the other adapter, not a stronger claim than it makes.
+    _, state_changing, destructive = classify_tool(name, resolved)
     return ToolDefinition(
         name=name,
-        description=description if isinstance(description, str) and description else None,
+        description=resolved,
         input_schema=dict(schema) if isinstance(schema, Mapping) else {},
         output_schema=None,
-        state_changing=False,
-        destructive=False,
+        state_changing=state_changing,
+        destructive=destructive,
         replaceable=True,
     )
 
