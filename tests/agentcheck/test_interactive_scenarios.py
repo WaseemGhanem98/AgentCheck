@@ -89,10 +89,15 @@ BUILT_IN_FINGERPRINTS_SEED_7 = {
 
 # A generated suite for a target with no confirmation-required tool declares no
 # follow-up anywhere, so its whole document stays byte-identical within the
-# current generator version. The package version is currently part of suite
-# provenance, so the intentional 0.1.1 release bump moved this pin.
+# current generation semantics.
+#
+# This pin used to move on every release, because provenance recorded the
+# package version: the 0.1.1 bump moved it once for no behavioural reason.
+# Provenance now records GENERATOR_COMPATIBILITY_VERSION instead, so from here
+# the only thing that may move this value is a deliberate change to how suites
+# are generated. If a release moves it again, that is the regression.
 NO_FOLLOWUP_SUITE_FINGERPRINT = (
-    "sha256:70c4e36947c5f188831517afbbdd7d567f06173730e4b46dd116ca4e87118819"
+    "sha256:b5285d2503fc63f5dc02a9f7bdd559fd465c02b7aaa2b53f88b3b9cf0fff4732"
 )
 # Likewise for a scenario embedded in a parent contract: a replay manifest over
 # the built-in suite, digested by the tree before ``followup_turns`` existed.

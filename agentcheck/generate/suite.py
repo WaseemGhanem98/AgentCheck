@@ -24,7 +24,6 @@ from typing import Any, Literal, Mapping, Sequence
 
 from pydantic import Field, model_serializer, model_validator
 
-from agentcheck import __version__
 from agentcheck.artifacts import create_private_file, replace_private_file
 from agentcheck.config import AgentCheckConfig, contained_path
 from agentcheck.domain import (
@@ -78,6 +77,30 @@ FROZEN_SUITE_CONTRACT_VERSION: Literal["agentcheck.frozen_suite.v1"] = (
 )
 DEFAULT_SUITE_FILENAME = "agentcheck-suite.json"
 GENERATOR_NAME = "agentcheck.generate.suite"
+
+GENERATOR_COMPATIBILITY_VERSION = "1"
+"""Which generation *semantics* produced a suite, independent of the release.
+
+This is not the package version, and the difference matters. A frozen suite's
+fingerprint covers its provenance, so recording the release here made every
+suite re-identify whenever the distribution was published -- a 0.1.1 to 0.2.0
+bump moved every ``suite_id`` while the generated cases were byte-identical.
+Identity would have tracked "which wheel wrote this" rather than "what this
+asserts", and a routine release would have looked like a behavioural change.
+
+Bump this only when generation semantics change in a way that *should*
+re-identify otherwise-equivalent suites: a new case family, a changed default
+budget, different fixture wiring, altered lint or selection behaviour. Adding a
+field that no generated case populates does not qualify. Renaming the package
+does not qualify. Releasing does not qualify.
+
+Old values keep their meaning: a stored suite validates against the
+``generator_version`` it recorded, so raising this never invalidates an artifact
+that is already on disk -- it only marks suites generated from here on as coming
+from different semantics.
+"""
+
+
 
 MAX_UNSUPPORTED_FEATURES = 100
 _MAX_SUITE_BYTES = 8 * 1024 * 1024
@@ -738,7 +761,7 @@ def build_frozen_suite(
         seed=seed,
         provenance=GeneratorProvenance(
             generator=GENERATOR_NAME,
-            generator_version=__version__,
+            generator_version=GENERATOR_COMPATIBILITY_VERSION,
             sources=sources,
             policy_packs=tuple(pack.pack_id for pack in policy_packs),
         ),

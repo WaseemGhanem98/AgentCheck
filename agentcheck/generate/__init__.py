@@ -42,6 +42,7 @@ from .selection import (
     select_units,
 )
 from .suite import (
+    GENERATOR_COMPATIBILITY_VERSION,
     DEFAULT_SUITE_FILENAME,
     FROZEN_SUITE_CONTRACT_VERSION,
     CaseLineage,
@@ -70,6 +71,7 @@ from .templates import (
 )
 
 __all__ = [
+    "GENERATOR_COMPATIBILITY_VERSION",
     "ACCOUNT_SUPPORT_SUITE",
     "ACCOUNT_TOOLS",
     "DEFAULT_MAX_MUTATIONS",
