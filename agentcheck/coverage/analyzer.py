@@ -56,6 +56,7 @@ _GENERATOR_ACTION_SOURCES = {
 _TOOL_SCOPED_TRAJECTORY_KINDS = {
     TrajectoryConstraintKind.CONFIRMATION_BEFORE_TOOL,
     TrajectoryConstraintKind.NO_DUPLICATE_SIDE_EFFECT,
+    TrajectoryConstraintKind.NO_SAME_STAGE_DUPLICATE_ACTION,
     TrajectoryConstraintKind.MAX_RETRIES,
     TrajectoryConstraintKind.NO_RETRY_AFTER_AMBIGUOUS_TIMEOUT,
     TrajectoryConstraintKind.ORDERING,
