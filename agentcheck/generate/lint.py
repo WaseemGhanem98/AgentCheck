@@ -31,6 +31,7 @@ class ScenarioLintIssue:
 _SUPPORTED_TRAJECTORY_KINDS = {
     TrajectoryConstraintKind.CONFIRMATION_BEFORE_TOOL,
     TrajectoryConstraintKind.NO_DUPLICATE_SIDE_EFFECT,
+    TrajectoryConstraintKind.NO_SAME_STAGE_DUPLICATE_ACTION,
     # The evaluator has judged ordering since observed-before landed, but this
     # set never learned about it, so every case carrying an ordering constraint
     # was linted out as an unsupported kind. The relation was evaluable and
