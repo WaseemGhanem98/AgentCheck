@@ -80,6 +80,75 @@ class _FixtureConfig:
     priority: int
 
 
+@dataclass(frozen=True)
+class _PlannedOutcome:
+    """What committing a reservation will do to the world and the record.
+
+    Decided entirely during planning, from the fixture and tool configuration
+    alone -- nothing here depends on wall-clock timing or which reservation in
+    a batch happens to commit first.
+    """
+
+    status: ToolOutcomeStatus
+    result: Any
+    error: ToolError | None
+    latency_ms: float
+    effects: tuple[Any, ...]
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _BlockedPlan:
+    """A call that will not reach a fixture, decided at plan time.
+
+    ``exception_type`` is ``None`` for the one blocked case that has always
+    been returned as an ordinary ``BLOCKED`` outcome rather than raised
+    (invalid arguments): every other blocked reason raises a
+    ``ToolCallBlockedError`` subclass carrying the same outcome, exactly as
+    ``invoke`` always has.
+    """
+
+    exception_type: type[ToolCallBlockedError] | None
+    exception_message: str
+    code: str
+    message: str
+    retryable: bool
+    details: dict[str, Any]
+    metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class CallReservation:
+    """One call's deterministic bookkeeping, decided independently of commit timing.
+
+    Everything that must not depend on execution/completion order --
+    budget consumption, invocation index, fixture ownership, and the
+    resulting status -- is decided when the reservation is created
+    (`ToolGateway.plan_batch`/`plan_one`), in the order the calls are
+    presented. Two reservations from one batch may be committed in any
+    relative order without changing which fixture either received, whether
+    a single-use fixture is double-consumed, or which one crossed a shared
+    budget first: all of that was already decided at plan time.
+
+    What ``commit`` still does -- applying the fixture's world-state effects
+    and recording the attempt/outcome -- is the one part that can still
+    observe scheduling if the caller does not serialize it: two reservations
+    whose effects touch the same simulated state will still produce a
+    completion-order-dependent final world state unless the caller commits
+    them in ``rank`` order. See ``agentcheck.runner.launch_barrier`` for the
+    utility the adapters use to guarantee that.
+    """
+
+    rank: int
+    tool_name: str
+    arguments: dict[str, Any]
+    started_at: datetime
+    tool: _ToolConfig | None
+    invocation_index: int
+    blocked: _BlockedPlan | None
+    planned: _PlannedOutcome | None
+
+
 _HANDLER_FIELDS = (
     "handler",
     "function",
@@ -493,34 +562,12 @@ class ToolGateway:
             metadata=safe_metadata,
         )
         self._outcomes.append(outcome)
-        signature = (
-            attempt.tool_name,
-            json.dumps(attempt.arguments, sort_keys=True, separators=(",", ":")),
-        )
-        self._signature_status[signature] = status
+        # `_signature_status` is deliberately not updated here. It must reflect
+        # decision order (set once, deterministically, in `_plan_one`), not
+        # commit order: two reservations sharing a signature can commit in
+        # either order under concurrent dispatch, and whichever commits last
+        # must not get to decide what a later call's retry-budget check sees.
         return outcome
-
-    def _blocked(
-        self,
-        attempt: ToolAttempt,
-        *,
-        code: str,
-        message: str,
-        started_at: datetime,
-        details: Mapping[str, Any] | None = None,
-    ) -> ToolOutcome:
-        return self._record_outcome(
-            attempt,
-            status=ToolOutcomeStatus.BLOCKED,
-            error=ToolError(
-                code=code,
-                message=message,
-                retryable=False,
-                details=_json_value(dict(details or {}), label="blocked tool details"),
-            ),
-            metadata={"blocked": True},
-            started_at=started_at,
-        )
 
     def _select_fixture(
         self,
@@ -662,14 +709,37 @@ class ToolGateway:
             timestamp=timestamp,
         )
 
-    def invoke(
-        self,
-        tool_name: str,
-        arguments: Mapping[str, Any],
-        world_state: WorldSimulator | Mapping[str, Any] | None = None,
-    ) -> ToolOutcome:
-        """Simulate one tool call; no path in this method invokes application code."""
+    def plan_batch(
+        self, calls: Sequence[tuple[str, Mapping[str, Any]]]
+    ) -> list[CallReservation]:
+        """Deterministically plan every call in ``calls``, in the given order.
 
+        This is the "decision known" step: budget consumption, invocation
+        index assignment, fixture selection and consumption, and the
+        resulting status are all decided here, strictly in the order the
+        calls are listed -- never in whatever order their reservations are
+        later committed. Two batches built from the same calls in the same
+        order always produce reservations with the same fixture and
+        invocation-index assignment, regardless of what commits them or when.
+
+        Committing every returned reservation in order (``commit`` called for
+        index 0, then 1, then ...) reproduces exactly what calling ``invoke``
+        for each call in this same order would have done.
+        """
+
+        return [
+            self._plan_one(rank, tool_name, arguments)
+            for rank, (tool_name, arguments) in enumerate(calls)
+        ]
+
+    def plan_one(self, tool_name: str, arguments: Mapping[str, Any]) -> CallReservation:
+        """Plan a single call. Equivalent to ``plan_batch([(tool_name, arguments)])[0]``."""
+
+        return self._plan_one(0, tool_name, arguments)
+
+    def _plan_one(
+        self, rank: int, tool_name: str, arguments: Mapping[str, Any]
+    ) -> CallReservation:
         started_at = self._now()
         if not isinstance(tool_name, str) or not tool_name:
             raise ValueError("tool_name must be a non-empty string")
@@ -682,26 +752,57 @@ class ToolGateway:
             raise ValueError("tool arguments must be a JSON object")
 
         tool = self._tools.get(tool_name)
-        try:
-            self.budgets.consume_tool_call()
-        except BudgetExceeded as exc:
-            attempt = self._record_attempt(tool_name, safe_arguments, tool, started_at)
-            outcome = self._blocked(
-                attempt,
-                code=f"{exc.resource}_budget_exceeded",
-                message=f"{exc.resource} budget exceeded",
-                details={"limit": exc.limit, "observed": exc.observed},
-                started_at=started_at,
-            )
-            raise ToolCallBlockedError(str(exc), outcome) from exc
-        attempt = self._record_attempt(tool_name, safe_arguments, tool, started_at)
-        self._invocations[tool_name] += 1
-        invocation_index = self._invocations[tool_name]
-
         signature = (
             tool_name,
             json.dumps(safe_arguments, sort_keys=True, separators=(",", ":")),
         )
+
+        def blocked(
+            *,
+            exception_type: type[ToolCallBlockedError] | None,
+            exception_message: str = "",
+            code: str,
+            message: str,
+            retryable: bool = False,
+            details: Mapping[str, Any] | None = None,
+            metadata: Mapping[str, Any] | None = None,
+        ) -> CallReservation:
+            # Matches decision order, not commit order -- see the note on
+            # `_record_outcome` about why this write moved here.
+            self._signature_status[signature] = ToolOutcomeStatus.BLOCKED
+            return CallReservation(
+                rank=rank,
+                tool_name=tool_name,
+                arguments=safe_arguments,
+                started_at=started_at,
+                tool=tool,
+                invocation_index=0,
+                blocked=_BlockedPlan(
+                    exception_type=exception_type,
+                    exception_message=exception_message,
+                    code=code,
+                    message=message,
+                    retryable=retryable,
+                    details=dict(details or {}),
+                    metadata=dict(metadata or {"blocked": True}),
+                ),
+                planned=None,
+            )
+
+        try:
+            self.budgets.consume_tool_call()
+        except BudgetExceeded as exc:
+            return blocked(
+                exception_type=ToolCallBlockedError,
+                exception_message=str(exc),
+                code=f"{exc.resource}_budget_exceeded",
+                message=f"{exc.resource} budget exceeded",
+                details={"limit": exc.limit, "observed": exc.observed},
+            )
+
+        self._invocations[tool_name] += 1
+        invocation_index = self._invocations[tool_name]
+
         if self._signature_status.get(signature) in {
             ToolOutcomeStatus.ERROR,
             ToolOutcomeStatus.TIMEOUT,
@@ -709,26 +810,21 @@ class ToolGateway:
             try:
                 self.budgets.consume_retry()
             except BudgetExceeded as exc:
-                outcome = self._blocked(
-                    attempt,
+                return blocked(
+                    exception_type=ToolCallBlockedError,
+                    exception_message="tool retry budget exceeded",
                     code="retry_budget_exceeded",
                     message="tool retry budget exceeded",
                     details={"limit": exc.limit, "observed": exc.observed},
-                    started_at=started_at,
                 )
-                raise ToolCallBlockedError(
-                    "tool retry budget exceeded", outcome
-                ) from exc
         if tool is None:
-            outcome = self._blocked(
-                attempt,
+            return blocked(
+                exception_type=UnknownToolError,
+                exception_message=(
+                    f"tool {tool_name!r} is not in the AgentCheck allowlist"
+                ),
                 code="unknown_tool",
                 message="tool is not in the AgentCheck allowlist",
-                started_at=started_at,
-            )
-            raise UnknownToolError(
-                f"tool {tool_name!r} is not in the AgentCheck allowlist",
-                outcome,
             )
 
         validation_errors = sorted(
@@ -738,34 +834,26 @@ class ToolGateway:
         if validation_errors:
             schema_error = validation_errors[0]
             path = ".".join(str(part) for part in schema_error.absolute_path)
-            return self._record_outcome(
-                attempt,
-                status=ToolOutcomeStatus.BLOCKED,
-                error=ToolError(
-                    code="invalid_arguments",
-                    message="tool arguments do not satisfy the declared JSON Schema",
-                    retryable=True,
-                    details={
-                        "path": path,
-                        "validator": str(schema_error.validator),
-                    },
-                ),
+            return blocked(
+                exception_type=None,
+                code="invalid_arguments",
+                message="tool arguments do not satisfy the declared JSON Schema",
+                retryable=True,
+                details={"path": path, "validator": str(schema_error.validator)},
                 metadata={"schema_valid": False},
-                started_at=started_at,
             )
 
         fixture = self._select_fixture(tool_name, safe_arguments, invocation_index)
         if fixture is None:
-            outcome = self._blocked(
-                attempt,
+            return blocked(
+                exception_type=FixtureNotFoundError,
+                exception_message=(
+                    f"no controlled fixture matched invocation {invocation_index} "
+                    f"for {tool_name!r}"
+                ),
                 code="fixture_not_found",
                 message="no controlled fixture matched this invocation",
                 details={"invocation_index": invocation_index},
-                started_at=started_at,
-            )
-            raise FixtureNotFoundError(
-                f"no controlled fixture matched invocation {invocation_index} for {tool_name!r}",
-                outcome,
             )
 
         configured = self._fixture_outcome(fixture)
@@ -835,21 +923,14 @@ class ToolGateway:
         try:
             self.budgets.add_simulated_time(latency_ms / 1_000.0)
         except BudgetExceeded as exc:
-            outcome = self._blocked(
-                attempt,
+            return blocked(
+                exception_type=ToolCallBlockedError,
+                exception_message=str(exc),
                 code="wall_time_budget_exceeded",
                 message="simulated tool latency exceeded the wall-time budget",
                 details={"limit": exc.limit, "observed": exc.observed},
-                started_at=started_at,
             )
-            raise ToolCallBlockedError(str(exc), outcome) from exc
-        active_world = self._resolve_world(world_state)
-        transitions = self._apply_effects(
-            effect_values or (),
-            world=active_world,
-            attempt=attempt,
-            timestamp=self._now(),
-        )
+
         metadata = {
             "fixture_id": fixture.fixture_id,
             "schema_valid": True,
@@ -862,16 +943,106 @@ class ToolGateway:
             metadata["partial"] = True
         elif status == ToolOutcomeStatus.MALFORMED:
             metadata["malformed"] = True
+
+        # The signature's status is fixed here, at plan time, in call order --
+        # not when this reservation happens to commit -- so a later same-batch
+        # duplicate's retry-budget check above sees exactly the status this
+        # call is heading toward, the same as if both had run serially.
+        self._signature_status[signature] = status
+
+        return CallReservation(
+            rank=rank,
+            tool_name=tool_name,
+            arguments=safe_arguments,
+            started_at=started_at,
+            tool=tool,
+            invocation_index=invocation_index,
+            blocked=None,
+            planned=_PlannedOutcome(
+                status=status,
+                result=result,
+                error=outcome_error,
+                latency_ms=latency_ms,
+                effects=tuple(effect_values or ()),
+                metadata=metadata,
+            ),
+        )
+
+    def commit(
+        self,
+        reservation: CallReservation,
+        world_state: WorldSimulator | Mapping[str, Any] | None = None,
+    ) -> ToolOutcome:
+        """Apply one previously planned call's effects and record it.
+
+        Safe to call the reservations from one ``plan_batch`` in any order
+        with respect to each other's *timing* -- fixture ownership and
+        budget consumption were already fixed at plan time. It is the
+        caller's responsibility to actually invoke ``commit`` in ``rank``
+        order for reservations whose effects could touch overlapping
+        simulated state, or the resulting world state reflects whatever
+        order they were committed in rather than the order they were
+        decided in. ``agentcheck.runner.launch_barrier`` provides a
+        deterministic way to guarantee that ordering under real concurrent
+        dispatch.
+        """
+
+        attempt = self._record_attempt(
+            reservation.tool_name,
+            reservation.arguments,
+            reservation.tool,
+            reservation.started_at,
+        )
+        if reservation.blocked is not None:
+            plan = reservation.blocked
+            outcome = self._record_outcome(
+                attempt,
+                status=ToolOutcomeStatus.BLOCKED,
+                error=ToolError(
+                    code=plan.code,
+                    message=plan.message,
+                    retryable=plan.retryable,
+                    details=plan.details,
+                ),
+                metadata=plan.metadata,
+                started_at=reservation.started_at,
+            )
+            if plan.exception_type is not None:
+                raise plan.exception_type(plan.exception_message, outcome)
+            return outcome
+
+        planned = reservation.planned
+        assert planned is not None  # noqa: S101 - invariant: blocked xor planned
+        active_world = self._resolve_world(world_state)
+        transitions = self._apply_effects(
+            planned.effects,
+            world=active_world,
+            attempt=attempt,
+            timestamp=self._now(),
+        )
         return self._record_outcome(
             attempt,
-            status=status,
-            result=result,
-            error=outcome_error,
-            latency_ms=latency_ms,
+            status=planned.status,
+            result=planned.result,
+            error=planned.error,
+            latency_ms=planned.latency_ms,
             transitions=transitions,
-            metadata=metadata,
-            started_at=started_at,
+            metadata=planned.metadata,
+            started_at=reservation.started_at,
         )
+
+    def invoke(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        world_state: WorldSimulator | Mapping[str, Any] | None = None,
+    ) -> ToolOutcome:
+        """Simulate one tool call; no path in this method invokes application code.
+
+        Equivalent to ``commit(plan_one(tool_name, arguments), world_state)``.
+        """
+
+        return self.commit(self._plan_one(0, tool_name, arguments), world_state)
 
     def _resolve_world(
         self, world_state: WorldSimulator | Mapping[str, Any] | None
