@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING
 from .pack import PolicyPack, PolicyRule, PolicyRuleKind
 
 if TYPE_CHECKING:
-    from agentcheck.domain import AgentSpec
+    from agentcheck.domain import AgentSpec, RiskAxis
 
 
 DERIVED_TOOL_RISK_PACK_ID = "derived_tool_risk_v1"
@@ -50,6 +50,29 @@ def _rule_slug(tool_name: str) -> str:
     )[:120]
 
 
+def _origin_clause(axis: "RiskAxis | None", label: str) -> str:
+    """Describe where one resolved axis actually came from.
+
+    Falls back to the original, purely-inferred phrasing whenever ``axis`` is
+    unavailable or itself inferred, so a target with no developer risk
+    declaration produces byte-identical rule text to before this existed --
+    only a target that actually uses a declaration sees different wording,
+    which is also the only case where the words would otherwise be a lie.
+    """
+
+    from agentcheck.domain import RiskAuthority
+
+    if axis is None or axis.authority is RiskAuthority.INFERRED:
+        return f"it is inferred {label} from its declared name and description"
+    if axis.authority is RiskAuthority.DEVELOPER_DECLARED:
+        return f"the developer declares it {label}"
+    if axis.authority is RiskAuthority.FRAMEWORK_AUTHORITATIVE:
+        return f"the framework declares it {label}"
+    # UNKNOWN never carries a true value, so a rule scoped to a true axis
+    # cannot reach this branch; kept only so the match is exhaustive.
+    return f"it is inferred {label} from its declared name and description"
+
+
 def derive_tool_risk_pack(spec: "AgentSpec") -> PolicyPack | None:
     """Build the derived pack for ``spec``, or ``None`` when nothing qualifies.
 
@@ -61,6 +84,7 @@ def derive_tool_risk_pack(spec: "AgentSpec") -> PolicyPack | None:
     definitions = sorted(
         (item.value for item in spec.tools.items), key=lambda tool: tool.name
     )
+    risk_by_name = {item.tool_name: item for item in spec.tool_risk.items}
     rules: list[PolicyRule] = []
     state_changing_names: list[str] = []
 
@@ -71,13 +95,16 @@ def derive_tool_risk_pack(spec: "AgentSpec") -> PolicyPack | None:
             break
         state_changing_names.append(definition.name)
         slug = _rule_slug(definition.name)
+        assertion = risk_by_name.get(definition.name)
+        state_changing_axis = assertion.state_changing if assertion is not None else None
+        destructive_axis = assertion.destructive if assertion is not None else None
         rules.append(
             PolicyRule(
                 rule_id=f"no_duplicate_side_effect__{slug}",
                 kind=PolicyRuleKind.NO_DUPLICATE_SIDE_EFFECT,
                 description=(
-                    f"{definition.name} must not repeat an identical call: it is "
-                    "inferred state-changing from its declared name and description."
+                    f"{definition.name} must not repeat an identical call: "
+                    f"{_origin_clause(state_changing_axis, 'state-changing')}."
                 ),
                 tool_name=definition.name,
             )
@@ -89,8 +116,8 @@ def derive_tool_risk_pack(spec: "AgentSpec") -> PolicyPack | None:
                     kind=PolicyRuleKind.NO_RETRY_AFTER_AMBIGUOUS_TIMEOUT,
                     description=(
                         f"{definition.name} must not be reissued after a timeout left "
-                        "its outcome unknown: it is inferred destructive from its "
-                        "declared name and description, so a repeat may act twice."
+                        f"its outcome unknown: {_origin_clause(destructive_axis, 'destructive')}, "
+                        "so a repeat may act twice."
                     ),
                     tool_name=definition.name,
                 )
@@ -101,8 +128,8 @@ def derive_tool_risk_pack(spec: "AgentSpec") -> PolicyPack | None:
                     rule_id=f"confirmation_before_tool__{slug}",
                     kind=PolicyRuleKind.CONFIRMATION_BEFORE_TOOL,
                     description=(
-                        f"{definition.name} must follow explicit confirmation: it is "
-                        "inferred destructive from its declared name and description."
+                        f"{definition.name} must follow explicit confirmation: "
+                        f"{_origin_clause(destructive_axis, 'destructive')}."
                     ),
                     tool_name=definition.name,
                 )
