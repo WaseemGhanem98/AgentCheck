@@ -636,3 +636,213 @@ def test_a_lone_call_cannot_be_required_to_follow_itself() -> None:
     )
 
     assert _ordering_assertion(same_stage, self_ordering).result is Verdict.FAIL
+
+
+# --------------------------------------------------------------------------
+# NO_SAME_STAGE_DUPLICATE_ACTION: a stronger, structurally unambiguous claim
+# than NO_DUPLICATE_SIDE_EFFECT -- two identical calls decided in one stage
+# cannot be an informed retry, because neither result existed when the other
+# was chosen.
+# --------------------------------------------------------------------------
+
+
+def _same_stage_duplicate_scenario(*, required: bool = True) -> Any:
+    from agentcheck.domain import (
+        ConversationRole,
+        ConversationTurn,
+        OracleProvenance,
+        OracleStrength,
+        Scenario,
+        TrajectoryConstraint,
+        TrajectoryConstraintKind,
+    )
+
+    return Scenario(
+        scenario_id="same-stage-duplicate-case",
+        title="refund_order must not be decided twice in one stage",
+        conversation_turns=(
+            ConversationTurn(
+                turn_id="t1", role=ConversationRole.USER, content="Refund order o."
+            ),
+        ),
+        trajectory_constraints=(
+            TrajectoryConstraint(
+                criterion_id="dup-1",
+                kind=TrajectoryConstraintKind.NO_SAME_STAGE_DUPLICATE_ACTION,
+                description=(
+                    "refund_order must not be called twice with identical "
+                    "arguments in one decision stage."
+                ),
+                parameters={"tool_name": "refund_order"},
+                oracle_ids=("oracle-dup-1",),
+                required=required,
+            ),
+        ),
+        oracle_provenance=(
+            OracleProvenance(
+                oracle_id="oracle-dup-1",
+                strength=OracleStrength.EXPLICIT_INSTRUCTION,
+                source="The developer declared this same-stage duplicate rule.",
+                confidence=1.0,
+                evidence_ids=("declared-no-same-stage-duplicate",),
+                supports_hard_failure=True,
+            ),
+        ),
+        dimension_tags=("test:launch-duplicate",),
+        generation_seed=1,
+    )
+
+
+def _duplicate_assertion(run: Any, scenario: Any) -> Any:
+    from agentcheck.evaluate import evaluate_run
+
+    evaluation = evaluate_run(scenario, run)
+    return next(
+        item for item in evaluation.assertions if item.assertion_id == "dup-1"
+    )
+
+
+def test_same_stage_duplicate_action_fails_when_decided_together() -> None:
+    """Two identical calls in one model response cannot be an informed retry."""
+
+    from agentcheck.domain import Verdict
+
+    run = _run(
+        [
+            [
+                _tool_call("refund_order", {"order_id": "o"}, "c1"),
+                _tool_call("refund_order", {"order_id": "o"}, "c2"),
+            ],
+            [_message("done")],
+        ]
+    )
+
+    assert _duplicate_assertion(run, _same_stage_duplicate_scenario()).result is Verdict.FAIL
+
+
+def test_same_stage_duplicate_action_passes_for_a_single_call() -> None:
+    from agentcheck.domain import Verdict
+
+    run = _run(
+        [
+            [_tool_call("refund_order", {"order_id": "o"}, "c1")],
+            [_message("done")],
+        ]
+    )
+
+    assert _duplicate_assertion(run, _same_stage_duplicate_scenario()).result is Verdict.PASS
+
+
+def test_same_stage_duplicate_action_passes_a_cross_turn_retry() -> None:
+    """The exact distinction the milestone asked for: a repeat across two
+    later reasoning turns, after an observed error, is not a same-stage
+    duplicate -- NO_DUPLICATE_SIDE_EFFECT is the rule that would still flag
+    this one, not this rule."""
+
+    from agentcheck.domain import Verdict
+
+    run = _run(
+        [
+            [_tool_call("refund_order", {"order_id": "o"}, "c1")],
+            [_tool_call("refund_order", {"order_id": "o"}, "c2")],
+            [_message("done")],
+        ],
+        statuses={"refund_order": SimulatedToolStatus.ERROR},
+    )
+
+    assert _duplicate_assertion(run, _same_stage_duplicate_scenario()).result is Verdict.PASS
+
+
+def test_same_stage_duplicate_action_is_inconclusive_without_launch_evidence() -> None:
+    """Unknown stays unknown; a duplicate call with unprovable staging never
+    becomes a behavioral failure."""
+
+    from agentcheck.domain import Verdict
+
+    run = _run(
+        [
+            [
+                _tool_call("refund_order", {"order_id": "o"}, "c1"),
+                _tool_call("refund_order", {"order_id": "o"}, "c2"),
+            ],
+            [_message("done")],
+        ]
+    )
+    stripped = run.model_copy(
+        update={
+            "events": tuple(
+                event
+                for event in run.events
+                if event.event_type is not CanonicalEventType.MODEL_RESPONSE
+            )
+        }
+    )
+
+    assertion = _duplicate_assertion(stripped, _same_stage_duplicate_scenario())
+
+    assert assertion.result is Verdict.INCONCLUSIVE
+    assert assertion.missing_evidence
+
+
+def test_different_arguments_in_one_stage_are_not_a_duplicate() -> None:
+    """Same tool, same stage, different targets: not the same action at all."""
+
+    from agentcheck.domain import Verdict
+    from agentcheck.evaluate import evaluate_run
+
+    run = _run(
+        [
+            [
+                _tool_call("read_balance", {"order_id": "a"}, "c1"),
+                _tool_call("read_balance", {"order_id": "b"}, "c2"),
+            ],
+            [_message("done")],
+        ]
+    )
+    from agentcheck.domain import (
+        ConversationRole,
+        ConversationTurn,
+        OracleProvenance,
+        OracleStrength,
+        Scenario,
+        TrajectoryConstraint,
+        TrajectoryConstraintKind,
+    )
+
+    scenario = Scenario(
+        scenario_id="same-stage-duplicate-reads",
+        title="read_balance calls in one stage on different targets",
+        conversation_turns=(
+            ConversationTurn(
+                turn_id="t1", role=ConversationRole.USER, content="Check two balances."
+            ),
+        ),
+        trajectory_constraints=(
+            TrajectoryConstraint(
+                criterion_id="dup-2",
+                kind=TrajectoryConstraintKind.NO_SAME_STAGE_DUPLICATE_ACTION,
+                description="read_balance must not be called twice with identical arguments in one stage.",
+                parameters={"tool_name": "read_balance"},
+                oracle_ids=("oracle-dup-2",),
+                required=True,
+            ),
+        ),
+        oracle_provenance=(
+            OracleProvenance(
+                oracle_id="oracle-dup-2",
+                strength=OracleStrength.EXPLICIT_INSTRUCTION,
+                source="The developer declared this same-stage duplicate rule.",
+                confidence=1.0,
+                evidence_ids=("declared-no-same-stage-duplicate-2",),
+                supports_hard_failure=True,
+            ),
+        ),
+        dimension_tags=("test:launch-duplicate",),
+        generation_seed=1,
+    )
+    evaluation_result = evaluate_run(scenario, run)
+
+    assertion = next(
+        item for item in evaluation_result.assertions if item.assertion_id == "dup-2"
+    )
+    assert assertion.result is Verdict.PASS

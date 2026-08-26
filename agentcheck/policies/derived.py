@@ -36,7 +36,15 @@ if TYPE_CHECKING:
 
 
 DERIVED_TOOL_RISK_PACK_ID = "derived_tool_risk_v1"
-DERIVED_TOOL_RISK_VERSION = "1"
+# "2": a destructive tool now also derives NO_SAME_STAGE_DUPLICATE_ACTION, a
+# new rule family. Opt-in and additive -- a target that does not list this
+# pack, or declares no destructive tool, is unaffected -- but for a target
+# that does, a freshly generated suite asserts something the previous
+# version did not, so it earns its own identity rather than silently
+# reusing the old one. A suite already frozen under version "1" keeps
+# validating against the generator_version it recorded; only a fresh
+# generate sees the new rule.
+DERIVED_TOOL_RISK_VERSION = "2"
 
 _MAX_DERIVED_RULES = 64
 
@@ -109,6 +117,20 @@ def derive_tool_risk_pack(spec: "AgentSpec") -> PolicyPack | None:
                 tool_name=definition.name,
             )
         )
+        if definition.destructive and len(rules) < _MAX_DERIVED_RULES:
+            rules.append(
+                PolicyRule(
+                    rule_id=f"no_same_stage_duplicate_action__{slug}",
+                    kind=PolicyRuleKind.NO_SAME_STAGE_DUPLICATE_ACTION,
+                    description=(
+                        f"{definition.name} must not be called twice with identical "
+                        f"arguments in one decision stage: {_origin_clause(destructive_axis, 'destructive')}, "
+                        "and two same-stage calls were decided before either result "
+                        "existed, so neither could have been an informed retry."
+                    ),
+                    tool_name=definition.name,
+                )
+            )
         if definition.destructive and len(rules) < _MAX_DERIVED_RULES:
             rules.append(
                 PolicyRule(
