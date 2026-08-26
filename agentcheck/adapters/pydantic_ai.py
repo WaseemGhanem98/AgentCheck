@@ -184,6 +184,48 @@ def _schema_validation_errors(schema: Mapping[str, Any], arguments: Any) -> list
     ]
 
 
+class DependencyAccessError(RuntimeError):
+    """Raised when framework or reconstructed-tool code reaches simulated deps."""
+
+
+class _InertDependencies:
+    """Fail-closed stand-in for a PydanticAI agent's declared ``deps_type`` instance.
+
+    AgentCheck never constructs a real dependency object. ``deps_type`` is a
+    static type annotation the framework does not validate at runtime --
+    confirmed against the pinned SDK: ``Agent.run`` never calls ``deps_type()``
+    or isinstance-checks the supplied ``deps``, so any value can be passed
+    through ``RunContext.deps`` safely, whatever the declared type claims.
+    AgentCheck's own reconstructed tool invoker never reads ``ctx.deps`` --
+    ``ToolGateway`` fixtures are the only source of simulated tool behaviour --
+    so this object exists purely to satisfy the framework's ``RunContext.deps``
+    slot. A real attribute access is a sign that something AgentCheck did not
+    intend to run reached a "dependency", and fails loudly rather than
+    fabricating data or reaching a live object (an HTTP client, a database
+    session, credentials, ...).
+
+    Dunder-style lookups (``hasattr(x, "__iter__")`` and similar duck-typing
+    checks a framework might perform) raise a plain ``AttributeError`` instead,
+    so ordinary introspection is not itself treated as a violation -- only a
+    concrete attempt to *use* a dependency is.
+    """
+
+    def __repr__(self) -> str:
+        return "<AgentCheck simulated dependencies: no real dependency object is constructed>"
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        raise DependencyAccessError(
+            f"attempted to access {name!r} on AgentCheck's simulated dependency "
+            "placeholder. AgentCheck does not construct real target "
+            "dependencies (HTTP clients, database sessions, credentials, "
+            "queues, ...); no code path it controls should ever need to reach "
+            "one. If a tool actually ran to produce this, AgentCheck's "
+            "reconstructed invoker was bypassed -- report this as a bug."
+        )
+
+
 def _agent_toolset(target: Any) -> Any | None:
     """The agent's own function toolset, or None when the shape is unexpected."""
 
@@ -1319,16 +1361,30 @@ class PydanticAIAdapter(FrameworkAdapter):
                     location="agent.output_validator",
                 )
             )
-        deps_type = getattr(target, "_deps_type", object)
-        if deps_type is not object and deps_type is not type(None):
+        # deps_type itself is not rejected: it is a static type annotation the
+        # framework never instantiates or validates at runtime (confirmed
+        # against the pinned SDK), so AgentCheck always supplies its own
+        # fail-closed `_InertDependencies` placeholder as `deps=` regardless of
+        # what deps_type declares. See `_InertDependencies` and `adapter.run`.
+        #
+        # `validation_context` is different: the framework's own docs and
+        # source (`Agent._validation_context`, threaded into
+        # `_agent_graph.build_validation_context`) allow it to be a *callable*
+        # taking a `RunContext`, invoked by the framework itself to validate
+        # tool arguments and output -- genuine target code that would run
+        # during a scenario. A non-callable value is inert data passed through
+        # pydantic validation and is not rejected.
+        validation_context = getattr(target, "_validation_context", None)
+        if callable(validation_context):
             issues.append(
                 SupportIssue(
-                    code="dependency_injection_required",
+                    code="unsupported_validation_context",
                     message=(
-                        "The agent declares deps_type, so a run needs dependencies "
-                        "AgentCheck cannot fabricate safely."
+                        "The agent declares a callable validation_context, which "
+                        "is target code the framework invokes with a RunContext "
+                        "during validation and is not replaced by this adapter."
                     ),
-                    location="agent.deps_type",
+                    location="agent.validation_context",
                 )
             )
         root = getattr(target, "_root_capability", None)
@@ -1373,17 +1429,11 @@ class PydanticAIAdapter(FrameworkAdapter):
                 )
             )
         for name, tool in sorted(_agent_tools(target).items()):
-            if getattr(tool, "takes_ctx", False):
-                issues.append(
-                    SupportIssue(
-                        code="tool_requires_run_context",
-                        message=(
-                            "The tool takes a RunContext, which carries target "
-                            "dependencies AgentCheck does not construct."
-                        ),
-                        location=f"agent.tools[{name}]",
-                    )
-                )
+            # A tool taking RunContext is supported: PydanticAI's own schema
+            # generation already excludes `ctx` from `parameters_json_schema`
+            # (verified against the pinned SDK), and the reconstructed
+            # invoker built from that schema never reads `ctx.deps` -- see
+            # `_InertDependencies` and `_make_safe_tool`.
             schema = getattr(getattr(tool, "tool_def", None), "parameters_json_schema", None)
             if not isinstance(schema, Mapping):
                 issues.append(
@@ -1554,7 +1604,11 @@ class PydanticAIAdapter(FrameworkAdapter):
             while True:
                 message_start = len(history)
                 stages_executed += 1
-                result = await agent.run(prompt, message_history=list(history) or None)
+                result = await agent.run(
+                    prompt,
+                    message_history=list(history) or None,
+                    deps=_InertDependencies(),
+                )
                 history = list(result.all_messages())
                 blocked = await _record_blocked_tool_calls(
                     capture, prepared, history, message_start
