@@ -1042,3 +1042,67 @@ def test_same_stage_state_effects_commit_in_decision_order_under_concurrency() -
     # the final committed value must always be "second" -- never dependent on
     # which task's commit happened to run first under the event loop.
     assert gateway.world.get("holder") == "second"
+
+
+def test_same_stage_success_and_error_are_independent_under_concurrency() -> None:
+    """Two different same-stage tools, one succeeding and one erroring, must
+    each get their own outcome correctly under real concurrent dispatch --
+    neither call's status leaks into the other's."""
+
+    from agentcheck.domain import (
+        SimulatedToolOutcome,
+        SimulatedToolStatus,
+        ToolFixture,
+        ToolOutcomeStatus,
+    )
+    from agentcheck.runner import ToolGateway
+
+    agents = _agents()
+
+    @agents.function_tool
+    def verify_customer(order_id: str) -> str:
+        raise AssertionError("the original handler was invoked")
+
+    @agents.function_tool
+    def refund_order(order_id: str) -> str:
+        raise AssertionError("the original handler was invoked")
+
+    agent = agents.Agent(
+        name="Refunder",
+        instructions="Handle refunds.",
+        tools=[verify_customer, refund_order],
+        model=ScriptedModel(
+            [
+                [
+                    _tool_call("verify_customer", {"order_id": "o"}, "c1"),
+                    _tool_call("refund_order", {"order_id": "o"}, "c2"),
+                ],
+                [_message("done")],
+            ]
+        ),
+    )
+    adapter = OpenAIAgentsAdapter()
+    spec = adapter.inspect(agent)
+    fixtures = (
+        ToolFixture(
+            fixture_id="verify-ok",
+            tool_name="verify_customer",
+            outcome=SimulatedToolOutcome(status=SimulatedToolStatus.SUCCESS, result={"verified": True}),
+        ),
+        ToolFixture(
+            fixture_id="refund-error",
+            tool_name="refund_order",
+            outcome=SimulatedToolOutcome(
+                status=SimulatedToolStatus.ERROR, error_code="card_declined", error_message="declined"
+            ),
+        ),
+    )
+    gateway = ToolGateway(spec.tools.items, fixtures, world={}, run_id="mixed-outcome-e2e")
+    prepared = adapter.prepare(agent, gateway, world_state=gateway.world)
+    run = asyncio.run(adapter.run(prepared, "verify then refund", run_id="mixed-outcome-run", max_turns=6))
+
+    outcomes_by_tool = {outcome.tool_name: outcome for outcome in run.tool_outcomes}
+    assert outcomes_by_tool["verify_customer"].status == ToolOutcomeStatus.SUCCESS
+    assert outcomes_by_tool["refund_order"].status == ToolOutcomeStatus.ERROR
+    assert outcomes_by_tool["refund_order"].error is not None
+    assert outcomes_by_tool["refund_order"].error.code == "card_declined"
