@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 from importlib import metadata as importlib_metadata
-from typing import Any, Mapping, Sequence, cast
+from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
 
 from jsonschema import SchemaError  # type: ignore[import-untyped]
 from pydantic import BaseModel, TypeAdapter
@@ -52,6 +52,8 @@ from agentcheck.domain import (
     ToolOutcome,
     ToolOutcomeStatus,
     ToolPoliciesSpec,
+    ToolRiskAssertion,
+    ToolRiskSpec,
     ToolsSpec,
     UnknownProperty,
     UsageMetrics,
@@ -59,7 +61,11 @@ from agentcheck.domain import (
     canonical_hash,
     utc_now,
 )
-from agentcheck.inspect.capabilities import classify_tool, extract_capabilities
+from agentcheck.inspect.capabilities import extract_capabilities
+from agentcheck.inspect.risk_authority import declared_risk_for, resolve_tool_risk
+
+if TYPE_CHECKING:
+    from agentcheck.config import ToolRiskDeclaration
 from agentcheck.schema_safety import UnsafeSchemaReference, offline_validator
 from agentcheck.runner.budgets import BudgetExceeded
 from agentcheck.runner.network_guard import denied_destinations
@@ -660,9 +666,16 @@ def _tool_contract_identity(tool: Any) -> str:
     )
 
 
-def _tool_definition(tool: Any) -> ToolDefinition:
-    _, state_changing, destructive = classify_tool(tool.name, tool.description or None)
-    return ToolDefinition(
+def _tool_definition(
+    tool: Any,
+    *,
+    declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
+) -> tuple[ToolDefinition, ToolRiskAssertion]:
+    declared = declared_risk_for(tool.name, declared_tool_risk)
+    state_changing, destructive, assertion = resolve_tool_risk(
+        tool.name, tool.description or None, declared=declared
+    )
+    definition = ToolDefinition(
         name=tool.name,
         description=tool.description or None,
         input_schema=_json_object(copy.deepcopy(tool.params_json_schema)),
@@ -675,6 +688,7 @@ def _tool_definition(tool: Any) -> ToolDefinition:
         destructive=destructive,
         replaceable=True,
     )
+    return definition, assertion
 
 
 def _guardrail_properties(agent: Any, source: str) -> tuple[AgentProperty[Any], ...]:
@@ -1870,6 +1884,7 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         *,
         source: str | None = None,
         identity_locator: str | None = None,
+        declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
     ) -> AgentSpec:
         _require_sdk()
         source = source or "runtime:agent"
@@ -1926,12 +1941,16 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         graph = _reachable_graph(target)
         tool_properties: list[AgentProperty[Any]] = []
         definitions: list[ToolDefinition] = []
+        tool_risk_assertions: dict[str, ToolRiskAssertion] = {}
         fingerprint_tools: list[Any] = []
         for index, tool in enumerate(target.tools):
             locator = f"{source}.agent.tools[{index}]"
             if isinstance(tool, FunctionTool):
-                definition = _tool_definition(tool)
+                definition, risk_assertion = _tool_definition(
+                    tool, declared_tool_risk=declared_tool_risk
+                )
                 definitions.append(definition)
+                tool_risk_assertions.setdefault(tool.name, risk_assertion)
                 fingerprint_tools.append(definition.model_dump(mode="json"))
                 tool_properties.append(
                     _property(
@@ -1977,8 +1996,11 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
             for index, tool in enumerate(agent.tools):
                 locator = f"{source}.{agent_location}.tools[{index}]"
                 if isinstance(tool, FunctionTool):
-                    definition = _tool_definition(tool)
+                    definition, risk_assertion = _tool_definition(
+                        tool, declared_tool_risk=declared_tool_risk
+                    )
                     definitions.append(definition)
+                    tool_risk_assertions.setdefault(tool.name, risk_assertion)
                     subagent_tools.append(definition.model_dump(mode="json"))
                     tool_properties.append(
                         _property(
@@ -2215,6 +2237,11 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
             ),
             capabilities=CapabilitiesSpec(items=tuple(capability_properties)),
             tools=ToolsSpec(items=tuple(tool_properties)),
+            tool_risk=ToolRiskSpec(
+                items=tuple(
+                    tool_risk_assertions[name] for name in sorted(tool_risk_assertions)
+                )
+            ),
             tool_policies=ToolPoliciesSpec(),
             guardrails=GuardrailsSpec(items=_guardrail_properties(target, source)),
             workflows=WorkflowsSpec(),
@@ -2478,10 +2505,13 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         world_state: Any,
         capture_holder: dict[str, _Capture | None],
         tool_risks: dict[str, tuple[bool, bool]],
+        declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
     ) -> list[Any]:
         safe_tools: list[Any] = []
         for original in agent.tools:
-            definition = _tool_definition(original)
+            definition, _ = _tool_definition(
+                original, declared_tool_risk=declared_tool_risk
+            )
             schema = copy.deepcopy(original.params_json_schema)
             invoker = _make_safe_invoker(
                 tool_name=original.name,
@@ -2525,11 +2555,15 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         source: str | None = None,
         identity_locator: str | None = None,
         controlled_model: bool = False,
+        declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
     ) -> PreparedTarget:
         report = self.preflight(target)
         report.require_supported()
         spec = self.inspect(
-            target, source=source, identity_locator=identity_locator
+            target,
+            source=source,
+            identity_locator=identity_locator,
+            declared_tool_risk=declared_tool_risk,
         )
         graph = _reachable_graph(target)
         capture_holder: dict[str, _Capture | None] = {"capture": None}
@@ -2560,6 +2594,7 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
                 world_state=world_state,
                 capture_holder=capture_holder,
                 tool_risks=tool_risks,
+                declared_tool_risk=declared_tool_risk,
             )
             agent_tool_names = tuple(tool.name for tool in safe_tools)
             tools_by_agent[agent.name] = agent_tool_names

@@ -247,6 +247,7 @@ def _inspect(
         target,
         source=source,
         identity_locator=portable_entrypoint(root, config.entrypoint),
+        declared_tool_risk=config.tool_risk,
     )
     preflight = encode_preflight_report(adapter.preflight(target))
     topology = adapter.describe_topology(target, source=source)
@@ -260,6 +261,7 @@ def _run(root: Path, config: AgentCheckConfig, scenario: Scenario, run_id: str) 
         target,
         source=source,
         identity_locator=portable_entrypoint(root, config.entrypoint),
+        declared_tool_risk=config.tool_risk,
     )
     tools = tuple(item.value for item in spec.tools.items)
     world = WorldSimulator(scenario.initial_world_state)
@@ -277,6 +279,7 @@ def _run(root: Path, config: AgentCheckConfig, scenario: Scenario, run_id: str) 
         source=source,
         identity_locator=portable_entrypoint(root, config.entrypoint),
         controlled_model=config.controlled_model,
+        declared_tool_risk=config.tool_risk,
     )
     return asyncio.run(
         adapter.run(

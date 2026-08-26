@@ -7,7 +7,7 @@ runner and evaluator operate on the domain objects returned through this module.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from importlib import metadata as importlib_metadata
 from typing import TYPE_CHECKING, Any, Awaitable, Protocol, runtime_checkable
@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Protocol, runtime_checkable
 from agentcheck.domain import canonical_hash
 
 if TYPE_CHECKING:
+    from agentcheck.config import ToolRiskDeclaration
     from agentcheck.domain.agent_spec import AgentSpec
     from agentcheck.domain.run import CanonicalRun
     from agentcheck.domain.scenario import ConversationTurn
@@ -346,6 +347,7 @@ class FrameworkAdapter(ABC):
         *,
         source: str | None = None,
         identity_locator: str | None = None,
+        declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
     ) -> "AgentSpec":
         """Extract an explicit, versioned specification without running the model.
 
@@ -354,6 +356,14 @@ class FrameworkAdapter(ABC):
         to the target root, and is the only locator allowed to influence
         ``spec_id``. When it is omitted the caller has not established a target
         root, so identity falls back to ``source`` and stays location-bound.
+
+        ``declared_tool_risk`` is the developer's ``tool_risk`` declaration from
+        ``agentcheck.json`` (see ``agentcheck.config.ToolRiskDeclaration``),
+        keyed by declared tool name. It is authoritative over whatever this
+        adapter would otherwise infer for the named tool's ``state_changing``
+        and ``destructive`` axes; an axis a declaration does not name still
+        falls through to inference. Omitting it keeps prior behaviour exactly:
+        every tool resolves through inference or ``UNKNOWN`` alone.
         """
 
     @abstractmethod
@@ -371,11 +381,17 @@ class FrameworkAdapter(ABC):
         source: str | None = None,
         identity_locator: str | None = None,
         controlled_model: bool = False,
+        declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
     ) -> PreparedTarget:
         """Return a sanitized runtime target or fail before model execution.
 
         ``controlled_model`` substitutes a deterministic offline model for the
         target's provider. The target agent is otherwise unchanged.
+
+        ``declared_tool_risk`` is forwarded to ``inspect`` so the spec attached
+        to the prepared target, and the risk markers used to build the actual
+        runtime invokers, resolve through the same developer declarations
+        rather than disagreeing with each other.
         """
 
     def describe_topology(
