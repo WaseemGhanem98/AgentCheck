@@ -639,6 +639,19 @@ class _GatewayToolRuntime:
       AgentCheck has no controlled answer, and returning a plausible one would
       be inventing the tool output that the run is supposed to be evidence
       about.
+
+    ``call`` is synchronous and, unlike the OpenAI Agents and PydanticAI
+    adapters, this one has no hook that sees a batch of tool calls before
+    dispatch: a custom agent's own orchestration decides, in its own code,
+    when and how to call ``call``. If that orchestration issues concurrent
+    calls itself -- multiple threads, or tasks that actually interleave
+    around a real ``await`` rather than calling this synchronously one at a
+    time -- fixture assignment and invocation-index ordering are not
+    guaranteed to follow any particular order. This is deliberately left
+    unsupported rather than guessed at: a custom agent that wants
+    deterministic concurrent dispatch must issue its own calls to ``call``
+    strictly in the order they were decided, matching what this class was
+    proven safe for. See ``docs/concurrent-tool-decisions.md``.
     """
 
     def __init__(

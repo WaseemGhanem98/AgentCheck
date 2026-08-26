@@ -115,6 +115,10 @@ class _BlockedPlan:
     retryable: bool
     details: dict[str, Any]
     metadata: dict[str, Any]
+    # Preserved so `commit` can re-raise with the same `__cause__` chain
+    # `invoke` always has -- a caller (custom.py's termination mapping) reads
+    # `BudgetExceeded.resource` off that chain to tell which budget was hit.
+    cause: BaseException | None = None
 
 
 @dataclass(frozen=True)
@@ -766,6 +770,7 @@ class ToolGateway:
             retryable: bool = False,
             details: Mapping[str, Any] | None = None,
             metadata: Mapping[str, Any] | None = None,
+            cause: BaseException | None = None,
         ) -> CallReservation:
             # Matches decision order, not commit order -- see the note on
             # `_record_outcome` about why this write moved here.
@@ -785,6 +790,7 @@ class ToolGateway:
                     retryable=retryable,
                     details=dict(details or {}),
                     metadata=dict(metadata or {"blocked": True}),
+                    cause=cause,
                 ),
                 planned=None,
             )
@@ -798,6 +804,7 @@ class ToolGateway:
                 code=f"{exc.resource}_budget_exceeded",
                 message=f"{exc.resource} budget exceeded",
                 details={"limit": exc.limit, "observed": exc.observed},
+                cause=exc,
             )
 
         self._invocations[tool_name] += 1
@@ -816,6 +823,7 @@ class ToolGateway:
                     code="retry_budget_exceeded",
                     message="tool retry budget exceeded",
                     details={"limit": exc.limit, "observed": exc.observed},
+                    cause=exc,
                 )
         if tool is None:
             return blocked(
@@ -929,6 +937,7 @@ class ToolGateway:
                 code="wall_time_budget_exceeded",
                 message="simulated tool latency exceeded the wall-time budget",
                 details={"limit": exc.limit, "observed": exc.observed},
+                cause=exc,
             )
 
         metadata = {
@@ -1008,7 +1017,7 @@ class ToolGateway:
                 started_at=reservation.started_at,
             )
             if plan.exception_type is not None:
-                raise plan.exception_type(plan.exception_message, outcome)
+                raise plan.exception_type(plan.exception_message, outcome) from plan.cause
             return outcome
 
         planned = reservation.planned
