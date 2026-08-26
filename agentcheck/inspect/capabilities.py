@@ -12,7 +12,7 @@ let them authorize a hard failure.
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any, Literal, Mapping, Protocol, Sequence
+from typing import Any, Literal, Mapping, NamedTuple, Protocol, Sequence
 
 from pydantic import Field, model_validator
 
@@ -855,9 +855,41 @@ def classify_tool(name: str, description: str | None = None) -> tuple[ActionKind
     before a capability can be built from it.
     """
 
+    inference = classify_tool_risk(name, description)
+    return inference.action_kind, inference.state_changing, inference.destructive
+
+
+class ToolRiskInference(NamedTuple):
+    """The heuristic's answer for one tool, plus whether it found any evidence.
+
+    ``known`` is false only when no name token or description token matched
+    any classification rule -- the same condition ``SchemaCapabilityExtractor``
+    already uses to record an ``unknown-action-kind`` capability. A tool in
+    that state did not test negative for risk; nothing was found to test.
+    Reusing the same condition here keeps the two views of one tool from
+    silently disagreeing about whether it was actually classified.
+    """
+
+    action_kind: ActionKind
+    state_changing: bool
+    destructive: bool
+    confidence: float
+    known: bool
+
+
+def classify_tool_risk(name: str, description: str | None = None) -> ToolRiskInference:
+    """Return the heuristic classification for one tool, with its own confidence.
+
+    Never authoritative and never a claim about ground truth: it is lexical
+    evidence over a declared name and description, nothing more.
+    """
+
     definition = ToolDefinition(name=name, description=description or None)
-    action_kind, state_changing, destructive, _, _, _ = _classification_signals(definition)
-    return action_kind, state_changing, destructive
+    action_kind, state_changing, destructive, confidence, _, _ = _classification_signals(
+        definition
+    )
+    known = confidence > _NO_EVIDENCE_CONFIDENCE
+    return ToolRiskInference(action_kind, state_changing, destructive, confidence, known)
 
 
 __all__ = [
@@ -873,7 +905,9 @@ __all__ = [
     "MAX_ENUM_VALUES",
     "MAX_PARAMETERS_PER_TOOL",
     "SchemaCapabilityExtractor",
+    "ToolRiskInference",
     "ValueConstraints",
     "classify_tool",
+    "classify_tool_risk",
     "extract_capabilities",
 ]
