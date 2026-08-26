@@ -418,14 +418,27 @@ def test_preflight_rejects_a_turn_method_with_the_wrong_arity() -> None:
     assert "incompatible_start_signature" in _codes(WrongShape())
 
 
-def test_preflight_rejects_an_async_turn_method() -> None:
-    """``ToolRuntime.call`` is synchronous, so a turn cannot be a coroutine."""
+def test_preflight_rejects_mismatched_sync_and_async_turn_methods() -> None:
+    """start()/resume() must agree: both sync or both coroutine functions."""
 
-    class AsyncAgent(SupportAgent):
+    class MixedAgent(SupportAgent):
         async def start(self, message: str, tools: ToolRuntime) -> TurnResult:  # type: ignore[override]
             ...
 
-    assert "async_turn_method" in _codes(AsyncAgent())
+    assert "mismatched_turn_method_concurrency" in _codes(MixedAgent())
+
+
+def test_preflight_accepts_a_consistently_async_turn_pair() -> None:
+    """A start()/resume() pair that are both coroutine functions is supported."""
+
+    class AsyncAgent(SupportAgent):
+        async def start(self, message: str, tools: ToolRuntime) -> TurnResult:  # type: ignore[override]
+            return SupportAgent.start(self, message, tools)
+
+        async def resume(self, state: Any, message: str, tools: ToolRuntime) -> TurnResult:  # type: ignore[override]
+            return SupportAgent.resume(self, state, message, tools)
+
+    assert _codes(AsyncAgent()) == set()
 
 
 def test_prepare_refuses_an_unsupported_target_before_any_turn_runs() -> None:

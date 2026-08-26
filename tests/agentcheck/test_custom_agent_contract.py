@@ -218,7 +218,12 @@ def test_custom_contracts_are_importable_from_both_paths() -> None:
     assert custom.ToolRuntime is ToolRuntime
     assert custom.TurnResult is TurnResult
     assert custom.CustomAgentProtocol is CustomAgentProtocol
-    assert set(custom.__all__) == {"CustomAgentProtocol", "ToolRuntime", "TurnResult"}
+    assert set(custom.__all__) == {
+        "AsyncToolRuntime",
+        "CustomAgentProtocol",
+        "ToolRuntime",
+        "TurnResult",
+    }
 
 
 def test_custom_agent_execution_is_wired_through_the_normal_runtime() -> None:

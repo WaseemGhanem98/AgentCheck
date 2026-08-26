@@ -706,7 +706,9 @@ def test_an_unsafe_tool_schema_is_reported(tmp_path: Path) -> None:
     assert "invalid_tool_schema" in _issue_codes(tmp_path)
 
 
-def test_an_async_turn_method_is_reported(tmp_path: Path) -> None:
+def test_a_mismatched_async_turn_method_is_reported(tmp_path: Path) -> None:
+    """Only `start` turned async, `resume` left sync -- a contract mismatch."""
+
     _write_target(
         tmp_path,
         CUSTOM_TARGET.replace(
@@ -714,7 +716,7 @@ def test_an_async_turn_method_is_reported(tmp_path: Path) -> None:
         ),
     )
 
-    assert "async_turn_method" in _issue_codes(tmp_path)
+    assert "mismatched_turn_method_concurrency" in _issue_codes(tmp_path)
 
 
 def test_no_contract_error_requires_running_the_target(tmp_path: Path) -> None:
