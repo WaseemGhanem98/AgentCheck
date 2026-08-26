@@ -10,27 +10,53 @@ A tool marked **state-changing** gets a fault family; a read-only tool gets
 none, because retrying a lookup is ordinary behaviour and calling it a defect
 would invent a failure.
 
-Where that marking comes from depends on the adapter, and the difference is not
-cosmetic. A custom Python agent *declares* it —
-`ToolDefinition(state_changing=True, destructive=True)` — and the declaration is
-authoritative. The OpenAI Agents SDK and PydanticAI carry no such field, so
-AgentCheck infers the marking from the tool's **name**, records it as inferred
-with a confidence, and refuses to treat it as authoritative anywhere a hard
-verdict depends on it.
+Where that marking comes from is now explicit, with a fixed precedence:
+
+1. **Developer declaration.** A custom Python agent *declares* it —
+   `ToolDefinition(state_changing=True, destructive=True)` — directly on the
+   tool. For every adapter, `agentcheck.json` can also declare it per tool:
+
+   ```json
+   {
+     "tool_risk": {
+       "find_user_id_by_email": { "destructive": true },
+       "bash": { "state_changing": true, "destructive": true }
+     }
+   }
+   ```
+
+   Each axis (`state_changing`, `destructive`) is independently optional, and a
+   declared axis always wins over whatever the adapter would otherwise infer.
+2. **Framework metadata**, when a framework genuinely exposes an authoritative
+   side-effect flag. No adapter AgentCheck currently supports does; the tier
+   exists in the model so one that does can use it without a new contract.
+3. **Inference.** The OpenAI Agents SDK and PydanticAI carry no risk field of
+   their own, so an undeclared axis is inferred from the tool's **name and
+   description**, recorded with its own confidence, and never treated as
+   authoritative anywhere a hard verdict depends on it.
+4. **Unknown.** A tool no rule matches stays unclassified rather than guessed,
+   resolving to a conservative `False` that is explicitly *not* a claim the
+   tool is safe.
 
 Name inference is wrong in both directions, and neither is hypothetical:
 
 - `find_user_id_by_email` in tau-bench is a pure lookup, and is read as
   state-changing because of the tokens in its name.
-- `bash`, `execute_python`, `write` and `execute_command` are read as read-only,
-  because nothing in those names says otherwise. They receive no fault family
-  at all.
+- `bash`, `execute_python`, `write` and `execute_command` are read as read-only
+  (`UNKNOWN`, not a confirmed `False`), because nothing in those names says
+  otherwise. They receive no fault family at all unless declared.
 
-A tool no rule matches stays unclassified and non-state-changing. That is the
-safe direction for *inventing* failures and the unsafe direction for *missing*
-them, so the gap is reported rather than hidden: behavioral coverage marks those
-tools `unknown` with the reason `risk_metadata_not_authoritative`. An absent
-fault family is not evidence that a tool is safe to retry.
+Declaring one axis does not upgrade the other's authority: declaring only
+`destructive` on a tool leaves `state_changing` exactly as inferred (or
+unknown) as it was. Where a declaration disagrees with inference or framework
+metadata, the declaration wins and the disagreement is recorded rather than
+silently discarded — see `spec.tool_risk` and
+`agentcheck/inspect/risk_authority.py`.
+
+A tool whose risk is inferred or unknown is reported that way rather than
+hidden: behavioral coverage marks it `unknown` with the reason
+`risk_metadata_not_authoritative`. An absent fault family is not evidence that
+a tool is safe to retry.
 
 | Case | The tool… | The question asked |
 | --- | --- | --- |

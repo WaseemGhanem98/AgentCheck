@@ -95,20 +95,27 @@ returns an empty, unparseable, truncated or stale payload — so the suite asks
 what the agent does when a tool does not cooperate, not only when it does.
 
 Which tools get them depends on how the tool's side-effect risk was
-established, and that differs by adapter. A [custom Python
-agent](docs/custom-agents.md) states it: `ToolDefinition(state_changing=True,
-destructive=True)` is a declaration, and AgentCheck treats it as authoritative.
-For the OpenAI Agents SDK and PydanticAI, neither framework carries that
-information, so AgentCheck *infers* it from the tool's name, reports it as
-inferred with a confidence, and never calls it authoritative.
+established, with an explicit precedence: developer declaration, then genuine
+framework metadata, then inference, then unknown. A [custom Python
+agent](docs/custom-agents.md) can state it directly on the tool
+(`ToolDefinition(state_changing=True, destructive=True)`), and every adapter
+can be told through `agentcheck.json`'s `tool_risk` block — a declared axis is
+always authoritative. Neither the OpenAI Agents SDK nor PydanticAI carries
+this information itself, so an undeclared axis is *inferred* from the tool's
+name and description, reported as inferred with a confidence, and never
+treated as authoritative anywhere a hard verdict depends on it.
 
 Inference is conservative in one direction only: a tool it cannot classify is
-left non-state-changing and receives **no fault family**. Verb-shaped names such
-as `delete_account` or `cancel_order` are read correctly; neutral ones such as
-`bash`, `write` or `execute_command` are not, and are silently left untested.
-Coverage reports the gap as `risk_metadata_not_authoritative` rather than
-implying the tool was checked. See [fault testing](docs/fault-testing.md) and,
-to declare your own contracts, [behavioral policies](docs/behavioral-policies.md).
+left non-state-changing (`UNKNOWN`, not a confirmed safe) and receives **no
+fault family**. Verb-shaped names such as `delete_account` or `cancel_order`
+are read correctly; neutral ones such as `bash`, `write` or `execute_command`
+are not, and stay untested until declared. Coverage reports the gap as
+`risk_metadata_not_authoritative` rather than implying the tool was checked.
+See [fault testing](docs/fault-testing.md) and, to declare your own
+contracts, [behavioral policies](docs/behavioral-policies.md). Multiple tool
+calls decided in one model response, and what AgentCheck can and cannot test
+about that, are covered in
+[concurrent tool decisions](docs/concurrent-tool-decisions.md).
 
 ## What AgentCheck catches
 
