@@ -18,6 +18,38 @@ Developer-declared tool risk, an explicit authority precedence for it, and a
 launch-group-aware concurrency oracle. Not yet released as a distribution
 version; recorded here for the next release to pick up.
 
+**PydanticAI dependency injection / `RunContext[Deps]`:** previously rejected
+outright at preflight. Real-world validation found this blocked most
+realistic PydanticAI examples, including both official ones AgentCheck's own
+prior campaign had tried. Now supported: AgentCheck never constructs a real
+dependency object (`deps_type` is a static type annotation the framework
+never instantiates or runtime-validates -- confirmed against the pinned SDK),
+and always passes a fail-closed `_InertDependencies` placeholder as `deps=`
+when it drives a run. The reconstructed tool invoker never reads `ctx.deps`;
+if anything ever did, attribute access on the placeholder raises immediately
+rather than returning fabricated data or reaching a live object. `ctx` itself
+was already excluded from the tool's declared JSON Schema by PydanticAI's own
+schema generation, so no schema-handling code needed to change. A newly
+identified, narrower gap -- a callable `Agent(validation_context=...)`, which
+the framework itself invokes with a `RunContext` -- gets its own new
+preflight rejection; a non-callable value is accepted.
+
+Validated against 8 real public PydanticAI examples (pydantic/pydantic-ai
+`41e503c91ee33a53c4d9529bd1a6425fff69dfca`): `weather_agent.py`,
+`data_analyst.py`, `roulette_wheel.py`, and `rag.py` now inspect, prepare, and
+run correctly end to end (including a cross-turn prerequisite chain and
+same-stage concurrent duplicate calls); `bank_support.py`, `sql_gen.py`, and
+`flight_booking.py` are still correctly refused, for unrelated, pre-existing
+reasons (dynamic instructions / output validators reading dependencies, not
+dependency injection itself); `medical_agent_delegation.py`'s multi-agent
+delegation stays out of scope, as this project's PydanticAI adapter does not
+support multi-agent topology at all. No milestone-related defects found; zero
+provider calls, zero original handler executions across every target.
+
+**Suite identity:** unaffected. `inspect()` (and therefore `spec_id`) is
+unchanged by this milestone; only `preflight()` and how `agent.run()` is
+invoked changed. `GENERATOR_COMPATIBILITY_VERSION` stays `1`.
+
 **Concurrent execution safety:** `ToolGateway` is split into a deterministic
 plan phase (`plan_batch`/`plan_one` -- decides budget consumption, invocation
 index, fixture selection and consumption, and resulting status, strictly in

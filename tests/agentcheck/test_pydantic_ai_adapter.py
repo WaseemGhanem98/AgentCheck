@@ -238,7 +238,10 @@ def test_an_output_validator_is_rejected() -> None:
     assert "output_validator" in {issue.code for issue in report.issues}
 
 
-def test_dependency_injection_is_rejected() -> None:
+def test_dependency_injection_and_run_context_tools_pass_preflight() -> None:
+    """AgentCheck never constructs deps_type, so declaring it -- and a tool
+    that takes RunContext -- is safe and supported, not rejected."""
+
     agent = Agent(_script(_text("x")), deps_type=Deps, name="C")
 
     @agent.tool
@@ -247,8 +250,30 @@ def test_dependency_injection_is_rejected() -> None:
 
     codes = {issue.code for issue in PydanticAIAdapter().preflight(agent).issues}
 
-    assert "dependency_injection_required" in codes
-    assert "tool_requires_run_context" in codes
+    assert "dependency_injection_required" not in codes
+    assert "tool_requires_run_context" not in codes
+
+
+def test_a_callable_validation_context_is_rejected() -> None:
+    """Unlike deps_type, a callable validation_context is target code the
+    framework itself invokes with a RunContext -- genuinely unsafe."""
+
+    def validate(ctx: RunContext[Any]) -> Any:  # pragma: no cover
+        raise AssertionError("must not run")
+
+    agent = Agent(_script(_text("x")), validation_context=validate, name="V")
+
+    codes = {issue.code for issue in PydanticAIAdapter().preflight(agent).issues}
+
+    assert "unsupported_validation_context" in codes
+
+
+def test_a_static_validation_context_value_is_not_rejected() -> None:
+    agent = Agent(_script(_text("x")), validation_context={"tenant": "acme"}, name="V")
+
+    codes = {issue.code for issue in PydanticAIAdapter().preflight(agent).issues}
+
+    assert "unsupported_validation_context" not in codes
 
 
 def test_an_unsupported_sdk_version_is_named() -> None:

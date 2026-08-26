@@ -53,17 +53,40 @@ agent = Agent(
 uses a local `FunctionModel`, needs no API key, and is runnable without a
 provider.
 
-The V1 adapter requires:
+The adapter requires:
 
 - an exact `pydantic_ai.Agent`;
 - static instructions;
 - ordinary function tools with JSON Schema;
-- no `RunContext` / `deps_type` dependency injection;
-- no output validators, target capabilities, event-stream handler, or external
-  toolsets.
+- no output validators, a callable `validation_context`, target capabilities,
+  event-stream handler, or external toolsets.
 
 Those unsupported surfaces are executable target behavior that cannot be
 reconstructed safely. Preflight names each one and refuses the run.
+
+### Dependency injection / `RunContext[Deps]`
+
+`deps_type` and tools that take `ctx: RunContext[Deps]` are supported. Real
+public PydanticAI examples use this pattern heavily, so rejecting it outright
+would leave most realistic agents unevaluable.
+
+AgentCheck never constructs a real dependency object. `deps_type` is a static
+type annotation the framework itself does not instantiate or validate at
+runtime, so AgentCheck always passes its own fail-closed placeholder as
+`deps=` when it drives a run. A tool's reconstructed AgentCheck-owned invoker
+never reads `ctx.deps` — `ToolGateway` fixtures remain the only source of
+simulated tool behavior — so the placeholder is never touched on the intended
+path. If something unexpected ever reached it (an HTTP client, a database
+session, credentials), attribute access raises immediately rather than
+returning fabricated data or reaching a live object. `ctx` itself never
+appears in the declared tool schema or a generated fixture: PydanticAI's own
+schema generation already excludes it.
+
+A callable `validation_context` is different and stays unsupported: unlike
+`deps_type`, it is target code the framework itself invokes with a
+`RunContext` to validate tool arguments and output, so it is rejected the
+same way an output validator is. A non-callable `validation_context` value is
+inert data and is accepted.
 
 ## Configure and run
 
