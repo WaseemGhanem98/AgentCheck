@@ -846,3 +846,263 @@ def test_different_arguments_in_one_stage_are_not_a_duplicate() -> None:
         item for item in evaluation_result.assertions if item.assertion_id == "dup-2"
     )
     assert assertion.result is Verdict.PASS
+
+
+# --------------------------------------------------------------------------
+# Real concurrent SDK dispatch: max_function_tool_concurrency > 1 must not
+# make fixture assignment, invocation index, or world-state commit order
+# depend on how the SDK happens to schedule the tool-call tasks it creates.
+# --------------------------------------------------------------------------
+
+
+def test_same_stage_duplicate_calls_get_correct_per_invocation_fixtures_under_real_concurrency() -> (
+    None
+):
+    """Two same-stage calls to the same tool, under the adapter's actual
+    (now > 1) max_function_tool_concurrency, must still each receive the
+    fixture matching their *decision* order (first call -> invocation_index
+    1, second -> invocation_index 2) -- not whichever the SDK's task
+    scheduling happens to run first."""
+
+    from agentcheck.domain import SimulatedToolOutcome, SimulatedToolStatus, ToolFixture
+    from agentcheck.runner import ToolGateway
+
+    agents = _agents()
+
+    @agents.function_tool
+    def refund_order(order_id: str) -> str:
+        HANDLER_RAN["value"] = True
+        raise AssertionError("the original handler was invoked")
+
+    HANDLER_RAN["value"] = False
+    agent = agents.Agent(
+        name="Refunder",
+        instructions="Handle refunds.",
+        tools=[refund_order],
+        model=ScriptedModel(
+            [
+                [
+                    _tool_call("refund_order", {"order_id": "o"}, "c1"),
+                    _tool_call("refund_order", {"order_id": "o"}, "c2"),
+                ],
+                [_message("done")],
+            ]
+        ),
+    )
+    adapter = OpenAIAgentsAdapter()
+    spec = adapter.inspect(agent)
+    fixtures = (
+        ToolFixture(
+            fixture_id="first",
+            tool_name="refund_order",
+            invocation_index=1,
+            outcome=SimulatedToolOutcome(status=SimulatedToolStatus.SUCCESS, result={"call": 1}),
+        ),
+        ToolFixture(
+            fixture_id="second",
+            tool_name="refund_order",
+            invocation_index=2,
+            outcome=SimulatedToolOutcome(status=SimulatedToolStatus.SUCCESS, result={"call": 2}),
+        ),
+    )
+    gateway = ToolGateway(spec.tools.items, fixtures, world={}, run_id="concurrency-e2e")
+    prepared = adapter.prepare(agent, gateway, world_state=gateway.world)
+    run = asyncio.run(adapter.run(prepared, "refund it twice", run_id="concurrency-e2e-run", max_turns=6))
+
+    assert HANDLER_RAN["value"] is False
+    outcomes_by_call: dict[str, Any] = {}
+    for attempt in run.tool_attempts:
+        outcome = next(o for o in run.tool_outcomes if o.attempt_id == attempt.attempt_id)
+        outcomes_by_call[attempt.arguments.get("order_id", "")] = outcome
+
+    results = [outcome.result for outcome in run.tool_outcomes]
+    # Decision order (the order the model emitted the two calls) must map to
+    # invocation_index 1 then 2, regardless of SDK task scheduling.
+    assert results == [{"call": 1}, {"call": 2}]
+
+
+def test_repeated_concurrent_dispatch_is_deterministic_across_runs() -> None:
+    """The same scripted same-stage batch, run several times, must always
+    produce the same fixture assignment -- proves the result does not
+    depend on asyncio task-scheduling variance."""
+
+    from agentcheck.domain import SimulatedToolOutcome, SimulatedToolStatus, ToolFixture
+    from agentcheck.runner import ToolGateway
+
+    agents = _agents()
+
+    def build_and_run() -> tuple[Any, ...]:
+        @agents.function_tool
+        def refund_order(order_id: str) -> str:
+            raise AssertionError("the original handler was invoked")
+
+        agent = agents.Agent(
+            name="Refunder",
+            instructions="Handle refunds.",
+            tools=[refund_order],
+            model=ScriptedModel(
+                [
+                    [
+                        _tool_call("refund_order", {"order_id": "o"}, "c1"),
+                        _tool_call("refund_order", {"order_id": "o"}, "c2"),
+                    ],
+                    [_message("done")],
+                ]
+            ),
+        )
+        adapter = OpenAIAgentsAdapter()
+        spec = adapter.inspect(agent)
+        fixtures = (
+            ToolFixture(
+                fixture_id="first",
+                tool_name="refund_order",
+                invocation_index=1,
+                outcome=SimulatedToolOutcome(
+                    status=SimulatedToolStatus.SUCCESS, result={"call": 1}
+                ),
+            ),
+            ToolFixture(
+                fixture_id="second",
+                tool_name="refund_order",
+                invocation_index=2,
+                outcome=SimulatedToolOutcome(
+                    status=SimulatedToolStatus.SUCCESS, result={"call": 2}
+                ),
+            ),
+        )
+        gateway = ToolGateway(spec.tools.items, fixtures, world={}, run_id="det-e2e")
+        prepared = adapter.prepare(agent, gateway, world_state=gateway.world)
+        run = asyncio.run(
+            adapter.run(prepared, "refund it twice", run_id="det-e2e-run", max_turns=6)
+        )
+        return tuple(outcome.result["call"] for outcome in run.tool_outcomes)
+
+    results = {build_and_run() for _ in range(8)}
+    assert results == {(1, 2)}
+
+
+def test_same_stage_state_effects_commit_in_decision_order_under_concurrency() -> None:
+    """Two same-stage calls whose fixtures each mutate the same world path
+    must apply in decision order, not completion order: the final state must
+    match what serialized execution in decision order would have produced,
+    every time."""
+
+    from agentcheck.domain import SimulatedToolOutcome, SimulatedToolStatus, ToolFixture, WorldStateEffect
+    from agentcheck.runner import ToolGateway
+
+    agents = _agents()
+
+    @agents.function_tool
+    def reserve_inventory(order_id: str) -> str:
+        raise AssertionError("the original handler was invoked")
+
+    agent = agents.Agent(
+        name="Reserver",
+        instructions="Reserve inventory.",
+        tools=[reserve_inventory],
+        model=ScriptedModel(
+            [
+                [
+                    _tool_call("reserve_inventory", {"order_id": "o"}, "c1"),
+                    _tool_call("reserve_inventory", {"order_id": "o"}, "c2"),
+                ],
+                [_message("done")],
+            ]
+        ),
+    )
+    adapter = OpenAIAgentsAdapter()
+    spec = adapter.inspect(agent)
+    fixtures = (
+        ToolFixture(
+            fixture_id="first",
+            tool_name="reserve_inventory",
+            invocation_index=1,
+            outcome=SimulatedToolOutcome(
+                status=SimulatedToolStatus.SUCCESS,
+                result={"reserved_by": "first"},
+                state_effects=(WorldStateEffect(path="holder", after="first"),),
+            ),
+        ),
+        ToolFixture(
+            fixture_id="second",
+            tool_name="reserve_inventory",
+            invocation_index=2,
+            outcome=SimulatedToolOutcome(
+                status=SimulatedToolStatus.SUCCESS,
+                result={"reserved_by": "second"},
+                state_effects=(WorldStateEffect(path="holder", after="second"),),
+            ),
+        ),
+    )
+    gateway = ToolGateway(spec.tools.items, fixtures, world={"holder": None}, run_id="state-e2e")
+    prepared = adapter.prepare(agent, gateway, world_state=gateway.world)
+    asyncio.run(adapter.run(prepared, "reserve it twice", run_id="state-e2e-run", max_turns=6))
+
+    # Decision order was call1 (sets "first") then call2 (sets "second"), so
+    # the final committed value must always be "second" -- never dependent on
+    # which task's commit happened to run first under the event loop.
+    assert gateway.world.get("holder") == "second"
+
+
+def test_same_stage_success_and_error_are_independent_under_concurrency() -> None:
+    """Two different same-stage tools, one succeeding and one erroring, must
+    each get their own outcome correctly under real concurrent dispatch --
+    neither call's status leaks into the other's."""
+
+    from agentcheck.domain import (
+        SimulatedToolOutcome,
+        SimulatedToolStatus,
+        ToolFixture,
+        ToolOutcomeStatus,
+    )
+    from agentcheck.runner import ToolGateway
+
+    agents = _agents()
+
+    @agents.function_tool
+    def verify_customer(order_id: str) -> str:
+        raise AssertionError("the original handler was invoked")
+
+    @agents.function_tool
+    def refund_order(order_id: str) -> str:
+        raise AssertionError("the original handler was invoked")
+
+    agent = agents.Agent(
+        name="Refunder",
+        instructions="Handle refunds.",
+        tools=[verify_customer, refund_order],
+        model=ScriptedModel(
+            [
+                [
+                    _tool_call("verify_customer", {"order_id": "o"}, "c1"),
+                    _tool_call("refund_order", {"order_id": "o"}, "c2"),
+                ],
+                [_message("done")],
+            ]
+        ),
+    )
+    adapter = OpenAIAgentsAdapter()
+    spec = adapter.inspect(agent)
+    fixtures = (
+        ToolFixture(
+            fixture_id="verify-ok",
+            tool_name="verify_customer",
+            outcome=SimulatedToolOutcome(status=SimulatedToolStatus.SUCCESS, result={"verified": True}),
+        ),
+        ToolFixture(
+            fixture_id="refund-error",
+            tool_name="refund_order",
+            outcome=SimulatedToolOutcome(
+                status=SimulatedToolStatus.ERROR, error_code="card_declined", error_message="declined"
+            ),
+        ),
+    )
+    gateway = ToolGateway(spec.tools.items, fixtures, world={}, run_id="mixed-outcome-e2e")
+    prepared = adapter.prepare(agent, gateway, world_state=gateway.world)
+    run = asyncio.run(adapter.run(prepared, "verify then refund", run_id="mixed-outcome-run", max_turns=6))
+
+    outcomes_by_tool = {outcome.tool_name: outcome for outcome in run.tool_outcomes}
+    assert outcomes_by_tool["verify_customer"].status == ToolOutcomeStatus.SUCCESS
+    assert outcomes_by_tool["refund_order"].status == ToolOutcomeStatus.ERROR
+    assert outcomes_by_tool["refund_order"].error is not None
+    assert outcomes_by_tool["refund_order"].error.code == "card_declined"

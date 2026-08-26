@@ -68,7 +68,9 @@ if TYPE_CHECKING:
     from agentcheck.config import ToolRiskDeclaration
 from agentcheck.schema_safety import UnsafeSchemaReference, offline_validator
 from agentcheck.runner.budgets import BudgetExceeded
+from agentcheck.runner.launch_barrier import LaunchBarrier
 from agentcheck.runner.network_guard import denied_destinations
+from agentcheck.runner.tool_gateway import CallReservation
 
 from .base import (
     portable_identity,
@@ -157,6 +159,18 @@ def _supported_sdk_version(version: str | None) -> bool:
         return False
 
 
+# The SDK dispatches function-tool invokers as concurrent asyncio tasks under
+# this cap (`asyncio.create_task` + `asyncio.wait`), never real OS threads --
+# confirmed by reading agents/run_internal/tool_execution.py for the pinned
+# SDK version. A model response rarely emits more than a handful of tool
+# calls at once, and ToolGateway.commit is forced back into decision order by
+# LaunchBarrier regardless of this cap, so raising it further would not
+# change gateway behaviour -- only how many invokers may have pre-commit work
+# (argument parsing, attempt recording) in flight at once. 8 is a small,
+# explicit bound rather than the unbounded default (`None`), chosen to
+# exercise genuine multi-task dispatch without inviting an unbounded number
+# of concurrently pending tasks for a single model response.
+_MAX_FUNCTION_TOOL_CONCURRENCY = 8
 _MAX_REACHABLE_AGENTS = 16
 _HANDOFF_FACTORY_MODULE = "agents.handoffs"
 _HANDOFF_FACTORY_WRAPPER = "_invoke_handoff_with_redaction"
@@ -731,6 +745,14 @@ class _Capture:
         default_factory=dict
     )
     agent_by_attempt: dict[str, str | None] = dataclasses.field(default_factory=dict)
+    # Populated once per model response, before any of its tool calls are
+    # dispatched: which reservation each call_id owns, and the barrier that
+    # keeps their commits in decision order under concurrent dispatch. See
+    # `_CapturingHooks.on_llm_end` and `_make_safe_invoker`.
+    pending_reservations: dict[str, "CallReservation"] = dataclasses.field(
+        default_factory=dict
+    )
+    pending_barrier: "LaunchBarrier | None" = None
 
     async def event(
         self,
@@ -918,9 +940,15 @@ _CapturingHooksBase: Any = RunHooksBase if _SDK_IMPORT_ERROR is None else object
 
 
 class _CapturingHooks(_CapturingHooksBase):
-    def __init__(self, capture: _Capture, budget_tracker: Any = None):
+    def __init__(
+        self,
+        capture: _Capture,
+        budget_tracker: Any = None,
+        gateway: "ToolGatewayProtocol | None" = None,
+    ):
         self.capture = capture
         self.budget_tracker = budget_tracker
+        self.gateway = gateway
 
     async def on_llm_start(
         self,
@@ -969,6 +997,7 @@ class _CapturingHooks(_CapturingHooksBase):
             },
         )
         self.capture.response_event_ids.append(response_event.event_id)
+        self._reserve_tool_calls(agent, response)
         for output in response.output:
             if isinstance(output, ResponseOutputMessage):
                 text = ItemHelpers.extract_text(output)
@@ -1012,6 +1041,63 @@ class _CapturingHooks(_CapturingHooksBase):
                     and not isinstance(raw_cost, bool)
                     else None
                 )
+
+    def _reserve_tool_calls(self, agent: Any, response: Any) -> None:
+        """Deterministically plan this response's tool calls before dispatch.
+
+        Called synchronously from ``on_llm_end``, before the SDK creates any
+        task to run an individual tool invoker -- so which reservation each
+        call gets can never depend on how the SDK schedules those tasks
+        afterwards, however many it runs concurrently. A gateway that does
+        not support batch planning (anything implementing only the minimal
+        ``ToolGatewayProtocol``) is left alone: invokers fall back to calling
+        it directly, exactly as they always have.
+        """
+
+        gateway = self.gateway
+        if not hasattr(gateway, "plan_batch"):
+            return
+        function_calls = [
+            output
+            for output in response.output
+            if isinstance(output, ResponseFunctionToolCall)
+        ]
+        if not function_calls:
+            return
+        schema_by_tool: dict[str, dict[str, Any]] = {
+            tool.name: tool.params_json_schema
+            for tool in getattr(agent, "tools", ())
+            if isinstance(tool, FunctionTool)
+        }
+        plannable: list[tuple[str, str, dict[str, Any]]] = []
+        for call in function_calls:
+            call_id = str(getattr(call, "call_id", "") or "")
+            schema = schema_by_tool.get(call.name)
+            if not call_id or schema is None:
+                # No schema means this call is not one of the reconstructed
+                # tools this adapter knows about (or the agent's tool list
+                # could not be read here); leave it to the invoker's own
+                # fallback path rather than guessing.
+                continue
+            arguments, validation_errors = _parse_arguments(call.arguments, schema)
+            if validation_errors:
+                # The invoker will take its own malformed-argument path
+                # without ever reaching the gateway; planning a reservation
+                # for it would consume a fixture/budget slot for a call that
+                # never commits, which could steal that slot from a sibling
+                # call actually reaching the gateway.
+                continue
+            plannable.append((call_id, call.name, arguments))
+        if not plannable:
+            return
+        reservations = cast(Any, gateway).plan_batch(
+            [(name, arguments) for _, name, arguments in plannable]
+        )
+        self.capture.pending_reservations = {
+            call_id: reservation
+            for (call_id, _, _), reservation in zip(plannable, reservations)
+        }
+        self.capture.pending_barrier = LaunchBarrier(len(reservations))
 
 
 def _schema_validation_errors(schema: Mapping[str, Any], arguments: Any) -> list[str]:
@@ -1198,6 +1284,35 @@ async def _invoke_gateway(
     return result
 
 
+async def _invoke_reserved_or_direct(
+    *,
+    gateway: ToolGatewayProtocol,
+    capture: "_Capture",
+    call_id: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    world_state: Any,
+) -> Any:
+    """Commit this call's pre-planned reservation, in decision order, if one
+    exists; otherwise fall back to invoking the gateway directly.
+
+    The fallback covers a gateway that does not support batch planning, and
+    any call `_reserve_tool_calls` deliberately left unplanned (an unknown
+    schema, or arguments that will take the invoker's own malformed-argument
+    path without reaching the gateway at all). Popping the reservation makes
+    each one committable at most once.
+    """
+
+    reservation = capture.pending_reservations.pop(call_id, None)
+    barrier = capture.pending_barrier
+    if reservation is not None and barrier is not None and hasattr(gateway, "commit"):
+        return await barrier.run_in_order(
+            reservation.rank,
+            lambda: cast(Any, gateway).commit(reservation, world_state),
+        )
+    return await _invoke_gateway(gateway, tool_name, arguments, world_state)
+
+
 def _make_safe_invoker(
     *,
     tool_name: str,
@@ -1261,8 +1376,13 @@ def _make_safe_invoker(
             )
 
         try:
-            gateway_result = await _invoke_gateway(
-                gateway, tool_name, arguments, world_state
+            gateway_result = await _invoke_reserved_or_direct(
+                gateway=gateway,
+                capture=capture,
+                call_id=call_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                world_state=world_state,
             )
         except BaseException as exc:
             controlled_outcome = getattr(exc, "outcome", None)
@@ -2732,12 +2852,14 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
             run_kwargs: dict[str, Any] = {
                 "max_turns": max_turns,
                 "hooks": _CapturingHooks(
-                    capture, getattr(prepared.gateway, "budgets", None)
+                    capture, getattr(prepared.gateway, "budgets", None), prepared.gateway
                 ),
                 "run_config": RunConfig(
                     tracing_disabled=True,
                     trace_include_sensitive_data=False,
-                    tool_execution=ToolExecutionConfig(max_function_tool_concurrency=1),
+                    tool_execution=ToolExecutionConfig(
+                        max_function_tool_concurrency=_MAX_FUNCTION_TOOL_CONCURRENCY
+                    ),
                     tool_not_found_behavior="raise_error",
                     tool_name_collision_policy="error",
                 ),

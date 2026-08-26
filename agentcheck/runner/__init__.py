@@ -6,6 +6,7 @@ from .network_guard import (
     denied_destinations,
     install_network_guard,
 )
+from .launch_barrier import LaunchBarrier
 from .orchestrator import (
     ProcessResult,
     WorkerProcessError,
@@ -13,6 +14,7 @@ from .orchestrator import (
     run_scenario_in_subprocess,
 )
 from .tool_gateway import (
+    CallReservation,
     FixtureDefinitionError,
     FixtureNotFoundError,
     ToolCallBlockedError,
@@ -27,8 +29,10 @@ __all__ = [
     "BudgetExceeded",
     "BudgetTracker",
     "BudgetUsage",
+    "CallReservation",
     "FixtureDefinitionError",
     "FixtureNotFoundError",
+    "LaunchBarrier",
     "NetworkAccessDenied",
     "ProcessResult",
     "ToolCallBlockedError",

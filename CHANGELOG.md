@@ -18,6 +18,44 @@ Developer-declared tool risk, an explicit authority precedence for it, and a
 launch-group-aware concurrency oracle. Not yet released as a distribution
 version; recorded here for the next release to pick up.
 
+**Concurrent execution safety:** `ToolGateway` is split into a deterministic
+plan phase (`plan_batch`/`plan_one` -- decides budget consumption, invocation
+index, fixture selection and consumption, and resulting status, strictly in
+the order calls are given) and a commit phase (`commit` -- applies world-state
+effects and records the attempt/outcome for one already-planned reservation).
+A new `agentcheck.runner.launch_barrier.LaunchBarrier` forces a batch's
+commits into decision order under real concurrent dispatch.
+
+The OpenAI Agents adapter now dispatches a model response's tool calls as
+genuinely concurrent asyncio tasks (`max_function_tool_concurrency` moves
+from 1 to a bounded 8), planning the batch deterministically at `on_llm_end`
+before any task is created. The PydanticAI adapter -- which already dispatches
+concurrently by default, unaudited until now -- gets the same treatment via
+`_CapturingModel.request`. Both are proven, by running the same scripted
+same-stage batch many times, to produce identical fixture assignment and
+world-state commit order regardless of which task the event loop happens to
+run first. Custom Python agents remain synchronous and explicitly documented
+as unsupported for concurrent dispatch.
+
+Fixed a real, pre-existing defect surfaced while adding the first PydanticAI
+test to exercise state effects: `ToolOutcome.state_transition_ids` stored raw
+gateway transition IDs instead of the canonical run-scoped IDs `CanonicalRun`
+validation expects, so any PydanticAI run that actually produced a state
+transition failed to construct. Also fixed a regression introduced during
+this milestone's own development: `ToolGateway.commit` had stopped chaining
+`BudgetExceeded` as the `__cause__` of its raised `ToolCallBlockedError`,
+which the custom adapter's termination mapping depends on to report
+`MAX_TOOL_CALLS`/`WALL_CLOCK_TIMEOUT` instead of a generic `ADAPTER_ERROR`.
+
+Real-world validation against public OpenAI Agents SDK and PydanticAI
+examples plus tau-bench's retail tool schemas found no concurrency-related
+defects: fixture assignment and launch-group evidence matched decision order
+in every target, and no original tool handler executed.
+
+**Suite identity:** unaffected. This milestone changes execution/dispatch
+behaviour, not generation semantics -- `GENERATOR_COMPATIBILITY_VERSION`
+stays `1`, and no scenario or suite fingerprint moves.
+
 **Developer-declared risk:** `agentcheck.json` gains an optional `tool_risk`
 block declaring `state_changing`/`destructive` per tool, independently per
 axis. Precedence is fixed: developer declaration > genuine framework metadata

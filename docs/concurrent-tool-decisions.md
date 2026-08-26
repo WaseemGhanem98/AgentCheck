@@ -1,99 +1,119 @@
 # Concurrent tool decisions
 
-A model response can carry several tool calls at once. AgentCheck can tell
-that they were *decided* together; it does not *execute* them concurrently.
-This document is about that gap, why it exists, and what each half actually
-buys you.
+A model response can carry several tool calls at once. AgentCheck has always
+been able to tell that they were *decided* together. As of this milestone it
+can also let the OpenAI Agents and PydanticAI adapters dispatch them as
+genuinely concurrent tasks without that concurrency corrupting fixture
+assignment, invocation-index bookkeeping, or simulated world state. This
+document explains what changed, what still hasn't, and why the boundary sits
+where it does.
 
 ## Three different things named "concurrency"
 
 1. **Concurrent decision / launch semantics.** Whether two tool calls were
-   chosen in the same model response, before either produced a result. This is
-   a fact about the recorded run, derived from event linkage
-   (`agentcheck/evaluate/launch.py`), and AgentCheck has understood it since
-   the launch-group work that added `LaunchAnalysis.same_launch_group` and
-   `.observed_before`.
-2. **Simulated execution scheduling.** The order `ToolGateway` actually
-   services calls the adapter hands it. Today this is strictly serial and
-   synchronous, regardless of launch grouping: two calls decided together
-   still run one after another inside the gateway.
-3. **Real wall-clock concurrent execution.** Actually dispatching two tool
-   invocations at once (multiple OS threads, an event loop running them
-   interleaved, or `max_function_tool_concurrency > 1` in the OpenAI Agents
-   SDK). AgentCheck does not do this.
+   chosen in the same model response, before either produced a result. A fact
+   about the recorded run, derived from event linkage
+   (`agentcheck/evaluate/launch.py`).
+2. **Dispatch concurrency.** Whether the framework actually runs the
+   resulting tool-call coroutines as more than one concurrently-scheduled
+   task. Both supported adapters do this via plain asyncio tasks
+   (`asyncio.create_task` + `asyncio.gather`/`asyncio.wait`) — never real OS
+   threads, confirmed by reading each pinned SDK's own tool-execution code.
+   The OpenAI Agents SDK does this once its `max_function_tool_concurrency`
+   allows more than one in flight (now 8, up from 1). PydanticAI does this
+   **by default**, for every tool call, with no equivalent setting to opt out
+   of — that was true before this milestone too, and it was previously
+   unaudited.
+3. **Completion/interleaving semantics.** Which outcomes actually finish
+   first, and what each call's committed effects see. This milestone forces
+   this to follow *decision* order, not real completion order, wherever it
+   would otherwise matter (see below) — it does not model genuine race
+   interleavings beyond that.
 
-(1) and (2) are already distinct today: a scenario can represent "these two
-were decided together" without them ever running out of order. (3) is the one
-this milestone deliberately did not add.
+These are not the same thing, and conflating them is exactly the mistake this
+milestone set out to avoid. (1) and (2) already existed independently before
+this work; what changed is that (2) is now something AgentCheck's own
+bookkeeping stays correct under, instead of something only made safe by
+accident (`max_function_tool_concurrency=1`) or left unaudited (PydanticAI).
 
-## Why (3) is not enabled
+## How dispatch concurrency was made safe
 
-`ToolGateway` (`agentcheck/runner/tool_gateway.py`) is a single synchronous
-object with mutable, unsynchronized per-call state: a `_used_fixtures` set
-that fixture matching depends on, and sequence counters that canonical event
-ordering depends on. Two callers entering it concurrently — real threads, or
-an event loop actually interleaving coroutines rather than awaiting them one
-at a time — would make fixture selection and event sequencing depend on
-whichever call happened to reach the gateway first. That is exactly the
-scheduling-dependent, non-deterministic harness behaviour AgentCheck exists to
-avoid: a suite's outcome would stop being a pure function of the target, the
-seed, and the fixtures, and would start depending on OS thread scheduling.
+`ToolGateway` (`agentcheck/runner/tool_gateway.py`) is now split into a
+deterministic **plan** phase and a **commit** phase:
 
-`max_function_tool_concurrency` stays `1` in the OpenAI Agents adapter, and
-the custom `ToolRuntime` stays synchronous, for this reason. Raising the
-concurrency cap without first making the gateway's internal state safe under
-concurrent access would not add a real capability — it would add flakiness.
-Making the gateway safe under real concurrent access (locking, or per-launch-
-group isolated fixture pools) is future work, not something this milestone
-does quietly under a version bump.
+- `plan_batch(calls)` decides everything that must not depend on execution
+  order — tool-call and retry budget consumption, invocation-index
+  assignment, fixture selection and consumption, the resulting status — for
+  every call in a batch, strictly in the order the calls are given. Two
+  reservations from one batch can be committed in either order without
+  changing any of that; it was already decided.
+- `commit(reservation)` applies the fixture's world-state effects and records
+  the attempt/outcome for one already-planned reservation.
 
-## What AgentCheck can test today
+Both adapters now use a hook that sees a model response's full, ordered list
+of tool calls *before* the framework dispatches any of them as a task (the
+OpenAI adapter's `on_llm_end`; PydanticAI's `_CapturingModel.request`). That
+hook calls `plan_batch` immediately, in the model's own emission order, so
+which reservation a call gets never depends on how the framework later
+schedules the coroutine that services it.
 
-Everything below is deterministic: no thread scheduling, no sleeps, no
-random interleaving, bounded generation.
+Because dispatch concurrency here is cooperative asyncio, not real OS
+threads, a synchronous method with no internal `await` (like `commit`) always
+runs to completion without another task's code interleaving inside it. What
+still needed forcing into a fixed order is *which reservation commits before
+which* when two calls in one batch touch overlapping simulated state (see
+"State conflicts" below) — `agentcheck/runner/launch_barrier.py`'s
+`LaunchBarrier` does that with a small `asyncio.Event`-based utility, gating
+each reservation's commit until every earlier-ranked one has finished. No
+thread locks (there is no real thread contention to lock against), no
+sleeps, no timing assumptions.
 
-- **`same_launch_group(a, b)`** — were two attempts decided in the same model
-  response.
-- **`observed_before(a, b)`** — was `a`'s result recorded before the model
-  response that launched `b`. `False` for same-stage attempts (neither could
-  have informed the other); `None` when the run does not record enough to
-  say — never treated as evidence of either answer.
-- **`ordering`** (a declared policy or generated constraint) — fails when a
-  same-stage pair violates a declared "observe X before deciding Y" rule.
-  A prerequisite and its dependent action launched together is exactly this
-  case, and it already fails correctly: see
-  `test_ordering_fails_when_both_calls_were_decided_together`.
-- **`no_same_stage_duplicate_action`** — fails when the *same* tool, with
-  identical arguments, is decided twice in one launch group (`delete_user()`
-  called twice in one response). Structurally unambiguous, unlike a repeat
-  across two later reasoning turns (which `no_duplicate_side_effect` already
-  covers, and which this rule does not fire on).
-- **Unrelated same-stage calls are not, by themselves, a finding.** Two reads
-  decided together, or one destructive tool decided alongside an unrelated
-  read, produce no failure unless a declared/authoritative rule actually
-  says something about the relationship. Sharing a launch group is evidence,
-  not a verdict.
+## What AgentCheck now supports
 
-## What AgentCheck cannot test yet
+- **Real concurrent tool-call dispatch** in the OpenAI Agents adapter
+  (`max_function_tool_concurrency=8`, a small explicit bound rather than the
+  SDK's unbounded default) and in PydanticAI (its own default, now made
+  safe rather than merely unaudited).
+- **Deterministic fixture/invocation-index assignment** regardless of which
+  task's coroutine the event loop happens to run first.
+- **Deterministic world-state commit order**: two same-stage calls whose
+  fixtures both mutate simulated state commit in decision order, every time —
+  proven by running the same scripted batch many times and checking the
+  final state is identical, not by inspecting one run.
+- **`same_launch_group(a, b)` / `observed_before(a, b)`** — unchanged from
+  before this milestone, and still correct under real concurrent dispatch.
+- **`ordering`** and **`no_same_stage_duplicate_action`** — both verdicts are
+  proven independent of completion order: repeated runs of the same
+  same-stage scenario produce the same verdict regardless of which
+  concurrently-dispatched call's task happens to finish first.
+- **Two same-stage calls racing for one single-use fixture fail closed**: the
+  second is refused at plan time (deterministically, by decision order), not
+  raced for at commit time.
 
-- **Real concurrent execution effects**: a genuine race between two
-  in-flight calls, one mutating state the other reads mid-flight. The
-  simulated world only ever sees calls one at a time.
+## What AgentCheck still cannot do
+
+- **Custom Python agents stay synchronous and unsupported for concurrent
+  dispatch.** `ToolRuntime.call` has no hook analogous to the two adapters'
+  above — a custom agent's own orchestration decides when to call it, and if
+  that orchestration issues genuinely concurrent calls (multiple threads, or
+  tasks that actually interleave around a real `await`), fixture and
+  invocation-index ordering are not guaranteed. This is deliberately left
+  unsupported rather than guessed at: see the docstring on
+  `_GatewayToolRuntime` in `agentcheck/adapters/custom.py`. A custom agent
+  that wants determinism must call `ToolRuntime.call` strictly in decision
+  order itself.
 - **Two different destructive tools targeting the same resource**, launched
   together, evaluated for whether that pairing itself is safe. Doing this
   honestly requires a declared resource/entity link between the two tools,
   which no current contract expresses; inferring one from names would be
-  exactly the kind of semantic guessing this milestone's tool-risk work was
-  written to stop doing. This stays `UNKNOWN`/unsupported rather than
-  invented.
+  exactly the kind of semantic guessing this project's tool-risk work exists
+  to stop doing. This stays `UNKNOWN`/unsupported rather than invented.
 - **Retry-after-concurrent-mutation**: "action A retried after concurrent
   action B already changed the state A depends on" needs state versioning
-  the simulated world does not yet have. Not built here.
-- **Async custom-agent tool calls.** `ToolRuntime` is synchronous by
-  contract; a custom agent that wants to issue tool calls from concurrent
-  tasks has no supported path today. This is documented as unsupported
-  rather than fabricated, per the same reasoning as (3) above — the
-  underlying gateway is not yet safe for it.
+  the simulated world does not have. Not built here.
+- **Genuine race-condition effects**: a real interleaving where one call
+  observes another's *partial* mutation mid-flight. The simulated world has
+  no partial states to observe — a commit either has happened or hasn't.
 
 If a scenario or policy needs one of the unsupported cases above, the honest
 answer is `INCONCLUSIVE`/generation refusing to invent the case, not a
