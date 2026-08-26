@@ -1072,6 +1072,7 @@ class ToolGateway:
 
 
 __all__ = [
+    "CallReservation",
     "FixtureDefinitionError",
     "FixtureNotFoundError",
     "ToolCallBlockedError",
