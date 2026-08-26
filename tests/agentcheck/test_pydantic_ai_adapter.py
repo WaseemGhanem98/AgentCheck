@@ -37,6 +37,7 @@ from agentcheck.domain import (
     SimulatedToolStatus,
     ToolFixture,
     ToolOutcomeStatus,
+    WorldStateEffect,
 )
 from agentcheck.runner import ToolGateway
 from agentcheck.runner.budgets import BudgetTracker
@@ -313,7 +314,7 @@ def test_the_prepared_tool_refuses_to_run_outside_adapter_run() -> None:
     safe = prepared.runtime_agent.toolsets[0].tools["cancel_order"]
 
     with pytest.raises(RuntimeError, match="outside adapter.run"):
-        asyncio.run(safe.function(order_id="o_1", reason="x"))
+        asyncio.run(safe.function(None, order_id="o_1", reason="x"))
     assert ORIGINAL_HANDLER_CALLS == []
 
 
@@ -840,3 +841,108 @@ def test_a_plain_agent_passes_preflight() -> None:
     report = PydanticAIAdapter().preflight(_agent(lookup_order, cancel_order))
 
     assert report.supported, [(i.code, i.message) for i in report.issues]
+
+
+# --------------------------------------------------------------------------
+# Concurrent dispatch: PydanticAI runs one response's tool calls concurrently
+# by default (no equivalent of the OpenAI adapter's max_function_tool_
+# concurrency to opt out of). Fixture/invocation-index assignment and
+# world-state commit order must still follow decision order, not whichever
+# task PydanticAI's own executor happens to run first.
+# --------------------------------------------------------------------------
+
+
+def _same_stage_response(name: str, args: dict[str, Any], *, count: int = 2) -> ModelResponse:
+    return ModelResponse(parts=[ToolCallPart(name, dict(args)) for _ in range(count)])
+
+
+def test_same_stage_duplicate_calls_get_correct_fixtures_under_concurrent_dispatch() -> None:
+    """Two same-stage calls to one tool must each receive the fixture
+    matching their decision order, regardless of PydanticAI's own
+    concurrent task scheduling."""
+
+    agent = _agent(cancel_order, model=_script(_same_stage_response("cancel_order", {"order_id": "o", "reason": "dup"}), _text("done")))
+    fixtures = [
+        ToolFixture(
+            fixture_id="first",
+            tool_name="cancel_order",
+            invocation_index=1,
+            outcome=SimulatedToolOutcome(status=SimulatedToolStatus.SUCCESS, result={"call": 1}),
+        ),
+        ToolFixture(
+            fixture_id="second",
+            tool_name="cancel_order",
+            invocation_index=2,
+            outcome=SimulatedToolOutcome(status=SimulatedToolStatus.SUCCESS, result={"call": 2}),
+        ),
+    ]
+    gateway = ToolGateway(_definitions(agent), fixtures)
+    prepared = _prepare(agent, gateway)
+    run = _run(prepared, "cancel it twice")
+
+    assert ORIGINAL_HANDLER_CALLS == []
+    results = [outcome.result for outcome in run.tool_outcomes]
+    assert results == [{"call": 1}, {"call": 2}]
+
+
+def test_repeated_concurrent_dispatch_is_deterministic_across_runs() -> None:
+    def build_and_run() -> tuple[Any, ...]:
+        agent = _agent(
+            cancel_order,
+            model=_script(_same_stage_response("cancel_order", {"order_id": "o", "reason": "dup"}), _text("done")),
+        )
+        fixtures = [
+            ToolFixture(
+                fixture_id="first",
+                tool_name="cancel_order",
+                invocation_index=1,
+                outcome=SimulatedToolOutcome(status=SimulatedToolStatus.SUCCESS, result={"call": 1}),
+            ),
+            ToolFixture(
+                fixture_id="second",
+                tool_name="cancel_order",
+                invocation_index=2,
+                outcome=SimulatedToolOutcome(status=SimulatedToolStatus.SUCCESS, result={"call": 2}),
+            ),
+        ]
+        gateway = ToolGateway(_definitions(agent), fixtures)
+        prepared = _prepare(agent, gateway)
+        run = _run(prepared, "cancel it twice")
+        return tuple(outcome.result["call"] for outcome in run.tool_outcomes)
+
+    results = {build_and_run() for _ in range(8)}
+    assert results == {(1, 2)}
+
+
+def test_same_stage_state_effects_commit_in_decision_order() -> None:
+    agent = _agent(
+        cancel_order,
+        model=_script(_same_stage_response("cancel_order", {"order_id": "o", "reason": "dup"}), _text("done")),
+    )
+    fixtures = [
+        ToolFixture(
+            fixture_id="first",
+            tool_name="cancel_order",
+            invocation_index=1,
+            outcome=SimulatedToolOutcome(
+                status=SimulatedToolStatus.SUCCESS,
+                result={"by": "first"},
+                state_effects=(WorldStateEffect(path="holder", after="first"),),
+            ),
+        ),
+        ToolFixture(
+            fixture_id="second",
+            tool_name="cancel_order",
+            invocation_index=2,
+            outcome=SimulatedToolOutcome(
+                status=SimulatedToolStatus.SUCCESS,
+                result={"by": "second"},
+                state_effects=(WorldStateEffect(path="holder", after="second"),),
+            ),
+        ),
+    ]
+    gateway = ToolGateway(_definitions(agent), fixtures, world={"holder": None})
+    prepared = _prepare(agent, gateway)
+    _run(prepared, "cancel it twice")
+
+    assert gateway.world.get("holder") == "second"

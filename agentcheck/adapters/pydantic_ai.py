@@ -57,6 +57,10 @@ from agentcheck.domain.run import (
 from agentcheck.domain.scenario import ConversationRole, ConversationTurn
 from agentcheck.inspect.capabilities import extract_capabilities
 from agentcheck.inspect.risk_authority import declared_risk_for, resolve_tool_risk
+from agentcheck.runner.launch_barrier import LaunchBarrier
+from agentcheck.runner.tool_gateway import CallReservation
+from agentcheck.schema_safety import UnsafeSchemaReference, offline_validator
+from jsonschema.exceptions import SchemaError  # type: ignore[import-untyped]
 
 if TYPE_CHECKING:
     from agentcheck.config import ToolRiskDeclaration
@@ -94,7 +98,7 @@ try:  # pragma: no cover - import guard mirrors the OpenAI adapter
         ToolCallPart,
     )
     from pydantic_ai.models import Model
-    from pydantic_ai.tools import Tool
+    from pydantic_ai.tools import RunContext, Tool
 except Exception as exc:  # pragma: no cover - exercised without the extra
     _SDK_IMPORT_ERROR = exc
     Agent = Any  # type: ignore[assignment,misc]
@@ -166,6 +170,18 @@ def _unknown_property(value: Any, *, locator: str, summary: str) -> AgentPropert
         confidence=0.0,
         authoritative=False,
     )
+
+
+def _schema_validation_errors(schema: Mapping[str, Any], arguments: Any) -> list[str]:
+    try:
+        validator = offline_validator(schema)
+    except (SchemaError, UnsafeSchemaReference) as exc:
+        return [f"invalid or unsafe tool schema: {exc}"]
+    errors = sorted(validator.iter_errors(arguments), key=lambda error: list(error.path))
+    return [
+        f"{'.'.join(str(item) for item in error.absolute_path) or '$'}: {error.message}"
+        for error in errors
+    ]
 
 
 def _agent_toolset(target: Any) -> Any | None:
@@ -319,6 +335,14 @@ class _Capture:
     outcomes: list[ToolOutcome] = dataclasses.field(default_factory=list)
     request_ids: list[str] = dataclasses.field(default_factory=list)
     usage: list[Any] = dataclasses.field(default_factory=list)
+    # Populated once per model response, before PydanticAI's own executor
+    # dispatches any of its tool calls -- which, unlike the OpenAI adapter,
+    # it does concurrently by default. See `_CapturingModel.request` and
+    # `_make_safe_tool`.
+    pending_reservations: dict[str, "CallReservation"] = dataclasses.field(
+        default_factory=dict
+    )
+    pending_barrier: "LaunchBarrier | None" = None
 
     async def event(
         self,
@@ -401,6 +425,23 @@ class _Capture:
         state_transition_ids: Sequence[str] = (),
         gateway_metadata: Mapping[str, Any] | None = None,
     ) -> ToolOutcome:
+        # Remapped here, not left for the caller to do afterwards: a gateway
+        # transition ID must become its canonical run-scoped ID before it is
+        # ever stored on a ToolOutcome, or two calls whose outcomes are
+        # recorded out of the order their `transition_links` entries were
+        # populated could end up with an outcome referencing an ID no
+        # `StateTransition` in the final run actually carries.
+        canonical_transition_ids: list[str] = []
+        for gateway_transition_id in state_transition_ids:
+            link = self.transition_links.get(gateway_transition_id)
+            if link is None:
+                canonical_transition_id = (
+                    f"{self.run_id}:transition:{len(self.transition_links):04d}"
+                )
+                link = (canonical_transition_id, attempt.attempt_id)
+                self.transition_links[gateway_transition_id] = link
+            canonical_transition_ids.append(link[0])
+
         ended_at = utc_now()
         index = len(self.outcomes)
         event = await self.event(
@@ -425,7 +466,7 @@ class _Capture:
             started_at=started_at,
             ended_at=ended_at,
             latency_ms=max(0.0, (ended_at - started_at).total_seconds() * 1_000),
-            state_transition_ids=tuple(state_transition_ids),
+            state_transition_ids=tuple(canonical_transition_ids),
             metadata=_json_object(dict(gateway_metadata or {}))
             | ({"gateway_outcome_id": gateway_outcome_id} if gateway_outcome_id else {}),
         )
@@ -518,6 +559,36 @@ def _gateway_result_parts(
     )
 
 
+async def _invoke_reserved_or_direct(
+    *,
+    gateway: ToolGatewayProtocol,
+    capture: "_Capture",
+    call_id: str,
+    tool_name: str,
+    arguments: dict[str, Any],
+    world_state: Any,
+) -> Any:
+    """Commit this call's pre-planned reservation, in decision order, if one
+    exists; otherwise fall back to invoking the gateway directly.
+
+    Mirrors the OpenAI adapter's helper of the same name. The fallback
+    covers a gateway without batch-planning support, and any call
+    `_CapturingModel._reserve_tool_calls` deliberately left unplanned.
+    """
+
+    reservation = capture.pending_reservations.pop(call_id, None)
+    barrier = capture.pending_barrier
+    if reservation is not None and barrier is not None and hasattr(gateway, "commit"):
+        return await barrier.run_in_order(
+            reservation.rank,
+            lambda: cast(Any, gateway).commit(reservation, world_state),
+        )
+    result = gateway.invoke(tool_name, arguments, world_state)
+    if _inspect.isawaitable(result):
+        return await result
+    return result
+
+
 def _model_visible_tool_output(
     status: ToolOutcomeStatus, result: Any, error: ToolError | None
 ) -> str:
@@ -606,7 +677,7 @@ def _make_safe_tool(
 
     name = definition.name
 
-    async def invoke(**kwargs: Any) -> str:
+    async def invoke(ctx: "RunContext[Any]", **kwargs: Any) -> str:
         capture = capture_holder.get("capture")
         if capture is None:
             raise RuntimeError(
@@ -616,20 +687,28 @@ def _make_safe_tool(
         raw_arguments = json.dumps(
             _json_value(arguments), ensure_ascii=False, sort_keys=True
         )
+        call_id = str(getattr(ctx, "tool_call_id", None) or "") or (
+            f"agentcheck-{name}-{len(capture.attempts) + 1}"
+        )
         attempt = await capture.tool_attempt(
             tool_name=name,
             arguments=arguments,
             raw_arguments=raw_arguments,
-            call_id=f"agentcheck-{name}-{len(capture.attempts) + 1}",
+            call_id=call_id,
             validation_errors=(),
             state_changing=state_changing,
             destructive=destructive,
         )
         started_at = utc_now()
         try:
-            result = gateway.invoke(name, arguments, world_state)
-            if _inspect.isawaitable(result):
-                result = await result
+            result = await _invoke_reserved_or_direct(
+                gateway=gateway,
+                capture=capture,
+                call_id=call_id,
+                tool_name=name,
+                arguments=arguments,
+                world_state=world_state,
+            )
         except BaseException as exc:
             controlled = getattr(exc, "outcome", None)
             if isinstance(controlled, ToolOutcome):
@@ -651,11 +730,6 @@ def _make_safe_tool(
                     state_transition_ids=transition_ids,
                     gateway_metadata=metadata,
                 )
-                for index, gateway_id in enumerate(transition_ids):
-                    capture.transition_links[gateway_id] = (
-                        f"{capture.run_id}:transition:{len(capture.transition_links):04d}",
-                        attempt.attempt_id,
-                    )
                 del outcome
                 return _model_visible_tool_output(status, value, error)
             await capture.event(
@@ -689,11 +763,6 @@ def _make_safe_tool(
             state_transition_ids=transition_ids,
             gateway_metadata=metadata,
         )
-        for gateway_id in transition_ids:
-            capture.transition_links[gateway_id] = (
-                f"{capture.run_id}:transition:{len(capture.transition_links):04d}",
-                attempt.attempt_id,
-            )
         return _model_visible_tool_output(status, value, error)
 
     invoke.__name__ = name
@@ -702,6 +771,7 @@ def _make_safe_tool(
         name=name,
         description=definition.description or "",
         json_schema=dict(definition.input_schema),
+        takes_ctx=True,
     )
 
 
@@ -713,10 +783,20 @@ class _CapturingModel(Model):
     interactive stages, exactly as they do for the first adapter.
     """
 
-    def __init__(self, inner: Any, capture: _Capture, budgets: Any) -> None:
+    def __init__(
+        self,
+        inner: Any,
+        capture: _Capture,
+        budgets: Any,
+        *,
+        gateway: "ToolGatewayProtocol | None" = None,
+        schema_by_tool: Mapping[str, dict[str, Any]] | None = None,
+    ) -> None:
         self._inner = inner
         self._capture = capture
         self._budgets = budgets
+        self._gateway = gateway
+        self._schema_by_tool = dict(schema_by_tool or {})
 
     @property
     def model_name(self) -> str:
@@ -792,7 +872,61 @@ class _CapturingModel(Model):
                     CanonicalEventType.ASSISTANT_OUTPUT,
                     {"text": text, "agent_name": None},
                 )
+        self._reserve_tool_calls(parts)
         return response
+
+    def _reserve_tool_calls(self, parts: Sequence[Any]) -> None:
+        """Deterministically plan this response's tool calls before dispatch.
+
+        Unlike the OpenAI adapter, PydanticAI dispatches a model response's
+        tool calls concurrently *by default* -- there is no serialized
+        baseline to opt out of. This runs synchronously, before returning
+        control to PydanticAI's own tool-execution graph, so which
+        reservation each call gets can never depend on how that graph
+        happens to schedule the resulting tasks.
+        """
+
+        gateway = self._gateway
+        if gateway is None or not hasattr(gateway, "plan_batch"):
+            return
+        calls = [part for part in parts if isinstance(part, ToolCallPart)]
+        if not calls:
+            return
+        plannable: list[tuple[str, str, dict[str, Any]]] = []
+        for call in calls:
+            call_id = str(getattr(call, "tool_call_id", "") or "")
+            schema = self._schema_by_tool.get(call.tool_name)
+            if not call_id or schema is None:
+                continue
+            raw_args = call.args
+            if isinstance(raw_args, str):
+                try:
+                    parsed_args: Any = json.loads(raw_args)
+                except (TypeError, ValueError):
+                    continue
+            elif raw_args is None:
+                parsed_args = {}
+            else:
+                parsed_args = raw_args
+            if not isinstance(parsed_args, dict):
+                continue
+            if _schema_validation_errors(schema, parsed_args):
+                # PydanticAI will not dispatch this call to our tool function
+                # at all -- it answers with its own retry prompt instead.
+                # Planning a reservation for it would consume a fixture/budget
+                # slot for a call that never commits.
+                continue
+            plannable.append((call_id, call.tool_name, parsed_args))
+        if not plannable:
+            return
+        reservations = cast(Any, gateway).plan_batch(
+            [(name, arguments) for _, name, arguments in plannable]
+        )
+        self._capture.pending_reservations = {
+            call_id: reservation
+            for (call_id, _, _), reservation in zip(plannable, reservations)
+        }
+        self._capture.pending_barrier = LaunchBarrier(len(reservations))
 
 
 def _usage_metrics(entries: Sequence[Any]) -> UsageMetrics:
@@ -1396,8 +1530,16 @@ class PydanticAIAdapter(FrameworkAdapter):
 
         budgets = getattr(prepared.gateway, "budgets", None)
         agent = prepared.runtime_agent
+        schema_by_tool = {
+            item.value.name: dict(item.value.input_schema)
+            for item in prepared.spec.tools.items
+        }
         agent.model = _CapturingModel(
-            prepared.metadata.get("inner_model"), capture, budgets
+            prepared.metadata.get("inner_model"),
+            capture,
+            budgets,
+            gateway=prepared.gateway,
+            schema_by_tool=schema_by_tool,
         )
 
         termination = RunTermination.COMPLETED
