@@ -88,6 +88,34 @@ A callable `validation_context` is different and stays unsupported: unlike
 same way an output validator is. A non-callable `validation_context` value is
 inert data and is accepted.
 
+### Multi-agent patterns ("agent delegation" and "hand-off")
+
+PydanticAI's own documentation names two multi-agent patterns, and neither is
+a framework-level primitive the way the OpenAI Agents SDK's `Handoff` object
+is — there is no distinct type, and no attribute on `Agent` that names either
+pattern:
+
+- **Agent delegation** is an ordinary `@agent.tool` function whose *body*
+  happens to call `await other_agent.run(...)`. The sub-agent reference lives
+  entirely inside source code AgentCheck already replaces and never executes
+  — the delegating tool is indistinguishable from any other tool, and it is
+  already safely unreachable under the same guarantee every other tool has.
+  Nothing about it needs adapter support beyond what already exists, and
+  building a "delegation topology" abstraction for it would be inventing
+  structure the framework itself does not expose.
+- **Programmatic hand-off** is application code — a loop, a
+  human-in-the-loop prompt, arbitrary branching — calling one `Agent.run()`
+  after another. There is no single `Agent` object representing the hand-off
+  at all: it is two or more independent targets, each inspected and prepared
+  on its own. AgentCheck evaluates one exported `pydantic_ai.Agent` per
+  target; representing a hand-off would mean representing the *calling
+  code's* control flow, which is exactly the kind of target-owned
+  orchestration this adapter does not execute.
+
+`describe_topology` returns `None` for every PydanticAI target for this
+reason, not because topology detection is unfinished: there is no framework
+structure to describe.
+
 ## Configure and run
 
 The target directory must exist before `agentcheck init`; the command writes
