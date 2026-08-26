@@ -6,11 +6,31 @@ next.
 
 ## What gets generated
 
-A tool the target declares **state-changing** gets a fault family; a read-only
-tool gets none, because retrying a lookup is ordinary behaviour and calling it a
-defect would invent a failure. The classification comes from the declaration,
-never from the tool's name — a real target had `find_user_id_by_email` read as
-state-changing from its name alone, which is exactly why names are not trusted.
+A tool marked **state-changing** gets a fault family; a read-only tool gets
+none, because retrying a lookup is ordinary behaviour and calling it a defect
+would invent a failure.
+
+Where that marking comes from depends on the adapter, and the difference is not
+cosmetic. A custom Python agent *declares* it —
+`ToolDefinition(state_changing=True, destructive=True)` — and the declaration is
+authoritative. The OpenAI Agents SDK and PydanticAI carry no such field, so
+AgentCheck infers the marking from the tool's **name**, records it as inferred
+with a confidence, and refuses to treat it as authoritative anywhere a hard
+verdict depends on it.
+
+Name inference is wrong in both directions, and neither is hypothetical:
+
+- `find_user_id_by_email` in tau-bench is a pure lookup, and is read as
+  state-changing because of the tokens in its name.
+- `bash`, `execute_python`, `write` and `execute_command` are read as read-only,
+  because nothing in those names says otherwise. They receive no fault family
+  at all.
+
+A tool no rule matches stays unclassified and non-state-changing. That is the
+safe direction for *inventing* failures and the unsafe direction for *missing*
+them, so the gap is reported rather than hidden: behavioral coverage marks those
+tools `unknown` with the reason `risk_metadata_not_authoritative`. An absent
+fault family is not evidence that a tool is safe to retry.
 
 | Case | The tool… | The question asked |
 | --- | --- | --- |

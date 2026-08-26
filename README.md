@@ -92,10 +92,23 @@ failures are never presented as behavioral failures or passes.
 
 Generated suites also include fault cases — the tool errors, times out, or
 returns an empty, unparseable, truncated or stale payload — so the suite asks
-what the agent does when a tool does not cooperate, not only when it does. What
-gets generated follows the tool's *declared* risk, never its name. See
-[fault testing](docs/fault-testing.md) and, to declare your own contracts,
-[behavioral policies](docs/behavioral-policies.md).
+what the agent does when a tool does not cooperate, not only when it does.
+
+Which tools get them depends on how the tool's side-effect risk was
+established, and that differs by adapter. A [custom Python
+agent](docs/custom-agents.md) states it: `ToolDefinition(state_changing=True,
+destructive=True)` is a declaration, and AgentCheck treats it as authoritative.
+For the OpenAI Agents SDK and PydanticAI, neither framework carries that
+information, so AgentCheck *infers* it from the tool's name, reports it as
+inferred with a confidence, and never calls it authoritative.
+
+Inference is conservative in one direction only: a tool it cannot classify is
+left non-state-changing and receives **no fault family**. Verb-shaped names such
+as `delete_account` or `cancel_order` are read correctly; neutral ones such as
+`bash`, `write` or `execute_command` are not, and are silently left untested.
+Coverage reports the gap as `risk_metadata_not_authoritative` rather than
+implying the tool was checked. See [fault testing](docs/fault-testing.md) and,
+to declare your own contracts, [behavioral policies](docs/behavioral-policies.md).
 
 ## What AgentCheck catches
 
