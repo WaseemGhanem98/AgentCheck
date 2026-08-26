@@ -1448,7 +1448,16 @@ class PydanticAIAdapter(FrameworkAdapter):
     def describe_topology(
         self, target: Any, *, source: str | None = None
     ) -> dict[str, Any] | None:
-        """No multi-agent topology is supported yet, so none is described."""
+        """No PydanticAI multi-agent topology exists to describe.
+
+        Unlike the OpenAI Agents SDK's `Handoff`, PydanticAI has no
+        framework-level object for "agent delegation" (an ordinary tool whose
+        body calls another `Agent.run()`, already safely unreachable like any
+        other tool body) or "programmatic hand-off" (application code
+        sequencing independent `Agent.run()` calls, which is not a single
+        `Agent` object at all). There is genuinely no structure here for
+        AgentCheck to introspect -- see docs/pydantic-ai.md.
+        """
 
         del target, source
         return None
