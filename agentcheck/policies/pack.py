@@ -29,6 +29,7 @@ class PolicyRuleKind(str, Enum):
     NO_RETRY_AFTER_AMBIGUOUS_TIMEOUT = "no_retry_after_ambiguous_timeout"
     NO_FABRICATED_SUCCESS = "no_fabricated_success"
     NO_DUPLICATE_SIDE_EFFECT = "no_duplicate_side_effect"
+    NO_SAME_STAGE_DUPLICATE_ACTION = "no_same_stage_duplicate_action"
     ORDERING = "ordering"
     MAX_RETRIES = "max_retries"
     MAX_TOOL_CALLS = "max_tool_calls"

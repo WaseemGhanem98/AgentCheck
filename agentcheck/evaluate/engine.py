@@ -669,6 +669,50 @@ def _evaluate_trajectory(builder: _EvaluationBuilder, constraint: TrajectoryCons
             seen.add(key)
         passed = not duplicates
         data["duplicate_attempt_ids"] = duplicates
+    elif constraint.kind == TrajectoryConstraintKind.NO_SAME_STAGE_DUPLICATE_ACTION:
+        analysis = analyze_launches(builder.run)
+        seen_by_key: dict[str, list[str]] = {}
+        stage_violations: list[str] = []
+        stage_unproven: list[str] = []
+        for attempt in attempts:
+            key = _invocation_identity(attempt.tool_name, attempt.arguments)
+            earlier_ids = seen_by_key.setdefault(key, [])
+            relations = [
+                analysis.same_launch_group(earlier_id, attempt.attempt_id)
+                for earlier_id in earlier_ids
+            ]
+            if any(relation is True for relation in relations):
+                stage_violations.append(attempt.attempt_id)
+            elif any(relation is None for relation in relations):
+                # A duplicate call exists, but this run does not record enough
+                # to rule out that some earlier one shared its stage. Silence
+                # here is not proof either way.
+                stage_unproven.append(attempt.attempt_id)
+            # Every relation False: every earlier duplicate was a genuine
+            # cross-turn retry, which is NO_DUPLICATE_SIDE_EFFECT's concern.
+            earlier_ids.append(attempt.attempt_id)
+        data["violating_attempt_ids"] = stage_violations
+        data["unproven_attempt_ids"] = stage_unproven
+        if stage_violations:
+            passed = False
+        elif stage_unproven:
+            builder.add_assertion(
+                constraint.criterion_id,
+                constraint.description,
+                Verdict.INCONCLUSIVE,
+                constraint.oracle_ids,
+                (
+                    f"{tool_name!r} was called more than once with identical "
+                    "arguments, but this run does not record which model "
+                    "decision launched each call, so whether any two were "
+                    "decided in the same stage is unknown."
+                ),
+                required=constraint.required,
+                missing=("observed model response for the repeated call",),
+            )
+            return
+        else:
+            passed = True
     elif constraint.kind == TrajectoryConstraintKind.NO_RETRY_AFTER_AMBIGUOUS_TIMEOUT:
         attempt_by_id = {
             attempt.attempt_id: attempt for attempt in builder.run.tool_attempts

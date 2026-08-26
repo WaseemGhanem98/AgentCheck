@@ -98,6 +98,64 @@ class ToolDefinition(ContractModel):
     replaceable: bool = False
 
 
+class RiskAuthority(str, Enum):
+    """Where a tool's ``state_changing``/``destructive`` value came from.
+
+    Ordered by precedence, strongest first. A resolver must never let a lower
+    tier silently overrule a higher one, and ``UNKNOWN`` must stay reachable:
+    the absence of evidence is not itself evidence of safety.
+    """
+
+    DEVELOPER_DECLARED = "developer_declared"
+    FRAMEWORK_AUTHORITATIVE = "framework_authoritative"
+    INFERRED = "inferred"
+    UNKNOWN = "unknown"
+
+
+class RiskAxis(ContractModel):
+    """One resolved risk property (``state_changing`` or ``destructive``).
+
+    ``value`` is always a concrete bool because every existing consumer
+    (coverage, fault generation, the derived policy pack) already treats an
+    absent classification as ``False``. ``authority`` is what keeps that
+    ``False`` from being misread as "confirmed safe" when it really means
+    "unknown, resolved conservatively" -- callers that care must read
+    ``authority`` rather than trust the bool alone.
+    """
+
+    value: bool
+    authority: RiskAuthority
+    confidence: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def protect_authority_from_weak_evidence(self) -> "RiskAxis":
+        if self.authority is RiskAuthority.UNKNOWN and self.value:
+            raise ValueError("an unknown axis cannot assert a true value")
+        if self.authority is RiskAuthority.INFERRED and self.confidence >= 1.0:
+            # A heuristic is never entitled to full certainty; only a developer
+            # declaration or authoritative framework metadata may claim one.
+            raise ValueError("inferred risk cannot claim full confidence")
+        return self
+
+
+class ToolRiskAssertion(ContractModel):
+    """Full provenance for one tool's resolved risk, independent per axis.
+
+    Kept out of :class:`ToolDefinition` deliberately: ``ToolDefinition`` is
+    hashed whole into ``spec_id`` (see ``agentcheck/adapters/base.py``), so
+    adding provenance fields there would re-identify every existing target the
+    moment this shipped, whether or not its resolved risk actually changed.
+    This model lives in a sibling spec section instead, so identity only moves
+    when the resolved ``state_changing``/``destructive`` bool itself changes.
+    """
+
+    tool_name: str = Field(min_length=1, max_length=200)
+    state_changing: RiskAxis
+    destructive: RiskAxis
+    evidence: tuple[SpecEvidence, ...] = Field(min_length=1)
+    conflicts: tuple[str, ...] = ()
+
+
 class ToolPolicy(ContractModel):
     policy_id: str = Field(min_length=1, max_length=200)
     tool_name: str = Field(min_length=1, max_length=200)
@@ -155,6 +213,23 @@ class CapabilitiesSpec(ContractModel):
 
 class ToolsSpec(ContractModel):
     items: tuple[AgentProperty[ToolDefinition], ...] = ()
+
+
+class ToolRiskSpec(ContractModel):
+    """Per-tool risk provenance, one entry per tool named in ``tools``.
+
+    A sibling of :class:`ToolsSpec` rather than a field on ``ToolDefinition``
+    -- see :class:`ToolRiskAssertion` for why identity requires that split.
+    """
+
+    items: tuple[ToolRiskAssertion, ...] = ()
+
+    @model_validator(mode="after")
+    def unique_tool_names(self) -> "ToolRiskSpec":
+        names = [item.tool_name for item in self.items]
+        if len(names) != len(set(names)):
+            raise ValueError("tool risk assertions must name each tool at most once")
+        return self
 
 
 class ToolPoliciesSpec(ContractModel):
@@ -221,6 +296,7 @@ class AgentSpec(ContractModel):
     instructions: InstructionsSpec
     capabilities: CapabilitiesSpec = Field(default_factory=CapabilitiesSpec)
     tools: ToolsSpec = Field(default_factory=ToolsSpec)
+    tool_risk: ToolRiskSpec = Field(default_factory=ToolRiskSpec)
     tool_policies: ToolPoliciesSpec = Field(default_factory=ToolPoliciesSpec)
     guardrails: GuardrailsSpec = Field(default_factory=GuardrailsSpec)
     workflows: WorkflowsSpec = Field(default_factory=WorkflowsSpec)

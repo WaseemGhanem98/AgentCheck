@@ -57,6 +57,7 @@ Point `agentcheck.json` at a pack file:
 | `ordering` | one tool was observed before another | `tool_name`, `required_before` |
 | `confirmation_before_tool` | explicit consent preceded the call | `tool_name` |
 | `no_duplicate_side_effect` | the action ran at most once | `tool_name` |
+| `no_same_stage_duplicate_action` | the action was not decided twice in one model response | `tool_name` |
 | `no_retry_after_ambiguous_timeout` | a timed-out action was not reissued | `tool_name` |
 | `max_retries` | a call was not retried past a ceiling | `tool_name`, `max_retries` |
 | `no_fabricated_success` | no definite claim on unusable evidence | — |
@@ -99,6 +100,25 @@ than as a verdict.
 
 To make the safe path executable, declare the earlier tool as a prerequisite so
 the agent can actually reach it. See the prerequisites section of the quickstart.
+
+## Same-stage duplicates vs later retries
+
+A model response can carry several tool calls, decided together before any of
+them has a result. `no_duplicate_side_effect` flags any repeated identical
+call anywhere in a run, whether the repeat happened in that same decision
+stage or three turns later after an observed error. `no_same_stage_duplicate_action`
+is the narrower, structurally unambiguous case: two identical calls the model
+decided together cannot be an informed retry, because neither result existed
+when the other was chosen. A later-turn repeat could, in principle, be
+responding to new information (an observed error, a changed instruction), so it
+stays `no_duplicate_side_effect`'s concern rather than this one's.
+
+This distinction is derived, not asserted: which model response launched a
+tool call is read from `TOOL_ATTEMPT`/`TOOL_RESULT` event linkage, and is
+unavailable on any adapter that does not observe the target's own model
+responses (a custom agent owns its own model calls). There the rule reports
+`INCONCLUSIVE` rather than guessing either way. See
+`agentcheck/evaluate/launch.py`.
 
 ## Identity
 

@@ -12,6 +12,48 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## Unreleased
+
+Developer-declared tool risk, an explicit authority precedence for it, and a
+launch-group-aware concurrency oracle. Not yet released as a distribution
+version; recorded here for the next release to pick up.
+
+**Developer-declared risk:** `agentcheck.json` gains an optional `tool_risk`
+block declaring `state_changing`/`destructive` per tool, independently per
+axis. Precedence is fixed: developer declaration > genuine framework metadata
+(no current adapter exposes this) > inference > unknown. A declared axis
+always wins; an undeclared axis falls through to inference on its own,
+without upgrading its authority. Every tool's resolved risk now carries its
+provenance in `spec.tool_risk` (`ToolRiskAssertion`/`RiskAxis`), separate from
+`ToolDefinition` so provenance does not move `spec_id` for a target that
+declares nothing.
+
+Fixed two related defects found while wiring this in: the PydanticAI and
+custom-agent `prepare()` methods rebuilt each tool's runtime risk from
+`spec.capabilities` — a second, independent name-based classifier — instead
+of trusting the already-resolved `ToolDefinition`. This silently discarded a
+developer's declaration at the exact point the runtime invoker enforces risk,
+for any tool whose name carried no lexical signal of its own. Both now read
+the resolved value directly.
+
+**Concurrency:** a new `no_same_stage_duplicate_action` rule/oracle,
+building on the existing launch-group/observed-before analysis, flags the
+same tool called twice with identical arguments in one model response — a
+structurally unambiguous case, unlike a cross-turn retry, which
+`no_duplicate_side_effect` already covers and this rule does not fire on.
+`max_function_tool_concurrency` stays `1` and `ToolGateway` stays
+synchronous: see `docs/concurrent-tool-decisions.md` for why real concurrent
+execution is not yet safe to enable, and what is and is not tested today.
+
+**Suite identity:** `GENERATOR_COMPATIBILITY_VERSION` stays `1`. Default
+generation for a target that declares no risk and uses no new policy pack is
+byte-identical to before. `derive_tool_risk_pack`'s own version
+(`DERIVED_TOOL_RISK_VERSION`) moves `1` -> `2`: opt-in and additive, so a
+target that does not list `derived_tool_risk_v1`, or declares no destructive
+tool, is unaffected; one that does now asserts something new for its
+destructive tools, so a freshly generated suite earns its own identity. A
+suite already frozen under version `1` keeps validating as recorded.
+
 ## 0.2.1
 
 Six defects found by running 0.2.0 against public third-party agents. Five were

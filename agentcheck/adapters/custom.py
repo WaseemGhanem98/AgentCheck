@@ -49,7 +49,10 @@ import inspect as _inspect
 import json
 from collections.abc import Mapping, Sequence
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from agentcheck.config import ToolRiskDeclaration
 
 from jsonschema.exceptions import SchemaError  # type: ignore[import-untyped]
 
@@ -63,11 +66,15 @@ from agentcheck.domain.agent_spec import (
     InstructionsSpec,
     InterfaceSpec,
     ObservabilitySpec,
+    RiskAuthority,
+    RiskAxis,
     RuntimeSpec,
     SourceKind,
     SourceReference,
     SpecEvidence,
     ToolDefinition,
+    ToolRiskAssertion,
+    ToolRiskSpec,
     ToolsSpec,
 )
 from agentcheck.domain.base import canonical_hash, utc_now
@@ -85,6 +92,7 @@ from agentcheck.domain.run import (
 )
 from agentcheck.domain.scenario import ConversationRole, ConversationTurn
 from agentcheck.inspect.capabilities import extract_capabilities
+from agentcheck.inspect.risk_authority import declared_risk_for
 from agentcheck.runner.tool_gateway import ToolCallBlockedError
 from agentcheck.schema_safety import UnsafeSchemaReference, offline_validator
 
@@ -225,8 +233,12 @@ def _declared_tools(target: Any) -> tuple[ToolDefinition, ...]:
     return tuple(item for item in raw if isinstance(item, ToolDefinition))
 
 
-def _spec_tool(definition: ToolDefinition) -> ToolDefinition:
-    """The inspected form of one declared tool.
+def _spec_tool(
+    definition: ToolDefinition,
+    *,
+    declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
+) -> tuple[ToolDefinition, ToolRiskAssertion]:
+    """The inspected form of one declared tool, plus its risk provenance.
 
     ``replaceable`` is set here rather than asked of the author. The flag means
     "AgentCheck can substitute this tool safely", which for the other adapters
@@ -234,9 +246,70 @@ def _spec_tool(definition: ToolDefinition) -> ToolDefinition:
     custom declaration is already inert data -- there is no callable to replace
     -- so the claim holds structurally, and requiring the author to assert it
     would be a tax on a field whose meaning is internal to the adapters.
+
+    A custom agent's ``state_changing``/``destructive`` are already a first-hand
+    developer declaration written directly on the ``ToolDefinition`` -- there is
+    no name-based inference for this adapter, unlike the SDK adapters, because
+    there is nothing to infer from that the author did not already state
+    outright. ``declared_tool_risk`` (the ``tool_risk`` block in
+    ``agentcheck.json``) is an *additional*, independent developer surface that
+    can override either axis without editing the agent's source; a conflict
+    between the two is recorded rather than silently resolved one way.
     """
 
-    return definition.model_copy(update={"replaceable": True})
+    override = declared_risk_for(definition.name, declared_tool_risk)
+    state_changing = definition.state_changing
+    destructive = definition.destructive
+    conflicts: list[str] = []
+    if override is not None:
+        if override.state_changing is not None:
+            if override.state_changing != definition.state_changing:
+                conflicts.append(
+                    f"{definition.name}.state_changing: agentcheck.json declares "
+                    f"{override.state_changing}, overriding the agent's own "
+                    f"declaration of {definition.state_changing}"
+                )
+            state_changing = override.state_changing
+        if override.destructive is not None:
+            if override.destructive != definition.destructive:
+                conflicts.append(
+                    f"{definition.name}.destructive: agentcheck.json declares "
+                    f"{override.destructive}, overriding the agent's own "
+                    f"declaration of {definition.destructive}"
+                )
+            destructive = override.destructive
+
+    locator = f"tool:{definition.name}"
+    assertion = ToolRiskAssertion(
+        tool_name=definition.name,
+        state_changing=RiskAxis(
+            value=state_changing, authority=RiskAuthority.DEVELOPER_DECLARED, confidence=1.0
+        ),
+        destructive=RiskAxis(
+            value=destructive, authority=RiskAuthority.DEVELOPER_DECLARED, confidence=1.0
+        ),
+        evidence=(
+            SpecEvidence(
+                evidence_id=f"tool-risk:{definition.name}:declared",
+                summary=(
+                    f"state_changing={state_changing}, destructive={destructive}, "
+                    "declared directly on the agent's own ToolDefinition"
+                    + (" and overridden by agentcheck.json" if override is not None else "")
+                    + "."
+                ),
+                locator=locator,
+            ),
+        ),
+        conflicts=tuple(conflicts),
+    )
+    updated = definition.model_copy(
+        update={
+            "replaceable": True,
+            "state_changing": state_changing,
+            "destructive": destructive,
+        }
+    )
+    return updated, assertion
 
 
 def _turn_method(target: Any, name: str) -> Any:
@@ -698,6 +771,7 @@ class CustomAgentAdapter(FrameworkAdapter):
         *,
         source: str | None = None,
         identity_locator: str | None = None,
+        declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
     ) -> AgentSpec:
         """Describe the declared surface. Nothing on the target is executed.
 
@@ -709,7 +783,12 @@ class CustomAgentAdapter(FrameworkAdapter):
         """
 
         locator = source or f"{type(target).__module__}.{type(target).__name__}"
-        definitions = [_spec_tool(item) for item in _declared_tools(target)]
+        tool_risk_assertions: dict[str, ToolRiskAssertion] = {}
+        definitions: list[ToolDefinition] = []
+        for item in _declared_tools(target):
+            definition, assertion = _spec_tool(item, declared_tool_risk=declared_tool_risk)
+            definitions.append(definition)
+            tool_risk_assertions[definition.name] = assertion
         raw_instructions = getattr(target, "instructions", None)
         instructions = (
             raw_instructions
@@ -869,6 +948,11 @@ class CustomAgentAdapter(FrameworkAdapter):
             ),
             capabilities=CapabilitiesSpec(items=tuple(capabilities)),
             tools=ToolsSpec(items=tuple(tool_properties)),
+            tool_risk=ToolRiskSpec(
+                items=tuple(
+                    tool_risk_assertions[name] for name in sorted(tool_risk_assertions)
+                )
+            ),
             runtime=RuntimeSpec(
                 max_model_turns=_unknown_property(
                     None,
@@ -1136,6 +1220,7 @@ class CustomAgentAdapter(FrameworkAdapter):
         source: str | None = None,
         identity_locator: str | None = None,
         controlled_model: bool = False,
+        declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
     ) -> PreparedTarget:
         """Bind the declared agent to a gateway, or refuse before it runs.
 
@@ -1174,19 +1259,26 @@ class CustomAgentAdapter(FrameworkAdapter):
         report = self.preflight(target)
         report.require_supported()
         spec = self.inspect(
-            target, source=source, identity_locator=identity_locator
+            target,
+            source=source,
+            identity_locator=identity_locator,
+            declared_tool_risk=declared_tool_risk,
         )
 
         tool_risks: dict[str, tuple[bool, bool]] = {}
         for item in spec.tools.items:
             definition = item.value
-            risk = (definition.state_changing, definition.destructive)
-            for capability in spec.capabilities.items:
-                value = capability.value
-                if value.capability_id == f"tool:{definition.name}":
-                    risk = (value.state_changing, value.destructive)
-                    break
-            tool_risks[definition.name] = risk
+            # `definition.state_changing`/`.destructive` are already the fully
+            # resolved developer declaration -- from the agent's own
+            # ToolDefinition, optionally overridden by `agentcheck.json`. Using
+            # `spec.capabilities` here instead (as this code once did) reruns
+            # name-based inference, which silently discarded the author's
+            # explicit declaration whenever the tool's name carried no lexical
+            # signal of its own.
+            tool_risks[definition.name] = (
+                definition.state_changing,
+                definition.destructive,
+            )
 
         self._require_matching_surface(gateway, tuple(sorted(tool_risks)))
 

@@ -179,6 +179,15 @@ class TrajectoryConstraintKind(str, Enum):
     MAX_HANDOFFS = "max_handoffs"
     NO_HANDOFF_LOOP = "no_handoff_loop"
     HANDOFF_BEFORE_TOOL = "handoff_before_tool"
+    # A stronger, structurally unambiguous relative of NO_DUPLICATE_SIDE_EFFECT:
+    # that rule flags any repeated identical call anywhere in the run, but does
+    # not distinguish a same-stage duplicate (two calls the model decided
+    # together, before either result existed) from a later-turn retry (which
+    # could, in principle, be an intentional idempotent repeat once new
+    # information arrived). A same-stage duplicate cannot be that -- there was
+    # no new information between the two decisions -- so it earns its own kind
+    # rather than being inferred from the general one.
+    NO_SAME_STAGE_DUPLICATE_ACTION = "no_same_stage_duplicate_action"
     OTHER = "other"
 
 

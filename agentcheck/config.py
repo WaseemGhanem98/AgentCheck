@@ -34,6 +34,33 @@ class ParsedEntrypoint(NamedTuple):
     factory: bool
 
 
+_MAX_TOOL_RISK_DECLARATIONS = 200
+
+
+class ToolRiskDeclaration(BaseModel):
+    """A developer's explicit statement of one tool's side-effect risk.
+
+    Both fields are optional independently so a developer can declare only the
+    dimension they actually know: a target with many read-only tools and one
+    reviewed destructive one need not assert ``state_changing`` for every name.
+    At least one must be set, or the entry asserts nothing and should not
+    exist.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    state_changing: bool | None = None
+    destructive: bool | None = None
+
+    @model_validator(mode="after")
+    def require_a_declared_dimension(self) -> "ToolRiskDeclaration":
+        if self.state_changing is None and self.destructive is None:
+            raise ValueError(
+                "a tool_risk entry must declare state_changing and/or destructive"
+            )
+        return self
+
+
 class LlmRealizationConfig(BaseModel):
     """Optional nested block. Disabled unless enabled is true and CLI consents."""
 
@@ -91,6 +118,10 @@ class AgentCheckConfig(BaseModel):
     max_cases: int | None = Field(default=None, ge=1, le=256)
     llm_realization: LlmRealizationConfig | None = None
     python_executable: str | None = None
+    # Developer-declared tool risk, authoritative over whatever AgentCheck
+    # would otherwise infer from a tool's name and description. Keyed by the
+    # exact declared tool name; see `ToolRiskDeclaration`.
+    tool_risk: dict[str, ToolRiskDeclaration] | None = None
 
     @model_validator(mode="after")
     def reject_unsupported_controlled_model(self) -> "AgentCheckConfig":
@@ -147,6 +178,23 @@ class AgentCheckConfig(BaseModel):
         if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
             raise ValueError("artifacts_directory must be a safe relative path")
         return path.as_posix()
+
+    @field_validator("tool_risk")
+    @classmethod
+    def validate_tool_risk(
+        cls, value: dict[str, "ToolRiskDeclaration"] | None
+    ) -> dict[str, "ToolRiskDeclaration"] | None:
+        if value is None:
+            return None
+        if len(value) > _MAX_TOOL_RISK_DECLARATIONS:
+            raise ValueError(
+                f"tool_risk declares {len(value)} tools, over the "
+                f"{_MAX_TOOL_RISK_DECLARATIONS} limit"
+            )
+        for name in value:
+            if not name.strip():
+                raise ValueError("tool_risk keys must be non-empty tool names")
+        return value
 
     @field_validator("suite_path")
     @classmethod

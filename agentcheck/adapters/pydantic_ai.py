@@ -21,7 +21,7 @@ import json
 from importlib import metadata as importlib_metadata
 from collections.abc import Mapping, Sequence
 from enum import Enum
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from agentcheck.domain.agent_spec import (
     AgentProperty,
@@ -37,6 +37,8 @@ from agentcheck.domain.agent_spec import (
     SourceReference,
     SpecEvidence,
     ToolDefinition,
+    ToolRiskAssertion,
+    ToolRiskSpec,
     ToolsSpec,
 )
 from agentcheck.domain.base import canonical_hash, utc_now
@@ -53,7 +55,11 @@ from agentcheck.domain.run import (
     UsageMetrics,
 )
 from agentcheck.domain.scenario import ConversationRole, ConversationTurn
-from agentcheck.inspect.capabilities import classify_tool, extract_capabilities
+from agentcheck.inspect.capabilities import extract_capabilities
+from agentcheck.inspect.risk_authority import declared_risk_for, resolve_tool_risk
+
+if TYPE_CHECKING:
+    from agentcheck.config import ToolRiskDeclaration
 
 from .base import (
     portable_identity,
@@ -236,24 +242,33 @@ def _output_schema(target: Any) -> dict[str, Any] | None:
     return None
 
 
-def _tool_definition(name: str, tool: Any) -> ToolDefinition:
+def _tool_definition(
+    name: str,
+    tool: Any,
+    *,
+    declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
+) -> tuple[ToolDefinition, ToolRiskAssertion]:
     tool_def = getattr(tool, "tool_def", None)
     schema = getattr(tool_def, "parameters_json_schema", None)
     description = getattr(tool_def, "description", None)
     resolved = description if isinstance(description, str) and description else None
-    # The same shared classifier the OpenAI Agents adapter uses. These two flags
-    # were hardcoded False here, and everything downstream reads them: fault
-    # generation skips a tool that is not state-changing, and the
+    # The same shared resolver the OpenAI Agents adapter uses. These two flags
+    # were once hardcoded False here, and everything downstream reads them:
+    # fault generation skips a tool that is not state-changing, and the
     # ambiguous-timeout case is destructive-only. A PydanticAI target therefore
     # received no fault family for any tool, while `inspect` printed a summary
     # of zero state-changing actions directly above a capability listing that
     # described the same tool as state-changing -- capability extraction
     # classifies independently, so only the adapter disagreed.
     #
-    # Still inferred, still not authoritative, and reported as such. This buys
-    # parity with the other adapter, not a stronger claim than it makes.
-    _, state_changing, destructive = classify_tool(name, resolved)
-    return ToolDefinition(
+    # Inference alone is still never authoritative, and reported as such. A
+    # developer declaration in ``declared_tool_risk`` is the only thing here
+    # entitled to override it; see `agentcheck.inspect.risk_authority`.
+    declared = declared_risk_for(name, declared_tool_risk)
+    state_changing, destructive, assertion = resolve_tool_risk(
+        name, resolved, declared=declared
+    )
+    definition = ToolDefinition(
         name=name,
         description=resolved,
         input_schema=dict(schema) if isinstance(schema, Mapping) else {},
@@ -262,6 +277,7 @@ def _tool_definition(name: str, tool: Any) -> ToolDefinition:
         destructive=destructive,
         replaceable=True,
     )
+    return definition, assertion
 
 
 def _json_value(value: Any) -> Any:
@@ -873,6 +889,7 @@ class PydanticAIAdapter(FrameworkAdapter):
         *,
         source: str | None = None,
         identity_locator: str | None = None,
+        declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
     ) -> AgentSpec:
         _require_sdk()
         locator = source or f"{type(target).__module__}.{type(target).__name__}"
@@ -884,10 +901,14 @@ class PydanticAIAdapter(FrameworkAdapter):
 
         definitions: list[ToolDefinition] = []
         tool_properties: list[AgentProperty[Any]] = []
+        tool_risk_assertions: dict[str, ToolRiskAssertion] = {}
         fingerprint_tools: list[Any] = []
         for index, (name, tool) in enumerate(sorted(_agent_tools(target).items())):
-            definition = _tool_definition(name, tool)
+            definition, risk_assertion = _tool_definition(
+                name, tool, declared_tool_risk=declared_tool_risk
+            )
             definitions.append(definition)
+            tool_risk_assertions[name] = risk_assertion
             fingerprint_tools.append(definition.model_dump(mode="json"))
             tool_properties.append(
                 _property(
@@ -1024,6 +1045,11 @@ class PydanticAIAdapter(FrameworkAdapter):
             ),
             capabilities=CapabilitiesSpec(items=tuple(capabilities)),
             tools=ToolsSpec(items=tuple(tool_properties)),
+            tool_risk=ToolRiskSpec(
+                items=tuple(
+                    tool_risk_assertions[name] for name in sorted(tool_risk_assertions)
+                )
+            ),
             runtime=RuntimeSpec(
                 max_model_turns=_unknown_property(
                     None,
@@ -1253,12 +1279,16 @@ class PydanticAIAdapter(FrameworkAdapter):
         source: str | None = None,
         identity_locator: str | None = None,
         controlled_model: bool = False,
+        declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
     ) -> PreparedTarget:
         _require_sdk()
         report = self.preflight(target)
         report.require_supported()
         spec = self.inspect(
-            target, source=source, identity_locator=identity_locator
+            target,
+            source=source,
+            identity_locator=identity_locator,
+            declared_tool_risk=declared_tool_risk,
         )
 
         capture_holder: dict[str, _Capture | None] = {"capture": None}
@@ -1266,12 +1296,14 @@ class PydanticAIAdapter(FrameworkAdapter):
         safe_tools = []
         for item in spec.tools.items:
             definition = item.value
+            # `definition.state_changing`/`.destructive` are already the fully
+            # resolved values -- developer declaration, then framework
+            # metadata, then inference, then unknown -- so they are used
+            # directly. Re-deriving them from `spec.capabilities` here (as this
+            # code once did) reruns pure name/description inference and would
+            # silently discard a developer declaration or authoritative
+            # framework value the moment one existed.
             risk = (definition.state_changing, definition.destructive)
-            for capability in spec.capabilities.items:
-                value = capability.value
-                if value.capability_id == f"tool:{definition.name}":
-                    risk = (value.state_changing, value.destructive)
-                    break
             tool_risks[definition.name] = risk
             safe_tools.append(
                 _make_safe_tool(
