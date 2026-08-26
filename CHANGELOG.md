@@ -12,11 +12,24 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
-## Unreleased
+## 0.3.0 (2026-08-26)
 
-Developer-declared tool risk, an explicit authority precedence for it, and a
-launch-group-aware concurrency oracle. Not yet released as a distribution
-version; recorded here for the next release to pick up.
+Three accumulated milestones since 0.2.1: developer-declared tool risk with
+an explicit authority precedence, deterministic concurrent simulated tool
+execution for both supported frameworks, and safe PydanticAI dependency
+injection. A pre-release audit added a cross-milestone integration test
+(declared risk + concurrent dispatch + dependency injection composed on one
+target) and a further real-world validation pass found no release-blocking
+defects, including a real third-party dependency client (an async video-API
+SDK) and two previously-unexercised OpenAI Agents patterns (dynamic tool
+approval callbacks, handoff input filters) that were confirmed already
+correctly refused rather than silently allowed.
+
+**Suite identity:** `GENERATOR_COMPATIBILITY_VERSION` stays `1` across this
+entire release. No default-generation behavior changed for a target that
+declares no risk and uses no new opt-in policy pack; where a target
+deliberately opts into new behavior (`derived_tool_risk_v1` against a
+destructive tool), only that target's own suite identity moves, as intended.
 
 **PydanticAI dependency injection / `RunContext[Deps]`:** previously rejected
 outright at preflight. Real-world validation found this blocked most
