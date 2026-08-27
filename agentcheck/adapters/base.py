@@ -78,6 +78,45 @@ def format_support_issues(
     return "\n".join(lines)
 
 
+def require_known_tool_risk_names(
+    spec: "AgentSpec", declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None"
+) -> None:
+    """Refuse a run whose ``tool_risk`` (``agentcheck.json``) names an unknown tool.
+
+    ``declared_risk_for`` looks an override up by name; a key that matches no
+    declared tool is never read by anything downstream, which makes a
+    misspelled tool name in ``tool_risk`` a silently ignored override rather
+    than the risk correction the developer asked for. Called from every
+    adapter's ``prepare``, once inspection has the full declared tool set, so
+    the mismatch is refused before any scenario runs rather than passed
+    through as if it had been applied.
+    """
+
+    from agentcheck.inspect.risk_authority import unmatched_tool_risk_names
+
+    unmatched = unmatched_tool_risk_names(
+        tuple(item.value.name for item in spec.tools.items), declared_tool_risk
+    )
+    if not unmatched:
+        return
+    raise UnsupportedTargetError(
+        [
+            SupportIssue(
+                code="unknown_tool_risk_declaration",
+                message=(
+                    f"agentcheck.json declares tool_risk for {name!r}, which is "
+                    "not one of this agent's declared tools. This override "
+                    "would never be applied, so AgentCheck refuses the run "
+                    "rather than silently ignoring it: fix the tool name, or "
+                    "remove the entry."
+                ),
+                location=f"config.tool_risk.{name}",
+            )
+            for name in unmatched
+        ]
+    )
+
+
 def encode_preflight_report(report: PreflightReport) -> dict[str, Any]:
     """JSON-safe inspect diagnostic payload; not part of AgentSpec."""
 

@@ -13,12 +13,14 @@ from __future__ import annotations
 import pytest
 from agents import Agent, function_tool
 
-from agentcheck.adapters import OpenAIAgentsAdapter
+from agentcheck.adapters import CustomAgentAdapter, OpenAIAgentsAdapter, UnsupportedTargetError
 from agentcheck.config import ToolRiskDeclaration
-from agentcheck.domain import RiskAuthority
+from agentcheck.domain import RiskAuthority, ToolDefinition
 from agentcheck.generate.boundaries import build_outcome_variant_cases
-from agentcheck.inspect.risk_authority import resolve_tool_risk
+from agentcheck.inspect.risk_authority import resolve_tool_risk, unmatched_tool_risk_names
 from agentcheck.policies.derived import derive_tool_risk_pack
+
+from tests.agentcheck.test_openai_adapter import RecordingGateway
 
 
 SEED = 1729
@@ -242,3 +244,90 @@ def test_derived_pack_wording_is_unchanged_for_a_purely_inferred_target():
         "delete_nothing must not repeat an identical call: it is inferred "
         "state-changing from its declared name and description."
     )
+
+
+# --- an unmatched tool_risk key is a silent no-op if nothing refuses it -----
+#
+# ``declared_risk_for`` looks an override up by name. A key that names no
+# declared tool is never read by anything: a developer who misspells a tool
+# name in agentcheck.json's tool_risk block gets no error and an override that
+# silently never applies. These prove every adapter's prepare() refuses that,
+# rather than only the resolver-level helper being correct in isolation.
+
+
+def test_unmatched_tool_risk_names_reports_every_name_that_matches_nothing():
+    assert unmatched_tool_risk_names(
+        ("cancel_order", "get_order"),
+        {
+            "cancel_order": ToolRiskDeclaration(destructive=True),
+            "cancle_order": ToolRiskDeclaration(destructive=False),
+            "delete_user": ToolRiskDeclaration(destructive=True),
+        },
+    ) == ("cancle_order", "delete_user")
+
+
+def test_unmatched_tool_risk_names_is_empty_when_every_key_matches():
+    assert (
+        unmatched_tool_risk_names(
+            ("cancel_order",), {"cancel_order": ToolRiskDeclaration(destructive=True)}
+        )
+        == ()
+    )
+
+
+def test_unmatched_tool_risk_names_tolerates_no_declaration_at_all():
+    assert unmatched_tool_risk_names(("cancel_order",), None) == ()
+
+
+def test_a_misspelled_tool_risk_name_refuses_prepare_for_the_openai_adapter() -> None:
+    agent = Agent(
+        name="T",
+        instructions="Assist.",
+        tools=[delete_nothing],
+        model="gpt-4.1-mini",
+    )
+    adapter = OpenAIAgentsAdapter()
+
+    with pytest.raises(UnsupportedTargetError) as excinfo:
+        adapter.prepare(
+            agent,
+            RecordingGateway(),
+            declared_tool_risk={"delet_nothing": ToolRiskDeclaration(destructive=True)},
+        )
+    assert "unknown_tool_risk_declaration" in {issue.code for issue in excinfo.value.issues}
+
+
+CANCEL_ORDER = ToolDefinition(
+    name="cancel_order",
+    description="Cancel one order.",
+    input_schema={
+        "type": "object",
+        "properties": {"order_id": {"type": "string"}},
+        "required": ["order_id"],
+        "additionalProperties": False,
+    },
+    state_changing=True,
+    destructive=True,
+)
+
+
+class _MinimalCustomAgent:
+    tools = (CANCEL_ORDER,)
+
+    def start(self, message, tools):  # pragma: no cover - never reached
+        raise AssertionError("prepare() must refuse before any turn runs")
+
+    def resume(self, state, message, tools):  # pragma: no cover - never reached
+        raise AssertionError("prepare() must refuse before any turn runs")
+
+
+def test_a_misspelled_tool_risk_name_refuses_prepare_for_a_custom_agent() -> None:
+    adapter = CustomAgentAdapter()
+
+    with pytest.raises(UnsupportedTargetError) as excinfo:
+        adapter.prepare(
+            _MinimalCustomAgent(),
+            RecordingGateway(),
+            declared_tool_risk={"cancle_order": ToolRiskDeclaration(destructive=False)},
+        )
+    assert "unknown_tool_risk_declaration" in {issue.code for issue in excinfo.value.issues}

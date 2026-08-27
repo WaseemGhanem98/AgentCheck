@@ -22,7 +22,7 @@ still resolves deterministically.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Mapping
+from typing import TYPE_CHECKING, Mapping, Sequence
 
 from agentcheck.domain import RiskAuthority, RiskAxis, SpecEvidence, ToolRiskAssertion
 
@@ -189,7 +189,29 @@ def declared_risk_for(
     return tool_risk.get(name)
 
 
+def unmatched_tool_risk_names(
+    declared_tool_names: "Sequence[str]",
+    tool_risk: "Mapping[str, ToolRiskDeclaration] | None",
+) -> tuple[str, ...]:
+    """Names in ``tool_risk`` (``agentcheck.json``) that name no declared tool.
+
+    A ``tool_risk`` entry is looked up by name only (see ``declared_risk_for``):
+    a key that matches no declared tool is never read by anything, so a
+    developer who misspells a tool name there gets a silently ignored
+    override rather than the risk correction they asked for. Every adapter's
+    ``prepare`` calls this after inspection has the full declared tool set,
+    and refuses the run rather than proceeding on a declaration that was
+    never actually applied.
+    """
+
+    if not tool_risk:
+        return ()
+    known = set(declared_tool_names)
+    return tuple(name for name in sorted(tool_risk) if name not in known)
+
+
 __all__ = [
     "declared_risk_for",
     "resolve_tool_risk",
+    "unmatched_tool_risk_names",
 ]

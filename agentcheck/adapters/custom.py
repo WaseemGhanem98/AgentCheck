@@ -98,6 +98,7 @@ from agentcheck.schema_safety import UnsafeSchemaReference, offline_validator
 
 from .base import (
     portable_identity,
+    require_known_tool_risk_names,
     AdapterRuntimeError,
     EventSinkProtocol,
     FrameworkAdapter,
@@ -1324,6 +1325,7 @@ class CustomAgentAdapter(FrameworkAdapter):
             identity_locator=identity_locator,
             declared_tool_risk=declared_tool_risk,
         )
+        require_known_tool_risk_names(spec, declared_tool_risk)
 
         tool_risks: dict[str, tuple[bool, bool]] = {}
         for item in spec.tools.items:
