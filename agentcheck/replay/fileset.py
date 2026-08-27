@@ -54,6 +54,7 @@ _EXCLUDED_DIR_NAMES = frozenset(
         ".venv",
         "venv",
         ".tox",
+        ".claude",
         ".mypy_cache",
         ".ruff_cache",
         ".pytest_cache",
@@ -248,8 +249,13 @@ def _is_virtualenv_root(directory: Path) -> bool:
 def _excluded_by_location(relative: str, *, root: Path) -> bool:
     """Exclude build, cache, and tool-reserved directories from source inventory.
 
-    .github/, .vscode/, .idea/, .vs/ are reserved for GitHub and IDE tooling and
-    are not read by target agent runtime code, so they are excluded outright.
+    .github/, .vscode/, .idea/, .vs/, .claude/ are reserved for GitHub, IDE, and
+    coding-assistant tooling (Claude Code's own project settings and subagent
+    definitions, for itself, not for the target) and are not read by target
+    agent runtime code, so they are excluded outright. Found via a real,
+    independently-maintained target repo whose committed `.claude/settings.json`
+    otherwise hit the path-safety refusal below exactly like an unrecognized
+    virtualenv name would.
 
     ``.agents/`` is deliberately NOT excluded here: it is the OpenAI Agents SDK's
     default sandbox skills_path (see ``agents.sandbox.capabilities.skills.Skills``),

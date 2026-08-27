@@ -400,6 +400,8 @@ def test_absent_schema_yields_no_parameters_without_failing() -> None:
         ("cancel_subscription", ActionKind.MODIFY, True, True),
         ("update_email", ActionKind.MODIFY, True, False),
         ("create_ticket", ActionKind.CREATE, True, False),
+        ("write", ActionKind.CREATE, True, False),
+        ("save_draft", ActionKind.CREATE, True, False),
         ("send_receipt", ActionKind.SEND, True, False),
         ("schedule_visit", ActionKind.SCHEDULE, True, False),
         ("lookup_account", ActionKind.LOOKUP, False, False),
@@ -417,6 +419,31 @@ def test_each_action_kind_and_risk_classification_is_reachable(
     assert capability.state_changing is state_changing
     assert capability.destructive is destructive
     assert classify_tool(name) == (action_kind, state_changing, destructive)
+
+
+def test_a_bare_write_tool_is_not_silently_classified_read_only() -> None:
+    """Reproduces a real independent target's file-write tool: named exactly
+    "write", with a docstring stating it overwrites existing files. Before
+    "write" was added to the name vocabulary, this fell through every rule to
+    OTHER/read-only/confidence 0.3 -- the single lowest-confidence,
+    least-scrutinized classification -- for a tool that unconditionally
+    mutates local files."""
+
+    capability = extract_capabilities(
+        [
+            _tool(
+                "write",
+                description=(
+                    "Writes a file to the local filesystem. This tool will "
+                    "overwrite the existing file if there is one at the "
+                    "provided path."
+                ),
+            )
+        ]
+    )[0]
+
+    assert capability.capability.state_changing is True
+    assert capability.capability.action_kind is ActionKind.CREATE
 
 
 def test_classification_matches_the_phase_one_name_vocabulary() -> None:
