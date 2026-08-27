@@ -296,7 +296,21 @@ def _model_identity(target: Any) -> tuple[str | None, str | None]:
 
 
 def _output_schema(target: Any) -> dict[str, Any] | None:
-    """The declared structured-output schema, when the agent declares one."""
+    """The declared structured-output schema, when the agent declares one.
+
+    ``output_type`` is not limited to ``BaseModel`` subclasses -- PydanticAI
+    accepts any type ``pydantic.TypeAdapter`` can build a schema for (``bool``,
+    ``int``, a dataclass, a ``TypedDict``, ``Literal[...]``, ...), and real
+    targets use this heavily (the SDK's own roulette_wheel example declares
+    ``output_type=bool``). Deriving a schema via ``TypeAdapter`` is the same
+    category of safe, static type introspection ``BaseModel.model_json_schema``
+    already is here -- no target code runs, only its type's schema is built --
+    so this is not a new execution-safety surface, just a wider one. Getting
+    this wrong previously had a real, silent failure mode: an unschematized
+    output_type made ``ControlledPydanticModel`` reply with plain neutral text
+    that could not satisfy the target's own output validation, which read as
+    the model endlessly failing to comply rather than as a missing schema.
+    """
 
     output_type = getattr(target, "output_type", None)
     if output_type is None or output_type is str:
@@ -308,7 +322,13 @@ def _output_schema(target: Any) -> dict[str, Any] | None:
         except Exception:  # pragma: no cover - defensive
             return None
         return cast("dict[str, Any]", built) if isinstance(built, dict) else None
-    return None
+    try:
+        from pydantic import TypeAdapter
+
+        built = TypeAdapter(output_type).json_schema()
+    except Exception:
+        return None
+    return built if isinstance(built, dict) else None
 
 
 def _tool_definition(
@@ -1557,6 +1577,16 @@ class PydanticAIAdapter(FrameworkAdapter):
 
         # A NEW Agent built from the inspected surface. The source agent is not
         # mutated and its tool functions are never referenced.
+        #
+        # `retries` matters even offline: it is pydantic_ai's own output/tool
+        # validation retry budget, read back from the private
+        # `_max_output_retries` the target's own `retries=` constructor
+        # argument set (a plain int, safe to read like the other private
+        # attributes this adapter already relies on). Rebuilding without it
+        # silently substitutes pydantic_ai's default of 1, which can exhaust
+        # before a target explicitly tolerant of more retries (roulette_wheel's
+        # own `retries=3`, for one) ever would -- a false `provider_error`
+        # this adapter caused, not one the real target's own configuration did.
         runtime_agent = Agent(
             model,
             instructions="\n\n".join(static) if static else None,
@@ -1564,6 +1594,7 @@ class PydanticAIAdapter(FrameworkAdapter):
             tools=safe_tools,
             name=getattr(target, "name", None),
             model_settings=getattr(target, "model_settings", None),
+            retries=getattr(target, "_max_output_retries", None),
         )
         return PreparedTarget(
             framework=FRAMEWORK_NAME,

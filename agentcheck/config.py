@@ -5,7 +5,7 @@ import os
 import re
 import sys
 from pathlib import Path
-from typing import Any, Literal, NamedTuple
+from typing import Any, Literal, NamedTuple, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -90,6 +90,16 @@ class AgentCheckConfig(BaseModel):
     schema_version: Literal["agentcheck.config.v1"] = "agentcheck.config.v1"
     adapter: Literal["openai_agents", "pydantic_ai", "custom"] = "openai_agents"
     entrypoint: str = DEFAULT_ENTRYPOINT
+    # A forward-compatible identifier for which bundled reference suite's
+    # scenario templates and behavioral policies apply -- the same kind of
+    # thing `schema_version` is, not a general suite selector a developer is
+    # expected to change. Exactly one ships today, so it is a Literal of one
+    # rather than a free string: a typo here is refused rather than silently
+    # accepted as a name that happens to match nothing. `suite_path` is the
+    # actual, real configuration surface for evaluating different scenario
+    # content (a custom frozen suite file); this field does not select among
+    # multiple built-in ones because there is currently only the one to
+    # select among.
     suite: Literal["account_support_v1"] = "account_support_v1"
     seed: int = Field(default=1729, ge=0, le=2**63 - 1)
     max_concurrency: int = Field(default=2, ge=1, le=16)
@@ -196,6 +206,30 @@ class AgentCheckConfig(BaseModel):
                 raise ValueError("tool_risk keys must be non-empty tool names")
         return value
 
+    @field_validator("suite", mode="before")
+    @classmethod
+    def validate_suite(cls, value: Any) -> Any:
+        """A clear, project-voiced refusal in place of a bare Literal mismatch.
+
+        Runs before the ``Literal`` type check itself, so a correct value is
+        untouched and a wrong one gets an explanation of what this field
+        actually is -- see the field's own comment -- rather than pydantic's
+        generic "Input should be 'account_support_v1'".
+        """
+
+        if isinstance(value, str) and value not in _KNOWN_SUITES:
+            raise ValueError(
+                f"suite {value!r} is not one of the suites AgentCheck ships: "
+                f"{', '.join(sorted(_KNOWN_SUITES))}. This field identifies "
+                "which bundled reference suite's scenario templates and "
+                "behavioral policies apply -- like schema_version, not a "
+                "general suite selector -- so a name that does not match one "
+                "of them is refused rather than silently accepted. To "
+                "evaluate different scenario content, set suite_path to your "
+                "own frozen suite file instead."
+            )
+        return value
+
     @field_validator("suite_path")
     @classmethod
     def validate_suite_path(cls, value: str | None) -> str | None:
@@ -256,6 +290,12 @@ class AgentCheckConfig(BaseModel):
         if any(part in {"", ".", ".."} for part in path.parts):
             raise ValueError("python_executable relative path must be a safe relative path")
         return path.as_posix()
+
+
+# Derived from the field's own Literal annotation, the same way
+# initialize.py's SUPPORTED_ADAPTERS is, so the validator's allowed set can
+# never drift from the type it is guarding.
+_KNOWN_SUITES: tuple[str, ...] = get_args(AgentCheckConfig.model_fields["suite"].annotation)
 
 
 def normalize_target(target: str | os.PathLike[str]) -> Path:
