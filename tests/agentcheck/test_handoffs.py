@@ -544,7 +544,22 @@ def test_topology_is_described_for_handoff_targets_only() -> None:
         decode_topology({"framework": "openai_agents", "agents": [{"name": "x"}]})
 
 
-def test_single_agent_spec_id_is_byte_stable_after_handoff_support() -> None:
+def test_single_agent_spec_id_is_byte_stable_after_handoff_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pinned against the fingerprinting algorithm, not the installed SDK.
+
+    ``spec_id`` deliberately bakes in ``framework_version`` (see
+    SUPPORTED_SDK_MINOR_RANGE's own docstring), so this pin is only
+    meaningful against one fixed version -- 0.20.0, whatever it was computed
+    against -- regardless of which minor within the adapter's verified range
+    (0.20-0.22) actually happens to be installed when the suite runs.
+    """
+
+    import agentcheck.adapters.openai_agents as openai_agents_adapter
+
+    monkeypatch.setattr(openai_agents_adapter, "_sdk_version", lambda: "0.20.0")
+
     @function_tool
     def get_weather(city: str) -> str:
         """Return weather."""

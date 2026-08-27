@@ -72,6 +72,13 @@ all = [
 dev = [
     "agentcheck-ai[all]",
     "build>=1.3,<2",
+    # test_network_containment.py exercises network denial against every HTTP
+    # client library it can import, including httpx -- previously only
+    # present transitively through one exact openai-agents version, so
+    # widening that range (see SUPPORTED_SDK_MINOR_RANGE) could silently
+    # drop it depending on which minor a resolver picks. A test's own
+    # dependency must not be implicit.
+    "httpx>=0.27,<1",
     # Ruff's and mypy's default rule sets move between minors, so an unpinned
     # range means a lint failure lands on whoever installs next rather than on
     # the change that caused it. These are the versions the tree is actually

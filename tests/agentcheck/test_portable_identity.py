@@ -308,8 +308,22 @@ def test_identity_without_a_portable_locator_stays_location_bound() -> None:
     assert second.legacy_spec_id is None
 
 
-def test_the_pinned_location_bound_identity_is_reproduced_exactly() -> None:
-    """The legacy identity must be the old contract's bytes, not an approximation."""
+def test_the_pinned_location_bound_identity_is_reproduced_exactly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The legacy identity must be the old contract's bytes, not an approximation.
+
+    Pinned against the fingerprinting algorithm, not the installed SDK: the
+    identity deliberately bakes in ``framework_version`` (see
+    SUPPORTED_SDK_MINOR_RANGE's own docstring), so this pin is only
+    meaningful against one fixed version -- 0.20.0, whatever it was computed
+    against -- regardless of which minor within the adapter's verified range
+    (0.20-0.22) actually happens to be installed when the suite runs.
+    """
+
+    import agentcheck.adapters.openai_agents as openai_agents_adapter
+
+    monkeypatch.setattr(openai_agents_adapter, "_sdk_version", lambda: "0.20.0")
 
     agents = _agents_sdk()
     agent = _weather_agent(agents)
