@@ -12,6 +12,113 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## 0.4.0 (2026-08-27)
+
+One new capability, four fixes found by hands-on reliability sweeps and real
+third-party target testing, and one audit that confirmed an existing boundary
+rather than adding one.
+
+**Custom agents: async `start()`/`resume()` support.** Custom agents
+previously rejected any coroutine `start()`/`resume()` outright at preflight,
+even one that only needed a real `await` for its own provider client and
+never touched concurrent dispatch. `start()`/`resume()` may now both be
+coroutine functions, given an `AsyncToolRuntime` whose `call()` is awaited
+instead of called directly; the two methods must still agree on shape
+(mixing sync and async is refused as `mismatched_turn_method_concurrency`).
+This does **not** add concurrent tool-call dispatch or same-stage/launch-group
+semantics for custom agents: `AsyncToolRuntime.call` has no internal await of
+its own, so even `asyncio.gather`/`create_task`-dispatched calls still
+execute strictly in scheduling order (verified by running the same
+gather-based scenario 25 times with the order never varying). A custom
+agent's model calls are never observed by AgentCheck, so there is no evidence
+from which to infer that two tool calls were decided together — see
+`docs/concurrent-tool-decisions.md` and `docs/custom-agents.md` for the exact
+boundary.
+
+### Fixed
+
+- **A misspelled `agentcheck.json` `tool_risk` key was a silent no-op.**
+  Nothing cross-checked that every key in a declared `tool_risk` block
+  actually named a real tool, so a typo (`"cancle_order"` instead of
+  `"cancel_order"`) silently fell back to inferred risk with no error and no
+  warning. A misspelled or otherwise unmatched key now refuses the run before
+  any scenario executes (`unknown_tool_risk_declaration`), naming the exact
+  key.
+- **`init --force` silently wiped fields it did not control**, most notably
+  `environment_allowlist` (a security-relevant setting with no CLI flag of
+  its own to restore it), by rebuilding `agentcheck.json` from scratch on
+  every re-run. `--force` now reads the existing file first and merges
+  `adapter`/`entrypoint` on top of it.
+- **PydanticAI controlled-model evaluation exhausted its retry budget for any
+  non-object `output_type`** (`bool`, `int`, ...), from three compounding
+  bugs: schema derivation only handled `BaseModel` output types, the
+  target's own `retries=` setting was never propagated, and the controlled
+  model's reply was built from a schema computed once at construction time
+  rather than the framework's actual per-request negotiated contract
+  (PydanticAI wraps a scalar `output_type` in a single-key object before
+  accepting a reply for it). All three fixed; reproduced against the SDK's
+  own `roulette_wheel.py` example before and after.
+- **`openai-agents` and `pydantic-ai-slim` version pins widened to a verified
+  range** (`openai-agents>=0.20,<0.23`, `pydantic-ai-slim>=2.32,<2.36`) after
+  each pin was found stale against the frameworks' actual current PyPI
+  releases during real-world example testing. Both adapters' full test
+  suites were run against the floor and ceiling of their new ranges in
+  separate scratch virtualenvs with identical private-attribute surfaces
+  confirmed at each end, not just the pin bumped.
+- **A non-standard virtualenv name broke replay-manifest source inventory.**
+  A target-local virtualenv under any name other than the two hardcoded ones
+  (e.g. `.test-venv`) could survive the fixed-name exclusion list and then
+  hit the dot-prefix path-safety refusal as a hard failure. Virtualenvs are
+  now detected by their `pyvenv.cfg` marker instead of a fixed name list; a
+  dot-prefixed directory that is not a genuine virtualenv still fails closed
+  exactly as before.
+- **Wrong-SDK-type targets now get a "did you mean" suggestion** naming the
+  likely correct adapter, which also surfaced and fixed an independent bug:
+  `OpenAIAgentsAdapter.inspect()` raised a bare `TypeError` for a wrong-type
+  target, discarding the detail before any suggestion could reach a user.
+- **Committed `.claude/` project-tooling metadata entered the source
+  inventory**, triggering the safe-relative-path refusal on targets that
+  ship it; it now joins the established tooling-exclusion list, while
+  ambiguous `.hooks/` remains fail-closed by design.
+- **Persistence-shaped tool names (`write`, `save`, `store`, `persist`,
+  `append`) fell into the weakest read-only/unknown risk-inference bucket.**
+  They now infer state-changing (not automatically destructive); generic
+  dispatch names such as `bash` are deliberately left unknown by name alone,
+  since a bare dispatch name does not itself reveal an effect. **Breaking for
+  any target with a matching, undeclared tool name:** the resolved
+  `state_changing` boolean is hashed into `spec_id` (`ToolDefinition` is
+  hashed whole), so a target whose tools include one of these names with no
+  explicit `tool_risk` declaration gets a new `spec_id`, and any frozen suite
+  generated before this fix is rejected as stale until regenerated — the same
+  category of break as 0.2.1's risk-marker fix. A target that declares
+  `tool_risk` explicitly for that tool, or has no matching tool name at all,
+  is unaffected.
+- **Documentation drift**: `README.md` and `docs/fault-testing.md` still
+  described persistence-shaped names as read-only after the fix above;
+  corrected to match the actual inference rules.
+
+### Audited, no defect found
+
+- **PydanticAI multi-agent delegation**: confirmed no `handoff`/`delegate`/
+  `as_tool` method exists anywhere in the pinned SDK's `Agent` surface
+  (unlike the OpenAI Agents SDK's distinct `Handoff` type). This is a
+  documentation and audit clarification only — it does not add multi-agent
+  support to the PydanticAI adapter, which remains out of scope.
+
+**Suite identity:** `GENERATOR_COMPATIBILITY_VERSION` stays `1`;
+`agentcheck/domain/` and `agentcheck/generate/` are unchanged since 0.3.0, so
+no scenario or suite fingerprint moves as a direct result of this release.
+**One fix does move `spec_id`, narrowly:** the persistence-verb risk-inference
+fix above changes the resolved `state_changing` value — and therefore
+`ToolDefinition`, which is hashed whole into `spec_id` — for any target with
+an undeclared tool named `write`/`save`/`store`/`persist`/`append` (or a
+compound name containing one of those tokens). Such a target's existing
+frozen suite is correctly rejected as stale until regenerated; every other
+target, and every other fix in this release, leaves `inspect()`/`spec_id`
+unaffected — each corrects run-time behavior (preflight refusal wording,
+controlled-model reply construction, source inventory) rather than spec
+derivation.
+
 ## 0.3.0 (2026-08-26)
 
 Three accumulated milestones since 0.2.1: developer-declared tool risk with
