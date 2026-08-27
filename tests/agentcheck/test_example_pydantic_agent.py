@@ -46,7 +46,7 @@ def test_example_contract_fixtures_and_docs_are_one_onboarding_path() -> None:
     example_docs = (EXAMPLE / "README.md").read_text(encoding="utf-8")
     readme = README.read_text(encoding="utf-8")
     for text in (docs, example_docs):
-        assert "pydantic-ai-slim >=2.32,<2.33" in text
+        assert "pydantic-ai-slim >=2.32,<2.36" in text
         assert "agentcheck inspect" in text
         assert "agentcheck generate" in text
         assert "agentcheck test" in text
@@ -135,7 +135,7 @@ def test_example_cli_flow_exercises_a_simulated_tool_without_provider_or_handler
 def test_pydantic_guide_explains_controlled_model_limits_and_fail_closed_setup() -> None:
     docs = " ".join(PYDANTIC_DOC.read_text(encoding="utf-8").split())
 
-    assert "pydantic-ai-slim >=2.32,<2.33" in docs
+    assert "pydantic-ai-slim >=2.32,<2.36" in docs
     assert "unsupported_sdk_version" in docs
     assert "ControlledPydanticModel" in docs
     assert "never chooses a tool" in docs

@@ -48,14 +48,19 @@ dependencies = [
 [project.optional-dependencies]
 # Each adapter reads framework-private attributes to build an AgentSpec, so an
 # unverified version could produce a wrong spec rather than an obvious error.
-# Both gates are pinned to a single verified minor for that reason. They are
-# separate extras so evaluating one framework never installs the other.
+# Both gates are pinned to a verified minor range for that reason -- widening
+# either needs a direct check against the new minor, not just a bump here.
+# They are separate extras so evaluating one framework never installs the
+# other.
 openai-agents = [
     "openai-agents>=0.20,<0.21",
     "websockets>=15,<16",
 ]
 pydantic-ai = [
-    "pydantic-ai-slim>=2.32,<2.33",
+    # 2.32 through 2.35 verified: identical private-attribute surface and full
+    # pydantic_ai adapter test suite passing on every minor in range. See
+    # SUPPORTED_SDK_MINOR_RANGE in agentcheck/adapters/pydantic_ai.py.
+    "pydantic-ai-slim>=2.32,<2.36",
 ]
 all = [
     "agentcheck-ai[openai-agents]",

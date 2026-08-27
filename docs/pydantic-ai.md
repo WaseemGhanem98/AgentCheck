@@ -14,12 +14,16 @@ Install the verified adapter extra from PyPI:
 python -m pip install "agentcheck-ai[pydantic-ai]"
 ```
 
-The extra installs `pydantic-ai-slim >=2.32,<2.33`. AgentCheck deliberately
-supports only PydanticAI 2.32.x because inspection reads framework-private
-attributes. A missing extra produces `framework_unavailable`; another minor
-version produces `unsupported_sdk_version` with the expected and detected
-versions. AgentCheck fails preflight instead of guessing at an unverified
-object shape.
+The extra installs `pydantic-ai-slim >=2.32,<2.36`. AgentCheck deliberately
+supports only PydanticAI 2.32.x through 2.35.x because inspection reads
+framework-private attributes with no stability guarantee across versions --
+each minor in that range was checked directly (the private-attribute surface
+this adapter reads, the framework-installed default-capability set, and the
+full adapter test suite) and found identical to 2.32 for everything this
+adapter touches. A missing extra produces `framework_unavailable`; a version
+outside the verified range produces `unsupported_sdk_version` with the
+expected range and the detected version. AgentCheck fails preflight instead
+of guessing at an unverified object shape.
 
 The distribution is `agentcheck-ai`, the Python import is `agentcheck`, and the
 command is `agentcheck`. Do not install the unrelated PyPI distribution named
@@ -63,6 +67,33 @@ The adapter requires:
 
 Those unsupported surfaces are executable target behavior that cannot be
 reconstructed safely. Preflight names each one and refuses the run.
+
+### Dynamic instructions
+
+`agent.instructions` and `@agent.system_prompt` accept a plain string or a
+callable that takes a `RunContext` and computes the text at run time -- the
+official PydanticAI examples use the callable form heavily (a bank-support
+agent embedding the caller's name and balance is a common shape). AgentCheck
+refuses a target whose instructions are computed this way
+(`dynamic_instructions`), and this is deliberately not just an
+execution-safety refusal that a future version could lift: even if calling
+the function were safe, AgentCheck has no way to know what text a
+`RunContext`-dependent function would have produced without a real run, and a
+reconstructed agent missing that text can make different tool-selection
+decisions than the real one -- silently producing a result that looks like it
+describes the real target but does not. AgentCheck would rather refuse than
+generate that kind of misleading evidence.
+
+To evaluate a target like this, either:
+
+- replace the dynamic instructions with a static string covering the parts
+  that do not depend on `RunContext` (drop the per-caller interpolation for
+  the copy exported to AgentCheck), or
+- move the dynamic content behind an explicit tool call the agent must make
+  (`get_customer_context`, for example) instead of injecting it into the
+  system prompt outside the agent's own decision loop -- AgentCheck can
+  simulate that tool call like any other declared tool, with the same
+  fixture-backed, fail-closed guarantee everything else in this adapter has.
 
 ### Dependency injection / `RunContext[Deps]`
 

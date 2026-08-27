@@ -224,6 +224,59 @@ def test_preflight_report_round_trips_and_rejects_unknown_fields() -> None:
         decode_preflight_report({**payload, "extra": True})
 
 
+def test_wrong_framework_target_names_the_likely_correct_adapter(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A target evaluated with the wrong --adapter gets an actionable hint.
+
+    Pure name-based duck-typing (module + class name of the already-imported
+    object) -- no cross-adapter import, so this works whichever adapter's
+    extra happens to be installed alongside the other in the dev environment.
+    """
+
+    root = tmp_path / "wrong_adapter"
+    root.mkdir()
+    (root / "agent.py").write_text(
+        "from agents import Agent\n\n"
+        'agent = Agent(name="Support", instructions="Help.", model="gpt-4.1-mini")\n',
+        encoding="utf-8",
+    )
+    write_initial_config(root, adapter="pydantic_ai")
+
+    assert main(["inspect", str(root)]) == 0
+    output = capsys.readouterr().out
+    assert "unsupported_agent_type" in output
+    assert 'set "adapter": \'openai_agents\' in agentcheck.json instead' in output
+
+
+def test_wrong_framework_target_names_the_likely_correct_adapter_the_other_way(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The openai_agents adapter refuses a wrong-type target outright.
+
+    Unlike pydantic_ai's tolerant, best-effort ``inspect()`` (which still
+    produces a spec and defers the whole "is this supported" decision to
+    preflight), openai_agents' ``inspect()`` refuses immediately -- so the CLI
+    command exits non-zero here rather than 0. What changed is only that the
+    refusal now carries the same actionable message preflight() would give,
+    instead of a bare, generic ``TypeError``.
+    """
+
+    root = tmp_path / "wrong_adapter_reverse"
+    root.mkdir()
+    (root / "agent.py").write_text(
+        "from pydantic_ai import Agent\n\n"
+        'agent = Agent("test", instructions="Help.", name="Support")\n',
+        encoding="utf-8",
+    )
+    write_initial_config(root, adapter="openai_agents")
+
+    assert main(["inspect", str(root)]) == 2
+    error = capsys.readouterr().err
+    assert "unsupported_agent_type" in error
+    assert 'set "adapter": \'pydantic_ai\' in agentcheck.json instead' in error
+
+
 def test_inspect_lists_dynamic_instructions_and_keeps_exit_zero(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

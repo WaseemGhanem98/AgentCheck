@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     from agentcheck.config import ToolRiskDeclaration
 
 from .base import (
+    guess_other_adapter,
     portable_identity,
     require_known_tool_risk_names,
     AdapterDependencyError,
@@ -80,15 +81,23 @@ from .base import (
 
 FRAMEWORK_NAME = "pydantic_ai"
 
-# Exact-equality like the OpenAI adapter's 0.20.x pin, and for the same reason:
-# instructions and validators are read from private attributes, so an unverified
-# version could silently yield a wrong AgentSpec rather than an honest failure.
-SUPPORTED_SDK_MINOR = (2, 32)
+# A verified range, not "2.32 or newer": instructions and validators are read
+# from private attributes with no stability guarantee, so an unverified
+# version could silently yield a wrong AgentSpec rather than an honest
+# failure. 2.33, 2.34 and 2.35 were checked directly against this adapter --
+# dir(Agent), every private attribute this module reads (_instructions,
+# _output_validators, _event_stream_handler, _root_capability,
+# _system_prompt_functions, _system_prompts, _validation_context), the
+# installed default-capability set, and the full pydantic_ai test suite --
+# and found identical to 2.32 for everything this adapter touches. Widening
+# the ceiling again needs the same check, not just a version-string bump.
+SUPPORTED_SDK_MINOR_RANGE = ((2, 32), (2, 35))
 
 # Capabilities the framework installs on every agent. Anything beyond these is
 # target-supplied middleware that wraps node execution, so it is rejected
-# rather than silently dropped when the sanitized agent is rebuilt. Pinned to
-# one minor precisely so this list cannot drift underneath the check.
+# rather than silently dropped when the sanitized agent is rebuilt. Checked
+# directly, not assumed, across the whole SUPPORTED_SDK_MINOR_RANGE: identical
+# on every minor verified so far.
 _DEFAULT_CAPABILITIES = frozenset({"ToolSearch", "PendingMessageDrainCapability"})
 
 _SDK_IMPORT_ERROR: Exception | None = None
@@ -127,8 +136,9 @@ def _supported_sdk_version(version: str | None) -> bool:
     if version is None:
         return False
     numeric = version.split("+", 1)[0].split("-", 1)[0].split(".")
+    floor, ceiling = SUPPORTED_SDK_MINOR_RANGE
     try:
-        return tuple(int(part) for part in numeric[:2]) == SUPPORTED_SDK_MINOR
+        return floor <= tuple(int(part) for part in numeric[:2]) <= ceiling
     except ValueError:
         return False
 
@@ -1323,17 +1333,31 @@ class PydanticAIAdapter(FrameworkAdapter):
                 SupportIssue(
                     code="unsupported_sdk_version",
                     message=(
-                        f"Expected pydantic-ai {SUPPORTED_SDK_MINOR[0]}."
-                        f"{SUPPORTED_SDK_MINOR[1]}.x, found {version or 'not installed'}."
+                        f"Expected pydantic-ai {SUPPORTED_SDK_MINOR_RANGE[0][0]}."
+                        f"{SUPPORTED_SDK_MINOR_RANGE[0][1]}.x through "
+                        f"{SUPPORTED_SDK_MINOR_RANGE[1][0]}."
+                        f"{SUPPORTED_SDK_MINOR_RANGE[1][1]}.x, "
+                        f"found {version or 'not installed'}."
                     ),
                     location="python-package:pydantic-ai-slim",
                 )
             )
         if type(target) is not Agent:
+            guess = guess_other_adapter(target)
+            suggestion = (
+                f" The configured entrypoint resolved to {type(target).__module__}."
+                f"{type(target).__name__}, which looks like an {guess!r} target; "
+                f'set "adapter": {guess!r} in agentcheck.json instead.'
+                if guess is not None and guess != FRAMEWORK_NAME
+                else ""
+            )
             issues.append(
                 SupportIssue(
                     code="unsupported_agent_type",
-                    message="This adapter requires an exact pydantic_ai.Agent instance.",
+                    message=(
+                        "This adapter requires an exact pydantic_ai.Agent instance."
+                        + suggestion
+                    ),
                     location="agent",
                 )
             )
@@ -1345,8 +1369,21 @@ class PydanticAIAdapter(FrameworkAdapter):
                 SupportIssue(
                     code="dynamic_instructions",
                     message=(
-                        "Instructions are computed by target code, which AgentCheck "
-                        "will not execute during inspection."
+                        "Instructions are computed by target code (a callable given "
+                        "to agent.instructions or @agent.system_prompt), which "
+                        "AgentCheck will not execute during inspection. This is not "
+                        "only an execution-safety refusal: even if the call were "
+                        "safe, AgentCheck has no way to know what text a "
+                        "RunContext-dependent function would have produced, so "
+                        "proceeding with only the static instructions could silently "
+                        "reconstruct an agent whose behavior diverges from the real "
+                        "target's -- exactly the kind of misleading result this tool "
+                        "exists to avoid. To unblock this target: replace the dynamic "
+                        "instructions with a static string covering the parts that "
+                        "do not depend on RunContext, or move the dynamic content "
+                        "into something the agent must fetch through an explicit "
+                        "tool call, which AgentCheck can then simulate like any "
+                        "other declared tool."
                     ),
                     location=location,
                 )
@@ -1793,4 +1830,4 @@ def _agentcheck_version() -> str:
     return __version__
 
 
-__all__ = ["FRAMEWORK_NAME", "SUPPORTED_SDK_MINOR", "PydanticAIAdapter"]
+__all__ = ["FRAMEWORK_NAME", "SUPPORTED_SDK_MINOR_RANGE", "PydanticAIAdapter"]

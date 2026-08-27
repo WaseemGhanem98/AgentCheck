@@ -73,6 +73,7 @@ from agentcheck.runner.network_guard import denied_destinations
 from agentcheck.runner.tool_gateway import CallReservation
 
 from .base import (
+    guess_other_adapter,
     portable_identity,
     require_known_tool_risk_names,
     AdapterDependencyError,
@@ -83,6 +84,7 @@ from .base import (
     PreparedTarget,
     SupportIssue,
     ToolGatewayProtocol,
+    UnsupportedTargetError,
     missing_extra_message,
 )
 from .openai_handoff_effects import (
@@ -2010,7 +2012,12 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         _require_sdk()
         source = source or "runtime:agent"
         if type(target) is not Agent:
-            raise TypeError("OpenAIAgentsAdapter.inspect expects an exact agents.Agent")
+            # Reuses preflight()'s own issue -- including its "did you mean
+            # the other adapter" guess -- rather than a bare TypeError. A raw
+            # TypeError here used to be pattern-matched into a generic message
+            # by the worker's error mapping, discarding that guess before it
+            # ever reached a user running `agentcheck inspect`.
+            raise UnsupportedTargetError(list(self.preflight(target).issues))
 
         framework_version = _sdk_version()
         provider, model_name, provider_inferred, model_inferred = _model_identity(target)
@@ -2462,10 +2469,20 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
                 )
             )
         if type(target) is not Agent:
+            guess = guess_other_adapter(target)
+            suggestion = (
+                f" The configured entrypoint resolved to {type(target).__module__}."
+                f"{type(target).__name__}, which looks like a {guess!r} target; "
+                f'set "adapter": {guess!r} in agentcheck.json instead.'
+                if guess is not None and guess != FRAMEWORK_NAME
+                else ""
+            )
             issues.append(
                 SupportIssue(
                     code="unsupported_agent_type",
-                    message="Phase 1 requires an exact agents.Agent instance.",
+                    message=(
+                        "Phase 1 requires an exact agents.Agent instance." + suggestion
+                    ),
                     location=type(target).__name__,
                 )
             )

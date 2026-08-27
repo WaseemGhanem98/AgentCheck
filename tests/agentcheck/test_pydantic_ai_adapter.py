@@ -277,8 +277,22 @@ def test_a_static_validation_context_value_is_not_rejected() -> None:
 
 
 def test_an_unsupported_sdk_version_is_named() -> None:
+    """2.32-2.35 verified compatible; see docs/pydantic-ai.md for the evidence.
+
+    The range is a floor and a ceiling, not "2.32 or newer": each new minor
+    still needs the same empirical check (dir(Agent), the private-attribute
+    surface this adapter reads, and the full pydantic_ai test suite) before
+    being added, because inspection reads framework-private attributes with
+    no stability guarantee.
+    """
+
+    assert _supported_sdk_version("2.32.0") is True
     assert _supported_sdk_version("2.32.1") is True
-    assert _supported_sdk_version("2.33.0") is False
+    assert _supported_sdk_version("2.33.0") is True
+    assert _supported_sdk_version("2.34.0") is True
+    assert _supported_sdk_version("2.35.0") is True
+    assert _supported_sdk_version("2.31.9") is False
+    assert _supported_sdk_version("2.36.0") is False
     assert _supported_sdk_version("1.0.0") is False
     assert _supported_sdk_version(None) is False
 
