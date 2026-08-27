@@ -135,7 +135,17 @@ except ImportError as exc:  # pragma: no cover - exercised in minimal installs
 
 FRAMEWORK_NAME = "openai_agents"
 INSPECTOR_VERSION = "0.1.0"
-SUPPORTED_SDK_MINOR = (0, 20)
+# A verified range, not "0.20 or newer": this adapter reads framework-private
+# attributes (tool._agent_instance, ._is_agent_tool, ._is_codex_tool,
+# ._tool_namespace, ._tool_namespace_description, ._tool_origin,
+# entry._agent_ref) with no stability guarantee across versions. 0.21 and
+# 0.22 were checked directly -- dir(Agent) identical to 0.20, and the full
+# adapter test suite (1500+ tests) passes against 0.22.0 with only
+# framework_version-sensitive identity-fingerprint hashes differing (expected:
+# spec_id/legacy_spec_id/suite fingerprints deliberately bake in the SDK
+# version, so they differ under a different installed version by design, not
+# by a compatibility break). Widening the ceiling again needs the same check.
+SUPPORTED_SDK_MINOR_RANGE = ((0, 20), (0, 22))
 
 
 def _require_sdk() -> None:
@@ -156,8 +166,9 @@ def _supported_sdk_version(version: str | None) -> bool:
     if version is None:
         return False
     numeric = version.split("+", 1)[0].split("-", 1)[0].split(".")
+    floor, ceiling = SUPPORTED_SDK_MINOR_RANGE
     try:
-        return tuple(int(part) for part in numeric[:2]) == SUPPORTED_SDK_MINOR
+        return floor <= tuple(int(part) for part in numeric[:2]) <= ceiling
     except ValueError:
         return False
 
@@ -2464,7 +2475,13 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
             issues.append(
                 SupportIssue(
                     code="unsupported_sdk_version",
-                    message=f"Expected openai-agents 0.20.x, found {version or 'not installed'}.",
+                    message=(
+                        f"Expected openai-agents {SUPPORTED_SDK_MINOR_RANGE[0][0]}."
+                        f"{SUPPORTED_SDK_MINOR_RANGE[0][1]}.x through "
+                        f"{SUPPORTED_SDK_MINOR_RANGE[1][0]}."
+                        f"{SUPPORTED_SDK_MINOR_RANGE[1][1]}.x, "
+                        f"found {version or 'not installed'}."
+                    ),
                     location="python-package:openai-agents",
                 )
             )

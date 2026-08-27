@@ -258,7 +258,7 @@ does. Its run reports `Action paths exercised: 1/1`.
 OpenAI Agents SDK follows the same configuration idea: set
 `controlled_model` true to replace provider execution with AgentCheck's neutral
 offline model. Install the separate verified extra
-`agentcheck-ai[openai-agents]` (`openai-agents >=0.20,<0.21`). Custom agents are
+`agentcheck-ai[openai-agents]` (`openai-agents >=0.20,<0.23`). Custom agents are
 different: AgentCheck cannot see or replace model calls owned by custom
 orchestration, so `custom` plus `controlled_model` is explicitly rejected.
 

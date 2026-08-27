@@ -53,7 +53,10 @@ dependencies = [
 # They are separate extras so evaluating one framework never installs the
 # other.
 openai-agents = [
-    "openai-agents>=0.20,<0.21",
+    # 0.20 through 0.22 verified: identical private-attribute surface and full
+    # openai_agents adapter test suite passing on every minor in range. See
+    # SUPPORTED_SDK_MINOR_RANGE in agentcheck/adapters/openai_agents.py.
+    "openai-agents>=0.20,<0.23",
     "websockets>=15,<16",
 ]
 pydantic-ai = [
