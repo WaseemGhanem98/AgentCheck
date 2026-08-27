@@ -568,6 +568,31 @@ def test_vscode_directory_excluded_from_git_tracked_inventory(tmp_path: Path) ->
     )
 
 
+def test_claude_directory_excluded_from_git_tracked_inventory(tmp_path: Path) -> None:
+    """.claude/ is Claude Code's own project settings and subagent definitions
+    (for itself, not for the target), not read by target runtime code -- found
+    against a real independent repo whose committed .claude/settings.json hit
+    the path-safety refusal exactly like an unrecognized virtualenv name would.
+    """
+    target = tmp_path / "repo"
+    target.mkdir()
+    (target / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git_init(target)
+    claude_dir = target / ".claude" / "agents"
+    claude_dir.mkdir(parents=True)
+    (target / ".claude" / "settings.json").write_text("{}\n", encoding="utf-8")
+    (claude_dir / "reviewer.md").write_text("# reviewer\n", encoding="utf-8")
+    _git_track(target, "agent.py", ".claude/settings.json", ".claude/agents/reviewer.md")
+
+    fileset = collect_source_file_set(target)
+    paths = {item.path for item in fileset.files}
+
+    assert "agent.py" in paths
+    assert not any(".claude" in path for path in paths), (
+        f".claude/ should be excluded, but found: {[p for p in paths if '.claude' in p]}"
+    )
+
+
 def test_unsafe_relevant_filename_fails_closed(tmp_path: Path) -> None:
     target = tmp_path / "local"
     target.mkdir()

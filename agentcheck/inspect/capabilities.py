@@ -61,11 +61,31 @@ _COMPOSITION_KEYWORDS = (
 # Reproduces the Phase 1 name-token vocabulary exactly.  Order is significant:
 # the first matching rule wins, so a tool named ``delete_and_update`` stays a
 # deletion.  These are weak lexical hints, never authoritative classifications.
+#
+# "write"/"save"/"store"/"persist"/"append" were added after a real,
+# independently-maintained target's file-write tool -- named exactly "write",
+# its own docstring reading "Writes a file... will overwrite the existing
+# file" -- fell through every rule and landed at OTHER/read-only/confidence
+# 0.3: the single lowest-confidence, least-scrutinized bucket, for a tool that
+# unconditionally overwrites local files. Grouped with create/add/open/register
+# (state-changing, not assumed destructive) rather than delete/remove's
+# destructive bucket: a bare "write" name does not by itself distinguish
+# "create new" from "overwrite existing" the way "delete" is unambiguous, and
+# the project's own convention is to let a developer's explicit
+# `tool_risk` declaration escalate further rather than guess destructive from
+# a name alone.
 _NAME_RULES: tuple[tuple[frozenset[str], ActionKind, bool, bool], ...] = (
     (frozenset({"delete", "remove", "destroy", "erase", "purge"}), ActionKind.DELETE, True, True),
     (frozenset({"cancel", "terminate", "close"}), ActionKind.MODIFY, True, True),
     (frozenset({"update", "modify", "change", "set", "edit"}), ActionKind.MODIFY, True, False),
-    (frozenset({"create", "add", "open", "register"}), ActionKind.CREATE, True, False),
+    (
+        frozenset(
+            {"create", "add", "open", "register", "write", "writes", "save", "saves", "store", "stores", "persist", "append"}
+        ),
+        ActionKind.CREATE,
+        True,
+        False,
+    ),
     (frozenset({"send", "email", "notify", "publish"}), ActionKind.SEND, True, False),
     (frozenset({"schedule", "book", "reserve"}), ActionKind.SCHEDULE, True, False),
     (frozenset({"lookup", "find", "search", "get", "read"}), ActionKind.LOOKUP, False, False),
