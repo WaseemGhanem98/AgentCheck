@@ -46,9 +46,14 @@ Name inference is wrong in both directions, and neither is hypothetical:
 
 - `find_user_id_by_email` in tau-bench is a pure lookup, and is read as
   state-changing because of the tokens in its name.
-- `bash`, `execute_python`, `write` and `execute_command` are read as read-only
-  (`UNKNOWN`, not a confirmed `False`), because nothing in those names says
-  otherwise. They receive no fault family at all unless declared.
+- Persistence names such as `write`, `save_draft`, `store_result`,
+  `persist_state`, and `append_log` are inferred state-changing but not
+  destructive. They receive the state-changing fault family, while coverage
+  remains `UNKNOWN` because inference is not authoritative.
+- Generic dispatch names such as `bash`, `execute_python`, and
+  `execute_command` remain read-only (`UNKNOWN`, not a confirmed `False`)
+  because their names do not reveal their effects. They receive no fault
+  family unless declared.
 
 Declaring one axis does not upgrade the other's authority: declaring only
 `destructive` on a tool leaves `state_changing` exactly as inferred (or
