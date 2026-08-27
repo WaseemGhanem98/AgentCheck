@@ -67,6 +67,7 @@ if TYPE_CHECKING:
 
 from .base import (
     portable_identity,
+    require_known_tool_risk_names,
     AdapterDependencyError,
     EventSinkProtocol,
     FrameworkAdapter,
@@ -1483,6 +1484,7 @@ class PydanticAIAdapter(FrameworkAdapter):
             identity_locator=identity_locator,
             declared_tool_risk=declared_tool_risk,
         )
+        require_known_tool_risk_names(spec, declared_tool_risk)
 
         capture_holder: dict[str, _Capture | None] = {"capture": None}
         tool_risks: dict[str, tuple[bool, bool]] = {}

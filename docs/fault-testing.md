@@ -27,6 +27,10 @@ Where that marking comes from is now explicit, with a fixed precedence:
 
    Each axis (`state_changing`, `destructive`) is independently optional, and a
    declared axis always wins over whatever the adapter would otherwise infer.
+   Every key must name a tool the agent actually declares -- a misspelled name
+   here would otherwise be a silently ignored override, so `prepare` refuses
+   the run instead (`unknown_tool_risk_declaration`), naming the exact key
+   that matched nothing.
 2. **Framework metadata**, when a framework genuinely exposes an authoritative
    side-effect flag. No adapter AgentCheck currently supports does; the tier
    exists in the model so one that does can use it without a new contract.
