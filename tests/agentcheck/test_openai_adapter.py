@@ -437,6 +437,27 @@ def test_unsupported_tool_fails_preflight_before_model_execution() -> None:
     assert model.calls == 0
 
 
+def test_an_unsupported_sdk_version_is_named() -> None:
+    """0.20-0.22 verified compatible; see SUPPORTED_SDK_MINOR_RANGE's docstring.
+
+    The range is a floor and a ceiling, not "0.20 or newer": each new minor
+    still needs the same empirical check (dir(Agent), the private-attribute
+    surface this adapter reads, and the full adapter test suite) before being
+    added, because inspection reads framework-private attributes with no
+    stability guarantee.
+    """
+
+    from agentcheck.adapters.openai_agents import _supported_sdk_version
+
+    assert _supported_sdk_version("0.20.0") is True
+    assert _supported_sdk_version("0.21.0") is True
+    assert _supported_sdk_version("0.22.0") is True
+    assert _supported_sdk_version("0.19.9") is False
+    assert _supported_sdk_version("0.23.0") is False
+    assert _supported_sdk_version("1.0.0") is False
+    assert _supported_sdk_version(None) is False
+
+
 def test_statically_typed_structured_output_passes_preflight_with_derived_schema() -> None:
     class StructuredAnswer(BaseModel):
         answer: str

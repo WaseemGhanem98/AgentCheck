@@ -73,6 +73,7 @@ from agentcheck.runner.network_guard import denied_destinations
 from agentcheck.runner.tool_gateway import CallReservation
 
 from .base import (
+    guess_other_adapter,
     portable_identity,
     require_known_tool_risk_names,
     AdapterDependencyError,
@@ -83,6 +84,7 @@ from .base import (
     PreparedTarget,
     SupportIssue,
     ToolGatewayProtocol,
+    UnsupportedTargetError,
     missing_extra_message,
 )
 from .openai_handoff_effects import (
@@ -133,7 +135,17 @@ except ImportError as exc:  # pragma: no cover - exercised in minimal installs
 
 FRAMEWORK_NAME = "openai_agents"
 INSPECTOR_VERSION = "0.1.0"
-SUPPORTED_SDK_MINOR = (0, 20)
+# A verified range, not "0.20 or newer": this adapter reads framework-private
+# attributes (tool._agent_instance, ._is_agent_tool, ._is_codex_tool,
+# ._tool_namespace, ._tool_namespace_description, ._tool_origin,
+# entry._agent_ref) with no stability guarantee across versions. 0.21 and
+# 0.22 were checked directly -- dir(Agent) identical to 0.20, and the full
+# adapter test suite (1500+ tests) passes against 0.22.0 with only
+# framework_version-sensitive identity-fingerprint hashes differing (expected:
+# spec_id/legacy_spec_id/suite fingerprints deliberately bake in the SDK
+# version, so they differ under a different installed version by design, not
+# by a compatibility break). Widening the ceiling again needs the same check.
+SUPPORTED_SDK_MINOR_RANGE = ((0, 20), (0, 22))
 
 
 def _require_sdk() -> None:
@@ -154,8 +166,9 @@ def _supported_sdk_version(version: str | None) -> bool:
     if version is None:
         return False
     numeric = version.split("+", 1)[0].split("-", 1)[0].split(".")
+    floor, ceiling = SUPPORTED_SDK_MINOR_RANGE
     try:
-        return tuple(int(part) for part in numeric[:2]) == SUPPORTED_SDK_MINOR
+        return floor <= tuple(int(part) for part in numeric[:2]) <= ceiling
     except ValueError:
         return False
 
@@ -2010,7 +2023,12 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         _require_sdk()
         source = source or "runtime:agent"
         if type(target) is not Agent:
-            raise TypeError("OpenAIAgentsAdapter.inspect expects an exact agents.Agent")
+            # Reuses preflight()'s own issue -- including its "did you mean
+            # the other adapter" guess -- rather than a bare TypeError. A raw
+            # TypeError here used to be pattern-matched into a generic message
+            # by the worker's error mapping, discarding that guess before it
+            # ever reached a user running `agentcheck inspect`.
+            raise UnsupportedTargetError(list(self.preflight(target).issues))
 
         framework_version = _sdk_version()
         provider, model_name, provider_inferred, model_inferred = _model_identity(target)
@@ -2457,15 +2475,31 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
             issues.append(
                 SupportIssue(
                     code="unsupported_sdk_version",
-                    message=f"Expected openai-agents 0.20.x, found {version or 'not installed'}.",
+                    message=(
+                        f"Expected openai-agents {SUPPORTED_SDK_MINOR_RANGE[0][0]}."
+                        f"{SUPPORTED_SDK_MINOR_RANGE[0][1]}.x through "
+                        f"{SUPPORTED_SDK_MINOR_RANGE[1][0]}."
+                        f"{SUPPORTED_SDK_MINOR_RANGE[1][1]}.x, "
+                        f"found {version or 'not installed'}."
+                    ),
                     location="python-package:openai-agents",
                 )
             )
         if type(target) is not Agent:
+            guess = guess_other_adapter(target)
+            suggestion = (
+                f" The configured entrypoint resolved to {type(target).__module__}."
+                f"{type(target).__name__}, which looks like a {guess!r} target; "
+                f'set "adapter": {guess!r} in agentcheck.json instead.'
+                if guess is not None and guess != FRAMEWORK_NAME
+                else ""
+            )
             issues.append(
                 SupportIssue(
                     code="unsupported_agent_type",
-                    message="Phase 1 requires an exact agents.Agent instance.",
+                    message=(
+                        "Phase 1 requires an exact agents.Agent instance." + suggestion
+                    ),
                     location=type(target).__name__,
                 )
             )

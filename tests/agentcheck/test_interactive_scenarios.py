@@ -853,7 +853,23 @@ def test_built_in_scenario_fingerprints_have_not_moved() -> None:
     } == BUILT_IN_FINGERPRINTS_SEED_7
 
 
-def test_a_generated_suite_with_no_followup_is_fingerprint_identical() -> None:
+def test_a_generated_suite_with_no_followup_is_fingerprint_identical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Pinned against the fingerprinting algorithm, not the installed SDK.
+
+    The suite's fingerprint is derived from the spec's, which deliberately
+    bakes in ``framework_version`` (see SUPPORTED_SDK_MINOR_RANGE's own
+    docstring), so this pin is only meaningful against one fixed version --
+    0.20.0, whatever it was computed against -- regardless of which minor
+    within the adapter's verified range (0.20-0.22) actually happens to be
+    installed when the suite runs.
+    """
+
+    import agentcheck.adapters.openai_agents as openai_agents_adapter
+
+    monkeypatch.setattr(openai_agents_adapter, "_sdk_version", lambda: "0.20.0")
+
     @function_tool
     def lookup_record(record_id: str) -> str:
         """Look up a stored record."""

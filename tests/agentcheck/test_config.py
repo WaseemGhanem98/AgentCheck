@@ -116,6 +116,40 @@ def test_suite_path_rejects_unsafe_locations() -> None:
         )
 
 
+def test_suite_accepts_only_the_one_bundled_reference_suite() -> None:
+    """``suite`` identifies which bundled reference suite applies -- the same
+    kind of forward-compatible identifier ``schema_version`` is -- not a
+    general suite selector, so a name that matches no bundled suite is
+    refused with an explanation, rather than pydantic's bare Literal-mismatch
+    text or (worse) being silently accepted."""
+
+    assert AgentCheckConfig().suite == "account_support_v1"
+    assert AgentCheckConfig(suite="account_support_v1").suite == "account_support_v1"
+    with pytest.raises(ValueError, match="is not one of the suites AgentCheck ships"):
+        AgentCheckConfig(suite="my_custom_suite")
+    with pytest.raises(ValueError, match="suite_path to your own frozen suite file"):
+        AgentCheckConfig(suite="my_custom_suite")
+
+
+def test_an_invalid_suite_in_agentcheck_json_names_the_field_clearly(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "agent.py").write_text("agent = object()\n", encoding="utf-8")
+    (tmp_path / "agentcheck.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "agentcheck.config.v1",
+                "entrypoint": "agent.py:agent",
+                "suite": "my_custom_suite",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError, match="is not one of the suites AgentCheck ships"):
+        load_config(tmp_path)
+
+
 def test_store_path_rejects_unsafe_locations() -> None:
     with pytest.raises(ValueError, match="safe relative path"):
         AgentCheckConfig(store_path="../escape.sqlite")

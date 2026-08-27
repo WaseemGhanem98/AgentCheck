@@ -117,6 +117,37 @@ def require_known_tool_risk_names(
     )
 
 
+# (module-name prefix, adapter name) -- pure duck-typing, no cross-adapter
+# import. See ``guess_other_adapter``.
+_FRAMEWORK_MODULE_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("agents.", "openai_agents"),
+    ("pydantic_ai.", "pydantic_ai"),
+)
+
+
+def guess_other_adapter(target: Any) -> str | None:
+    """A best-effort guess at which adapter a wrong-type target actually needs.
+
+    Pure name-based duck-typing on the object already imported at the
+    configured entrypoint -- its class's module and name, nothing more. This
+    deliberately does not import another framework's SDK to check with
+    ``isinstance``: the ``openai-agents`` and ``pydantic-ai`` extras are
+    independent on purpose (see ``pyproject.toml``), and evaluating one
+    target should never require the other framework's package to be
+    installed just to produce a better error message. A wrong or missing
+    guess only costs a slightly less helpful message -- the caller still
+    refuses the run either way, this never changes what gets accepted.
+    """
+
+    if type(target).__name__ != "Agent":
+        return None
+    module = type(target).__module__
+    for prefix, adapter in _FRAMEWORK_MODULE_PREFIXES:
+        if module == prefix.rstrip(".") or module.startswith(prefix):
+            return adapter
+    return None
+
+
 def encode_preflight_report(report: PreflightReport) -> dict[str, Any]:
     """JSON-safe inspect diagnostic payload; not part of AgentSpec."""
 

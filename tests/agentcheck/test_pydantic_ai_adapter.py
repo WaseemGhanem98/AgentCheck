@@ -277,8 +277,22 @@ def test_a_static_validation_context_value_is_not_rejected() -> None:
 
 
 def test_an_unsupported_sdk_version_is_named() -> None:
+    """2.32-2.35 verified compatible; see docs/pydantic-ai.md for the evidence.
+
+    The range is a floor and a ceiling, not "2.32 or newer": each new minor
+    still needs the same empirical check (dir(Agent), the private-attribute
+    surface this adapter reads, and the full pydantic_ai test suite) before
+    being added, because inspection reads framework-private attributes with
+    no stability guarantee.
+    """
+
+    assert _supported_sdk_version("2.32.0") is True
     assert _supported_sdk_version("2.32.1") is True
-    assert _supported_sdk_version("2.33.0") is False
+    assert _supported_sdk_version("2.33.0") is True
+    assert _supported_sdk_version("2.34.0") is True
+    assert _supported_sdk_version("2.35.0") is True
+    assert _supported_sdk_version("2.31.9") is False
+    assert _supported_sdk_version("2.36.0") is False
     assert _supported_sdk_version("1.0.0") is False
     assert _supported_sdk_version(None) is False
 
@@ -658,6 +672,49 @@ def test_the_controlled_model_answers_the_declared_schema_offline() -> None:
     assert run.termination == RunTermination.COMPLETED
     assert json.loads(run.final_output).keys() == {"approved", "reason"}
     assert run.tool_attempts == ()  # the controlled model calls no tools, by design
+
+
+def test_the_controlled_model_answers_a_scalar_output_type_offline() -> None:
+    """A non-object output_type (bool, int, ...) must not exhaust retries.
+
+    PydanticAI wraps a scalar output_type in a single-key object
+    (``{"response": ...}``) before it will accept it as a reply, whether as
+    text or as a tool-call argument -- a real gap this reproduces: the SDK's
+    own roulette_wheel example (``output_type=bool``) exhausted
+    ``retries=3`` and terminated as ``provider_error: Exceeded maximum
+    output retries`` under ``controlled_model=True`` before this fix,
+    because the controlled model's reply was built from the bare ``bool``
+    schema (``{"type": "boolean"}``) rather than the framework's actual
+    negotiated, wrapped one.
+    """
+
+    agent = Agent(_script(_text("unused")), instructions="Decide.", output_type=bool, name="B")
+    gateway = ToolGateway([], [])
+
+    run = _run(_prepare(agent, gateway, controlled_model=True), "decide")
+
+    assert run.termination == RunTermination.COMPLETED
+    assert run.final_output in ("true", "false")
+    assert run.tool_attempts == ()
+
+
+def test_the_controlled_model_preserves_the_targets_own_retry_budget() -> None:
+    """A rebuilt agent must not silently substitute pydantic_ai's default
+    retries=1 for whatever the target itself declared -- roulette_wheel's
+    own retries=3 is the real example that surfaced this."""
+
+    agent = Agent(
+        _script(_text("unused")),
+        instructions="Decide.",
+        output_type=Decision,
+        name="D",
+        retries=5,
+    )
+    gateway = ToolGateway([], [])
+
+    prepared = _prepare(agent, gateway, controlled_model=True)
+
+    assert prepared.runtime_agent._max_output_retries == 5
 
 
 # --- world state ------------------------------------------------------------

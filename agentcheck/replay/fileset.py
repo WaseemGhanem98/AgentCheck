@@ -163,15 +163,15 @@ def collect_source_file_set(root: Path) -> SourceFileSet:
                 "unable to inventory ignored source files for replay binding"
             )
         git_candidates = _unique_paths(tracked + ignored)
-        git_relevant = _select_relevant_paths(git_candidates)
+        git_relevant = _select_relevant_paths(git_candidates, root=resolved)
         if git_relevant:
             relevant = git_relevant
             mode: Literal["git_tracked", "local_files"] = "git_tracked"
         else:
-            relevant = _select_relevant_paths(_local_paths(resolved))
+            relevant = _select_relevant_paths(_local_paths(resolved), root=resolved)
             mode = "local_files"
     else:
-        relevant = _select_relevant_paths(_local_paths(resolved))
+        relevant = _select_relevant_paths(_local_paths(resolved), root=resolved)
         mode = "local_files"
     if not relevant:
         raise ConfigurationError(
@@ -223,7 +223,29 @@ def _normalize_relative(relative: str) -> str:
     return normalized
 
 
-def _excluded_by_location(relative: str) -> bool:
+def _is_virtualenv_root(directory: Path) -> bool:
+    """Whether ``directory`` is the root of a Python virtual environment.
+
+    ``pyvenv.cfg`` is the marker every standard tool that creates one
+    (``venv``, ``virtualenv``, ``uv venv``, ...) writes directly inside it --
+    the same signal Python's own ``sys.prefix`` machinery relies on. Detecting
+    a virtualenv this way, rather than by a fixed name list (``.venv``,
+    ``venv``), is what lets an arbitrarily-named one (``.test-venv``, and any
+    other name a project happens to use) be excluded correctly instead of
+    hitting the path-safety refusal below for a dot-prefixed directory that
+    was never the target's own source to begin with -- a virtualenv's
+    contents are installed third-party packages, the same category of thing
+    ``.venv``/``venv`` were already excluded by name for, not a new class of
+    exclusion this weakens the source-integrity guarantee by adding.
+    """
+
+    try:
+        return (directory / "pyvenv.cfg").is_file()
+    except OSError:
+        return False
+
+
+def _excluded_by_location(relative: str, *, root: Path) -> bool:
     """Exclude build, cache, and tool-reserved directories from source inventory.
 
     .github/, .vscode/, .idea/, .vs/ are reserved for GitHub and IDE tooling and
@@ -239,6 +261,11 @@ def _excluded_by_location(relative: str) -> bool:
     parts = relative.split("/")
     if any(part in _EXCLUDED_DIR_NAMES or part.endswith(".egg-info") for part in parts[:-1]):
         return True
+    accumulated = root
+    for part in parts[:-1]:
+        accumulated = accumulated / part
+        if _is_virtualenv_root(accumulated):
+            return True
     name = parts[-1] if parts else ""
     if name in _EXCLUDED_FILE_NAMES or name.startswith(".env"):
         return True
@@ -250,14 +277,16 @@ def _has_included_suffix(relative: str) -> bool:
     return any(name.endswith(suffix) for suffix in _INCLUDED_SUFFIXES)
 
 
-def _select_relevant_paths(paths: tuple[str, ...] | list[str]) -> list[str]:
+def _select_relevant_paths(
+    paths: tuple[str, ...] | list[str], *, root: Path
+) -> list[str]:
     selected: list[str] = []
     seen: set[str] = set()
     for raw in paths:
         relative = _normalize_relative(raw)
         if not relative or relative in seen:
             continue
-        if _excluded_by_location(relative) or not _has_included_suffix(relative):
+        if _excluded_by_location(relative, root=root) or not _has_included_suffix(relative):
             continue
         if not _is_safe_relative_path(relative):
             raise ConfigurationError(
@@ -357,6 +386,7 @@ def _local_paths(root: Path) -> tuple[str, ...]:
             if name not in _EXCLUDED_DIR_NAMES
             and not name.endswith(".egg-info")
             and not name.startswith(".")
+            and not _is_virtualenv_root(current / name)
         )
         for name in dirnames:
             child = current / name

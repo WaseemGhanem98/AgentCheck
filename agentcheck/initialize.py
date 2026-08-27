@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 from typing import Any, get_args
 
+from pydantic import ValidationError
+
 from .artifacts import create_private_file, replace_private_file
 from .config import (
     CONFIG_FILENAME,
@@ -47,19 +49,52 @@ def resolve_initialization_root(target: str | os.PathLike[str]) -> Path:
     return resolved
 
 
-def _validated_config(adapter: str, entrypoint: str) -> AgentCheckConfig:
+def _existing_document(destination: Path) -> dict[str, Any] | None:
+    """The current config's raw fields, or ``None`` if there is nothing to reuse.
+
+    ``init --force`` is documented as replacing the two fields ``init`` itself
+    controls (adapter, entrypoint) -- not as silently resetting every other
+    field a user may have hand-edited since, most importantly
+    ``environment_allowlist``, a security-relevant setting with no other CLI
+    knob to restore it. A destination that is itself a symlink is never read
+    through, matching ``replace_private_file``'s refusal to write through one:
+    a planted link should not be able to seed a trusted config from content
+    outside the target directory. Anything else unreadable or not a JSON
+    object (corrupt file, garbage content) is treated the same way a missing
+    file is: there is nothing safe to carry forward, so initialization falls
+    back to plain defaults exactly as it always has.
+    """
+
+    if destination.is_symlink() or not destination.is_file():
+        return None
+    try:
+        raw = json.loads(destination.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _validated_config(
+    adapter: str, entrypoint: str, *, base_document: dict[str, Any] | None = None
+) -> AgentCheckConfig:
     if adapter not in SUPPORTED_ADAPTERS:
         raise ConfigurationError(
             f"unsupported adapter: {adapter!r}; supported adapters: "
             f"{', '.join(SUPPORTED_ADAPTERS)}"
         )
-    document: dict[str, Any] = {"adapter": adapter, "entrypoint": entrypoint}
+    document: dict[str, Any] = dict(base_document or {})
+    document["adapter"] = adapter
+    document["entrypoint"] = entrypoint
     try:
         return AgentCheckConfig.model_validate(document)
-    except ValueError as exc:
-        raise ConfigurationError(
-            _ENTRYPOINT_FORM
-        ) from exc
+    except ValidationError as exc:
+        if base_document and any(error["loc"] != ("entrypoint",) for error in exc.errors()):
+            raise ConfigurationError(
+                f"the existing {CONFIG_FILENAME} being reused by --force has a field "
+                f"init cannot carry forward: {exc}. Fix that field directly in "
+                f"{CONFIG_FILENAME}, or remove the file and run init without --force."
+            ) from exc
+        raise ConfigurationError(_ENTRYPOINT_FORM) from exc
 
 
 def _encoded_config(config: AgentCheckConfig) -> bytes:
@@ -101,12 +136,19 @@ def write_initial_config(
     The document is serialized from a constructed :class:`AgentCheckConfig`, so an
     unwritable value fails before any file is created. The target agent is never
     imported and its entrypoint is not required to exist yet.
+
+    ``force`` replaces an existing file, but does not reset it: every field
+    besides ``adapter``/``entrypoint`` -- the two this function's own
+    parameters control -- is carried forward from the file being replaced, so
+    re-running init to fix one field (say, the adapter) cannot silently
+    discard another (say, ``environment_allowlist``).
     """
 
     resolved_root = resolve_initialization_root(root)
-    config = _validated_config(adapter, entrypoint)
-    entrypoint_location(resolved_root, config.entrypoint)
     destination = resolved_root / CONFIG_FILENAME
+    base_document = _existing_document(destination) if force else None
+    config = _validated_config(adapter, entrypoint, base_document=base_document)
+    entrypoint_location(resolved_root, config.entrypoint)
     _write_config_file(destination, _encoded_config(config), force=force)
     return destination
 

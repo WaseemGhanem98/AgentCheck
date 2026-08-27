@@ -20,8 +20,8 @@ python -m pip install "agentcheck-ai[pydantic-ai]"
 ```
 
 This installs the verified PydanticAI range:
-`pydantic-ai-slim >=2.32,<2.33`. Other minor versions fail preflight with
-`unsupported_sdk_version` instead of being inspected approximately.
+`pydantic-ai-slim >=2.32,<2.36`. A version outside that range fails preflight
+with `unsupported_sdk_version` instead of being inspected approximately.
 
 ## Run the example
 

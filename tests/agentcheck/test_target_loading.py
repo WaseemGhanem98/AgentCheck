@@ -348,6 +348,16 @@ def test_arbitrary_factory_functions_are_not_auto_executed(tmp_path: Path) -> No
 
 
 def test_factory_returning_non_agent_fails_closed(tmp_path: Path) -> None:
+    """A wrong-type target now fails through the same code as any other.
+
+    Previously this specific case (a bare ``TypeError`` raised by
+    ``OpenAIAgentsAdapter.inspect``) was pattern-matched into an
+    ``unsupported_agent_shape`` code by the worker's error mapping, distinct
+    from ``preflight()``'s own ``unsupported_agent_type`` for what is the same
+    underlying defect. ``inspect()`` now raises ``UnsupportedTargetError``
+    with ``preflight()``'s own issue directly, so both paths agree.
+    """
+
     root = _init(tmp_path / "target", "agent.py:create_agent()")
     (root / "agent.py").write_text(FACTORY_RETURNS_INT.lstrip(), encoding="utf-8")
     loaded, _source = load_target(root)
@@ -356,7 +366,7 @@ def test_factory_returning_non_agent_fails_closed(tmp_path: Path) -> None:
     result = inspect_in_subprocess(root, config)
     assert result.ok is False
     assert result.infrastructure_error is not None
-    assert result.infrastructure_error.code == "unsupported_agent_shape"
+    assert result.infrastructure_error.code == "unsupported_agent_type"
 
 
 def test_factory_exception_is_bounded_and_redacted(tmp_path: Path) -> None:

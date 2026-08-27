@@ -160,6 +160,71 @@ def test_force_replaces_an_existing_config(tmp_path: Path) -> None:
         assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
 
 
+def test_force_preserves_a_previously_set_environment_allowlist(tmp_path: Path) -> None:
+    """Re-running init with --force must not silently drop a security setting.
+
+    ``init`` itself has no ``--environment-allowlist`` flag, so the only way a
+    developer ever gets this value into ``agentcheck.json`` is by hand-editing
+    the file after the first ``init``. A later ``--force`` re-run for an
+    unrelated reason (say, fixing the entrypoint) must carry it forward rather
+    than silently resetting it to the empty default.
+    """
+
+    root = _target(tmp_path)
+    write_initial_config(root)
+    config_path = root / CONFIG_FILENAME
+    document = json.loads(config_path.read_text(encoding="utf-8"))
+    document["environment_allowlist"] = ["BANK_SUPPORT_API_KEY"]
+    config_path.write_text(json.dumps(document) + "\n", encoding="utf-8")
+
+    write_initial_config(root, entrypoint="agent.py:agent", force=True)
+
+    _, loaded = load_config(root)
+    assert loaded.environment_allowlist == ("BANK_SUPPORT_API_KEY",)
+
+
+def test_force_preserves_fields_while_changing_only_the_adapter(tmp_path: Path) -> None:
+    root = _target(tmp_path)
+    write_initial_config(root)
+    config_path = root / CONFIG_FILENAME
+    document = json.loads(config_path.read_text(encoding="utf-8"))
+    document["environment_allowlist"] = ["SOME_KEY"]
+    document["seed"] = 4242
+    config_path.write_text(json.dumps(document) + "\n", encoding="utf-8")
+
+    write_initial_config(root, adapter="custom", force=True)
+
+    _, loaded = load_config(root)
+    assert loaded.adapter == "custom"
+    assert loaded.entrypoint == "agent.py:agent"
+    assert loaded.environment_allowlist == ("SOME_KEY",)
+    assert loaded.seed == 4242
+
+
+def test_force_reports_an_incompatible_preserved_field_clearly(tmp_path: Path) -> None:
+    """A stale field from an older config must not be blamed on the entrypoint."""
+
+    root = _target(tmp_path)
+    config_path = root / CONFIG_FILENAME
+    config_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "agentcheck.config.v1",
+                "adapter": "openai_agents",
+                "entrypoint": "agent.py:agent",
+                "suite": "a_suite_that_no_longer_exists",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigurationError) as excinfo:
+        write_initial_config(root, force=True)
+
+    assert "entrypoint must use the form" not in str(excinfo.value)
+    assert CONFIG_FILENAME in str(excinfo.value)
+
+
 def test_repeated_initialization_is_deterministic(tmp_path: Path) -> None:
     first_root = _target(tmp_path)
     second_root = tmp_path / "second"

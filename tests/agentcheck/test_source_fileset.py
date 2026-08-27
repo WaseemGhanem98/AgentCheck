@@ -584,3 +584,81 @@ def test_hidden_relevant_python_file_fails_closed(tmp_path: Path) -> None:
     (target / ".hidden.py").write_text("VALUE = 2\n", encoding="utf-8")
     with pytest.raises(ConfigurationError, match="not a safe relative path"):
         collect_source_file_set(target)
+
+
+def _write_virtualenv(root: Path, name: str) -> None:
+    """A minimal but faithful virtualenv: the ``pyvenv.cfg`` marker every
+    real venv-creation tool (venv, virtualenv, uv venv) writes, plus an
+    installed-looking .py file the way a real site-packages tree would have
+    one -- exactly the shape reported blocking replay manifest generation."""
+
+    venv = root / name
+    (venv / "lib" / "python3.12" / "site-packages" / "somepkg").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("version = 3.12.3\n", encoding="utf-8")
+    (venv / "lib" / "python3.12" / "site-packages" / "somepkg" / "__init__.py").write_text(
+        "X = 1\n", encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize("venv_name", [".test-venv", "test-venv", "myenv"])
+def test_an_arbitrarily_named_virtualenv_is_excluded_in_local_mode(
+    tmp_path: Path, venv_name: str
+) -> None:
+    target = tmp_path / "local"
+    target.mkdir()
+    (target / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _write_virtualenv(target, venv_name)
+
+    inventory = collect_source_file_set(target)
+
+    assert inventory.mode == "local_files"
+    paths = {item.path for item in inventory.files}
+    assert paths == {"agent.py"}
+
+
+def test_an_arbitrarily_named_gitignored_virtualenv_is_excluded_in_git_mode(
+    tmp_path: Path,
+) -> None:
+    """Reproduces the reported failure exactly: a virtualenv gitignored under
+    a name other than .venv/venv (.test-venv here) used to be picked up by
+    `git ls-files --others --ignored` as an "ignored-but-present" candidate,
+    survive the fixed .venv/venv name-list exclusion, and then hit the
+    dot-prefixed path-safety refusal -- turning a harmless local virtualenv
+    into a hard replay-manifest failure instead of a silent, correct
+    exclusion of what was never the target's own source to begin with."""
+
+    target = tmp_path / "repo"
+    target.mkdir()
+    (target / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git_init(target)
+    (target / ".gitignore").write_text(".test-venv/\n", encoding="utf-8")
+    _write_virtualenv(target, ".test-venv")
+    # Nothing is committed -- matching the reported scenario, where the
+    # virtualenv was gitignored but the rest of the target was never staged.
+
+    inventory = collect_source_file_set(target)
+
+    paths = {item.path for item in inventory.files}
+    assert "agent.py" in paths
+    assert not any(".test-venv" in path for path in paths)
+
+
+def test_a_dot_prefixed_directory_that_is_not_a_virtualenv_still_fails_closed(
+    tmp_path: Path,
+) -> None:
+    """The fix is specific to genuine virtualenvs (pyvenv.cfg present) -- an
+    unrelated dot-prefixed, gitignored directory with no such marker must
+    still refuse rather than be silently excluded, preserving the existing
+    source-integrity guarantee for everything that is not a virtualenv."""
+
+    target = tmp_path / "repo"
+    target.mkdir()
+    (target / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git_init(target)
+    (target / ".gitignore").write_text(".mystery/\n", encoding="utf-8")
+    nested = target / ".mystery" / "deeply" / "nested"
+    nested.mkdir(parents=True)
+    (nested / "thing.py").write_text("VALUE = 2\n", encoding="utf-8")
+
+    with pytest.raises(ConfigurationError, match="not a safe relative path"):
+        collect_source_file_set(target)

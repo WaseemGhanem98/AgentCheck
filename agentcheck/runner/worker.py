@@ -17,6 +17,7 @@ from agentcheck.adapters import (
     FrameworkAdapter,
     OpenAIAgentsAdapter,
     PydanticAIAdapter,
+    UnsupportedTargetError,
     encode_preflight_report,
 )
 from agentcheck.config import (
@@ -118,6 +119,19 @@ def _safe_error(exc: BaseException, *, phase: str) -> InfrastructureError:
             retryable=False,
             details=_safe_details({**exc.details, "error_type": type(exc).__name__}),
         )
+    if isinstance(exc, UnsupportedTargetError):
+        # Carries the same SupportIssue(s) preflight() would have reported --
+        # an adapter's own inspect() raising this (rather than a bare
+        # TypeError) keeps that detail (including any "did you mean the other
+        # adapter" guess) intact instead of it being discarded below.
+        code = exc.issues[0].code if exc.issues else "unsupported_target"
+        return InfrastructureError(
+            code=code,
+            message=(redact_log_text(str(exc))[:4_000] or "AgentCheck worker failed."),
+            phase=phase,
+            retryable=False,
+            details={"error_type": type(exc).__name__},
+        )
     if isinstance(exc, ValidationError):
         message = f"Contract validation failed with {exc.error_count()} error(s)."
         code = "worker_execution_failed"
@@ -127,13 +141,6 @@ def _safe_error(exc: BaseException, *, phase: str) -> InfrastructureError:
         except BaseException:  # pragma: no cover - defensive against hostile __str__
             message = "Exception text was unavailable."
         code = "worker_execution_failed"
-        if isinstance(exc, TypeError) and "exact agents.Agent" in message:
-            code = "unsupported_agent_shape"
-            message = (
-                "The configured entrypoint did not resolve to an exact agents.Agent. "
-                "Module-level Agent instances are supported; factory functions require "
-                "the explicit path.py:attribute() form."
-            )
     return InfrastructureError(
         code=code,
         message=(redact_log_text(message)[:4_000] or "AgentCheck worker failed."),
