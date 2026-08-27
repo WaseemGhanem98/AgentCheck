@@ -107,9 +107,11 @@ treated as authoritative anywhere a hard verdict depends on it.
 
 Inference is conservative in one direction only: a tool it cannot classify is
 left non-state-changing (`UNKNOWN`, not a confirmed safe) and receives **no
-fault family**. Verb-shaped names such as `delete_account` or `cancel_order`
-are read correctly; neutral ones such as `bash`, `write` or `execute_command`
-are not, and stay untested until declared. Coverage reports the gap as
+fault family**. Verb-shaped names such as `delete_account` or `cancel_order`,
+and persistence names such as `write` or `save_draft`, produce an inferred
+classification. Generic dispatch names such as `bash`, `execute_python`, or
+`execute_command` remain `UNKNOWN` and receive no risk-scoped fault family
+until declared. Inferred risk remains non-authoritative, so coverage reports
 `risk_metadata_not_authoritative` rather than implying the tool was checked.
 See [fault testing](docs/fault-testing.md) and, to declare your own
 contracts, [behavioral policies](docs/behavioral-policies.md). Multiple tool
