@@ -1,10 +1,11 @@
 """AgentCheck: behavioral testing for AI agents."""
 
 from .config import AgentCheckConfig, load_config
-from .custom import CustomAgentProtocol, ToolRuntime, TurnResult
+from .custom import AsyncToolRuntime, CustomAgentProtocol, ToolRuntime, TurnResult
 
 __all__ = [
     "AgentCheckConfig",
+    "AsyncToolRuntime",
     "CustomAgentProtocol",
     "ToolRuntime",
     "TurnResult",

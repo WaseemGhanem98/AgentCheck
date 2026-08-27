@@ -618,40 +618,13 @@ def _world_snapshot(world: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-class _GatewayToolRuntime:
-    """The ``ToolRuntime`` a custom agent is handed. A bridge, not a second gateway.
+class _BaseGatewayToolRuntime:
+    """Shared plumbing for the sync and async ``ToolRuntime`` implementations.
 
-    Everything that decides what a tool call *means* -- schema validation,
-    fixture selection, invocation-index and prerequisite ordering, world-state
-    effects, the unknown-tool allowlist, the tool-call and retry budgets -- lives
-    in ``ToolGateway`` and is reached by exactly one call to ``invoke`` below.
-    This class adds two things and nothing else: canonical evidence for the
-    attempt and its outcome, and the raise/return split the ``ToolRuntime``
-    contract promises.
-
-    That split is the whole of the policy here:
-
-    * A *simulated* outcome is returned, whatever its status. ``error``,
-      ``timeout``, ``malformed``, ``empty``, ``partial`` and ``stale`` are things
-      a real tool does, so a custom loop must be able to see them and decide.
-    * A *refusal* is raised. An undeclared tool, arguments that violate the
-      declared schema, a missing fixture, an exhausted budget: in each case
-      AgentCheck has no controlled answer, and returning a plausible one would
-      be inventing the tool output that the run is supposed to be evidence
-      about.
-
-    ``call`` is synchronous and, unlike the OpenAI Agents and PydanticAI
-    adapters, this one has no hook that sees a batch of tool calls before
-    dispatch: a custom agent's own orchestration decides, in its own code,
-    when and how to call ``call``. If that orchestration issues concurrent
-    calls itself -- multiple threads, or tasks that actually interleave
-    around a real ``await`` rather than calling this synchronously one at a
-    time -- fixture assignment and invocation-index ordering are not
-    guaranteed to follow any particular order. This is deliberately left
-    unsupported rather than guessed at: a custom agent that wants
-    deterministic concurrent dispatch must issue its own calls to ``call``
-    strictly in the order they were decided, matching what this class was
-    proven safe for. See ``docs/concurrent-tool-decisions.md``.
+    Holds ``__init__`` and the actual gateway-invoking logic (``_do_call``).
+    Neither leaf subclass overrides the other's ``call``, so mypy sees two
+    unrelated, individually consistent method signatures rather than a sync
+    override of an async one or vice versa.
     """
 
     def __init__(
@@ -667,7 +640,7 @@ class _GatewayToolRuntime:
         self._capture_holder = capture_holder
         self._tool_risks = dict(tool_risks)
 
-    def call(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
+    def _do_call(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
         capture = self._capture_holder.get("capture")
         if capture is None:
             raise RuntimeError(
@@ -764,6 +737,69 @@ class _GatewayToolRuntime:
             gateway_metadata=metadata,
         )
         return outcome
+
+
+class _GatewayToolRuntime(_BaseGatewayToolRuntime):
+    """The ``ToolRuntime`` a custom agent is handed. A bridge, not a second gateway.
+
+    Everything that decides what a tool call *means* -- schema validation,
+    fixture selection, invocation-index and prerequisite ordering, world-state
+    effects, the unknown-tool allowlist, the tool-call and retry budgets -- lives
+    in ``ToolGateway`` and is reached by exactly one call to ``invoke`` below.
+    This class adds two things and nothing else: canonical evidence for the
+    attempt and its outcome, and the raise/return split the ``ToolRuntime``
+    contract promises.
+
+    That split is the whole of the policy here:
+
+    * A *simulated* outcome is returned, whatever its status. ``error``,
+      ``timeout``, ``malformed``, ``empty``, ``partial`` and ``stale`` are things
+      a real tool does, so a custom loop must be able to see them and decide.
+    * A *refusal* is raised. An undeclared tool, arguments that violate the
+      declared schema, a missing fixture, an exhausted budget: in each case
+      AgentCheck has no controlled answer, and returning a plausible one would
+      be inventing the tool output that the run is supposed to be evidence
+      about.
+
+    ``call`` is synchronous and, unlike the OpenAI Agents and PydanticAI
+    adapters, this one has no hook that sees a batch of tool calls before
+    dispatch: a custom agent's own orchestration decides, in its own code,
+    when and how to call ``call``. If that orchestration issues concurrent
+    calls itself -- multiple threads, or tasks that actually interleave
+    around a real ``await`` rather than calling this synchronously one at a
+    time -- fixture assignment and invocation-index ordering are not
+    guaranteed to follow any particular order. This is deliberately left
+    unsupported rather than guessed at: a custom agent that wants
+    deterministic concurrent dispatch must issue its own calls to ``call``
+    strictly in the order they were decided, matching what this class was
+    proven safe for. See ``docs/concurrent-tool-decisions.md``.
+
+    An agent whose ``start``/``resume`` are coroutine functions is instead
+    handed ``_AsyncGatewayToolRuntime`` (below), which has the same real-thread
+    caveat but a different, provable guarantee for asyncio-native scheduling
+    -- see that class's docstring.
+    """
+
+    def call(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
+        return self._do_call(name, arguments)
+
+
+class _AsyncGatewayToolRuntime(_BaseGatewayToolRuntime):
+    """The ``AsyncToolRuntime`` given to an async ``start``/``resume`` pair.
+
+    ``call`` here has no ``await`` in its own body -- it returns exactly what
+    the synchronous ``_do_call`` (inherited unchanged) computes. That is the
+    whole of the safety argument: a coroutine with no internal yield point
+    cannot be paused mid-call by the event loop, so however the agent chooses
+    to schedule several of these (sequential ``await``, ``asyncio.gather``,
+    ``asyncio.create_task``) each call still runs to completion, in the order
+    it was scheduled, before the next one's body executes. See
+    ``agentcheck.custom.AsyncToolRuntime`` for what this does and does not
+    claim about concurrency.
+    """
+
+    async def call(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
+        return self._do_call(name, arguments)
 
 
 # ---------------------------------------------------------------------------
@@ -1173,6 +1209,7 @@ class CustomAgentAdapter(FrameworkAdapter):
     def _turn_method_issues(target: Any) -> list[SupportIssue]:
         issues: list[SupportIssue] = []
         expected_arity = {"start": _START_ARITY, "resume": _RESUME_ARITY}
+        found_methods: dict[str, Any] = {}
         for name in _REQUIRED_TURN_METHODS:
             method = _turn_method(target, name)
             if method is None or not callable(method):
@@ -1187,19 +1224,7 @@ class CustomAgentAdapter(FrameworkAdapter):
                     )
                 )
                 continue
-            if _inspect.iscoroutinefunction(method):
-                issues.append(
-                    SupportIssue(
-                        code="async_turn_method",
-                        message=(
-                            f"{name}() is a coroutine function. The custom contract is "
-                            "synchronous, because ToolRuntime.call is; run your own "
-                            "event loop inside the turn instead."
-                        ),
-                        location=name,
-                    )
-                )
-                continue
+            found_methods[name] = method
             arity = _non_self_arity(method)
             if arity == expected_arity[name]:
                 continue
@@ -1219,6 +1244,28 @@ class CustomAgentAdapter(FrameworkAdapter):
                     location=name,
                 )
             )
+        if len(found_methods) == len(_REQUIRED_TURN_METHODS):
+            is_coroutine = {
+                name: _inspect.iscoroutinefunction(method)
+                for name, method in found_methods.items()
+            }
+            if len(set(is_coroutine.values())) > 1:
+                described = ", ".join(
+                    f"{name}() is {'async' if coro else 'sync'}"
+                    for name, coro in sorted(is_coroutine.items())
+                )
+                issues.append(
+                    SupportIssue(
+                        code="mismatched_turn_method_concurrency",
+                        message=(
+                            "start() and resume() must both be synchronous or both be "
+                            f"coroutine functions, not a mix ({described}). AgentCheck "
+                            "picks one ToolRuntime shape (sync or async) for the whole "
+                            "agent and cannot switch between turns."
+                        ),
+                        location="start/resume",
+                    )
+                )
         return issues
 
     # -- preparation --------------------------------------------------------
@@ -1296,7 +1343,12 @@ class CustomAgentAdapter(FrameworkAdapter):
         self._require_matching_surface(gateway, tuple(sorted(tool_risks)))
 
         capture_holder: dict[str, _Capture | None] = {"capture": None}
-        runtime = _GatewayToolRuntime(
+        runtime_cls = (
+            _AsyncGatewayToolRuntime
+            if _inspect.iscoroutinefunction(_turn_method(target, "start"))
+            else _GatewayToolRuntime
+        )
+        runtime = runtime_cls(
             gateway=gateway,
             world_state=world_state,
             capture_holder=capture_holder,
@@ -1431,13 +1483,22 @@ class CustomAgentAdapter(FrameworkAdapter):
         state: Any = None
         last_output: Any = None
         completed = False
+        is_async = _inspect.iscoroutinefunction(agent.start)
         try:
             while True:
                 stages_executed += 1
                 if stages_executed == 1:
-                    result = agent.start(prompt, runtime)
+                    result = (
+                        await agent.start(prompt, runtime)
+                        if is_async
+                        else agent.start(prompt, runtime)
+                    )
                 else:
-                    result = agent.resume(state, prompt, runtime)
+                    result = (
+                        await agent.resume(state, prompt, runtime)
+                        if is_async
+                        else agent.resume(state, prompt, runtime)
+                    )
                 turn_result = _require_turn_result(result, stage=stages_executed)
                 state = turn_result.state
                 last_output = turn_result.output

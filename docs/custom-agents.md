@@ -63,9 +63,28 @@ The configured object must expose:
 - `start(message, tools) -> TurnResult`: the opening user turn;
 - `resume(state, message, tools) -> TurnResult`: each later scripted user turn.
 
-Both methods are synchronous. `ToolRuntime.call()` is synchronous, so an async
-turn method is refused during preflight. A custom loop that uses async provider
-code must own and complete that work inside its synchronous turn boundary.
+Both methods are ordinarily synchronous, but may both instead be coroutine
+functions -- `async def start(...)` / `async def resume(...)` -- if the loop
+needs a real `await` (a genuine async provider client, for example). An async
+pair is handed an `AsyncToolRuntime` whose `call()` is `async def` instead of
+`def`; everything else about the contract is unchanged. `start` and `resume`
+must agree: mixing one sync and one async method is refused at preflight as
+`mismatched_turn_method_concurrency`, because AgentCheck picks one
+`ToolRuntime` shape for the whole agent and cannot switch between turns.
+
+`AsyncToolRuntime.call()` does not add support for genuinely concurrent tool
+*dispatch*. It still runs the same synchronous gateway logic underneath, with
+no `await` of its own, so one call always finishes before the next begins --
+even if the agent issues them through `asyncio.gather()` or
+`asyncio.create_task()`. That is a real, provable guarantee (the coroutine has
+no internal yield point, so the event loop cannot pause it mid-call), but it
+is not the same-stage "launch group" concurrency the OpenAI Agents and
+PydanticAI adapters support: those derive decision order from an observed
+model response listing several tool calls at once, and a custom agent's model
+calls are never observed by AgentCheck at all, so there is no equivalent
+evidence to derive that from. See `docs/concurrent-tool-decisions.md`. Real OS
+threads calling into either `ToolRuntime` remain unsupported, exactly as
+before.
 
 `TurnResult.output` may be text or a JSON-compatible structured value.
 `TurnResult.state` is opaque: AgentCheck passes the same object from `start()`

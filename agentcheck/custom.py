@@ -33,7 +33,7 @@ from agentcheck.domain.agent_spec import ToolDefinition
 from agentcheck.domain.run import ToolOutcome
 
 
-__all__ = ["CustomAgentProtocol", "ToolRuntime", "TurnResult"]
+__all__ = ["AsyncToolRuntime", "CustomAgentProtocol", "ToolRuntime", "TurnResult"]
 
 
 @runtime_checkable
@@ -46,7 +46,9 @@ class ToolRuntime(Protocol):
     handlers are not involved at any point.
 
     Synchronous because ``ToolGateway.invoke`` is synchronous, and because a
-    custom loop should not have to become async to be testable.
+    custom loop should not have to become async to be testable. Given to a
+    ``start``/``resume`` pair that is itself synchronous; an async pair is
+    given ``AsyncToolRuntime`` instead.
     """
 
     def call(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
@@ -58,6 +60,41 @@ class ToolRuntime(Protocol):
         returning a plausible value when the tool is unknown or the arguments do
         not satisfy the declared schema: a harness that invents tool output
         invents passing runs.
+        """
+        ...
+
+
+@runtime_checkable
+class AsyncToolRuntime(Protocol):
+    """The tool runtime given to an async ``start``/``resume`` pair.
+
+    Exists so a custom loop that awaits a real async provider client (or any
+    other real ``await``) does not have to bridge into a synchronous turn
+    boundary to do it. It does **not** add support for genuinely concurrent
+    tool *dispatch*: ``call`` still runs the same synchronous
+    ``ToolGateway`` logic underneath, with no internal ``await`` of its own,
+    so one call always runs to completion before the next begins -- even if
+    the agent issues them through ``asyncio.gather`` or ``asyncio.create_task``.
+    Concurrent-looking syntax therefore still executes, and is fixture- and
+    world-state-deterministic, strictly in the order the calls were made, the
+    same guarantee the synchronous ``ToolRuntime`` gives.
+
+    What this does not, and cannot, give a custom agent is the same-stage
+    "launch group" semantics the OpenAI Agents and PydanticAI adapters support
+    for genuinely concurrent dispatch: those adapters derive decision order
+    from an observed model response listing several tool calls at once. A
+    custom agent's model calls are never observed by AgentCheck at all (see
+    ``CustomAgentAdapter``'s docstring), so there is no evidence from which to
+    derive a "these were decided together" fact -- inventing one would be
+    exactly the kind of guessed verdict this project does not produce. See
+    ``docs/concurrent-tool-decisions.md``.
+    """
+
+    async def call(self, name: str, arguments: Mapping[str, Any]) -> ToolOutcome:
+        """Simulate one tool call and return its canonical outcome.
+
+        Same contract as ``ToolRuntime.call``, awaited instead of called
+        directly.
         """
         ...
 
@@ -86,6 +123,14 @@ class CustomAgentProtocol(Protocol):
     becomes a ``resume`` -- which is what makes a confirmation flow expressible:
     the agent asks, the scenario answers, and the destructive call happens
     afterwards or not at all.
+
+    ``start``/``resume`` may both be ordinary functions, taking ``ToolRuntime``,
+    or both coroutine functions, taking ``AsyncToolRuntime`` instead -- an
+    agent whose own loop needs a real ``await`` (a genuine async provider
+    client, for example) does not have to fake a synchronous boundary around
+    it. The two methods must agree: one sync and one async is a contract
+    mismatch AgentCheck refuses at preflight, not a shape it guesses how to
+    drive.
     """
 
     tools: Sequence[ToolDefinition]
