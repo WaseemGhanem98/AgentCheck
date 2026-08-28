@@ -55,6 +55,7 @@ from agentcheck.domain.run import (
     UsageMetrics,
 )
 from agentcheck.domain.scenario import ConversationRole, ConversationTurn
+from agentcheck.errors import ConfigurationError
 from agentcheck.inspect.capabilities import extract_capabilities
 from agentcheck.inspect.risk_authority import declared_risk_for, resolve_tool_risk
 from agentcheck.runner.launch_barrier import LaunchBarrier
@@ -64,6 +65,7 @@ from jsonschema.exceptions import SchemaError  # type: ignore[import-untyped]
 
 if TYPE_CHECKING:
     from agentcheck.config import ToolRiskDeclaration
+    from agentcheck.mcp_manifest import McpManifest
 
 from .base import (
     guess_other_adapter,
@@ -361,6 +363,40 @@ def _tool_definition(
         name=name,
         description=resolved,
         input_schema=dict(schema) if isinstance(schema, Mapping) else {},
+        output_schema=None,
+        state_changing=state_changing,
+        destructive=destructive,
+        replaceable=True,
+    )
+    return definition, assertion
+
+
+def _manifest_tool_definition(
+    name: str,
+    declared: "Any",
+    *,
+    declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
+) -> tuple[ToolDefinition, ToolRiskAssertion]:
+    """The manifest equivalent of ``_tool_definition``.
+
+    Same resolution path (risk goes through the identical ``tool_risk``
+    declaration/inference precedence every other tool uses), the only
+    difference is where the raw name/description/schema come from: a
+    developer's frozen ``DeclaredMcpTool`` entry instead of a live PydanticAI
+    ``Tool`` object, because there is no live object here -- see
+    ``agentcheck/mcp_manifest/pack.py`` for why.
+    """
+
+    description = declared.description
+    resolved = description if isinstance(description, str) and description else None
+    risk_declared = declared_risk_for(name, declared_tool_risk)
+    state_changing, destructive, assertion = resolve_tool_risk(
+        name, resolved, declared=risk_declared
+    )
+    definition = ToolDefinition(
+        name=name,
+        description=resolved,
+        input_schema=dict(declared.input_schema),
         output_schema=None,
         state_changing=state_changing,
         destructive=destructive,
@@ -1097,6 +1133,7 @@ class PydanticAIAdapter(FrameworkAdapter):
         source: str | None = None,
         identity_locator: str | None = None,
         declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
+        mcp_manifest: "McpManifest | None" = None,
     ) -> AgentSpec:
         _require_sdk()
         locator = source or f"{type(target).__module__}.{type(target).__name__}"
@@ -1110,6 +1147,7 @@ class PydanticAIAdapter(FrameworkAdapter):
         tool_properties: list[AgentProperty[Any]] = []
         tool_risk_assertions: dict[str, ToolRiskAssertion] = {}
         fingerprint_tools: list[Any] = []
+        function_tool_names = set(_agent_tools(target).keys())
         for index, (name, tool) in enumerate(sorted(_agent_tools(target).items())):
             definition, risk_assertion = _tool_definition(
                 name, tool, declared_tool_risk=declared_tool_risk
@@ -1128,6 +1166,37 @@ class PydanticAIAdapter(FrameworkAdapter):
                     authoritative=False,
                 )
             )
+
+        if mcp_manifest is not None:
+            offset = len(fingerprint_tools)
+            for index, (name, declared) in enumerate(sorted(mcp_manifest.tools.items())):
+                if name in function_tool_names:
+                    raise ConfigurationError(
+                        f"agentcheck-mcp-manifest.json declares {name!r}, which is "
+                        "also a real function tool on this agent -- a manifest may "
+                        "only name tools that come from an external toolset."
+                    )
+                definition, risk_assertion = _manifest_tool_definition(
+                    name, declared, declared_tool_risk=declared_tool_risk
+                )
+                definitions.append(definition)
+                tool_risk_assertions[name] = risk_assertion
+                fingerprint_tools.append(definition.model_dump(mode="json"))
+                tool_properties.append(
+                    _property(
+                        definition,
+                        locator=f"{locator}.mcp_manifest.tools[{offset + index}]",
+                        summary=(
+                            "Tool name, description, and JSON Schema from the "
+                            "developer-declared MCP manifest, not read from a live "
+                            "server."
+                        ),
+                        kind=SourceKind.TOOL_SCHEMA,
+                        confidence=0.9,
+                        inferred=True,
+                        authoritative=False,
+                    )
+                )
 
         capabilities = [
             _property(
@@ -1332,7 +1401,9 @@ class PydanticAIAdapter(FrameworkAdapter):
             ),
         )
 
-    def preflight(self, target: Any) -> PreflightReport:
+    def preflight(
+        self, target: Any, *, mcp_manifest: "McpManifest | None" = None
+    ) -> PreflightReport:
         """Decide, before any model call, whether every surface can be replaced."""
 
         if _SDK_IMPORT_ERROR is not None:
@@ -1475,13 +1546,15 @@ class PydanticAIAdapter(FrameworkAdapter):
         toolsets = list(getattr(target, "toolsets", ()) or ())
         own = _agent_toolset(target)
         extra = [t for t in toolsets if t is not own]
-        if extra:
+        if extra and mcp_manifest is None:
             issues.append(
                 SupportIssue(
                     code="unsupported_toolset",
                     message=(
                         "Only the agent's own function toolset is supported; external "
-                        "toolsets are not replaced."
+                        "toolsets are not replaced. To evaluate one anyway, declare "
+                        "its tool schemas in agentcheck-mcp-manifest.json -- see "
+                        "docs/mcp-manifest.md."
                     ),
                     location="agent.toolsets",
                 )
@@ -1531,15 +1604,17 @@ class PydanticAIAdapter(FrameworkAdapter):
         identity_locator: str | None = None,
         controlled_model: bool = False,
         declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
+        mcp_manifest: "McpManifest | None" = None,
     ) -> PreparedTarget:
         _require_sdk()
-        report = self.preflight(target)
+        report = self.preflight(target, mcp_manifest=mcp_manifest)
         report.require_supported()
         spec = self.inspect(
             target,
             source=source,
             identity_locator=identity_locator,
             declared_tool_risk=declared_tool_risk,
+            mcp_manifest=mcp_manifest,
         )
         require_known_tool_risk_names(spec, declared_tool_risk)
 

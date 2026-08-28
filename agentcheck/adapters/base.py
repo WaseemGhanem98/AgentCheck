@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from agentcheck.domain.agent_spec import AgentSpec
     from agentcheck.domain.run import CanonicalRun
     from agentcheck.domain.scenario import ConversationTurn
+    from agentcheck.mcp_manifest import McpManifest
 
 
 class AdapterError(RuntimeError):
@@ -418,6 +419,7 @@ class FrameworkAdapter(ABC):
         source: str | None = None,
         identity_locator: str | None = None,
         declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
+        mcp_manifest: "McpManifest | None" = None,
     ) -> "AgentSpec":
         """Extract an explicit, versioned specification without running the model.
 
@@ -434,11 +436,26 @@ class FrameworkAdapter(ABC):
         and ``destructive`` axes; an axis a declaration does not name still
         falls through to inference. Omitting it keeps prior behaviour exactly:
         every tool resolves through inference or ``UNKNOWN`` alone.
+
+        ``mcp_manifest`` is the developer's frozen snapshot of an external
+        (non-function) toolset's tool schemas -- see
+        ``agentcheck.mcp_manifest.McpManifest``. An adapter with no concept of
+        an external toolset ignores it. Omitting it keeps prior behaviour
+        exactly: a target with any such toolset stays unsupported.
         """
 
     @abstractmethod
-    def preflight(self, target: Any) -> PreflightReport:
-        """Decide whether every executable surface can be intercepted safely."""
+    def preflight(
+        self, target: Any, *, mcp_manifest: "McpManifest | None" = None
+    ) -> PreflightReport:
+        """Decide whether every executable surface can be intercepted safely.
+
+        ``mcp_manifest`` has the same meaning as in ``inspect``: when given, it
+        is the developer taking explicit responsibility for an external
+        toolset's schemas, which is what allows that toolset to stop being an
+        unconditional ``unsupported_toolset`` finding for adapters that
+        support one.
+        """
 
     @abstractmethod
     def prepare(
@@ -452,6 +469,7 @@ class FrameworkAdapter(ABC):
         identity_locator: str | None = None,
         controlled_model: bool = False,
         declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
+        mcp_manifest: "McpManifest | None" = None,
     ) -> PreparedTarget:
         """Return a sanitized runtime target or fail before model execution.
 
@@ -462,6 +480,9 @@ class FrameworkAdapter(ABC):
         to the prepared target, and the risk markers used to build the actual
         runtime invokers, resolve through the same developer declarations
         rather than disagreeing with each other.
+
+        ``mcp_manifest`` is forwarded to ``inspect`` and ``preflight`` for the
+        same reason: one declaration, read consistently everywhere it matters.
         """
 
     def describe_topology(
