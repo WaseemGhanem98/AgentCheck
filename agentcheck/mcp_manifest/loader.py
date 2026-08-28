@@ -24,7 +24,7 @@ _MAX_MANIFEST_BYTES = 256 * 1024
 
 
 def load_mcp_manifest(root: Path, *, filename: str | None = None) -> McpManifest | None:
-    """Read the target's MCP manifest file, or ``None`` when it declares none.
+    """Read the target's MCP manifest file, or ``None`` when the file is absent.
 
     Absence is the normal case, not an error: a target with no external
     toolset needs no manifest, and one that has one but declares no manifest
@@ -59,6 +59,14 @@ def load_mcp_manifest(root: Path, *, filename: str | None = None) -> McpManifest
         manifest = McpManifest.model_validate_json(raw)
     except (ValueError, UnicodeDecodeError) as exc:
         raise ConfigurationError(f"invalid {name}: {exc}") from exc
+    # Refused rather than treated as absent: a file that declares nothing
+    # would otherwise clear the external-toolset refusal while describing no
+    # tools at all, which reads as coverage the target never had.
+    if not manifest.tools:
+        raise ConfigurationError(
+            f"{name} declares no tools. Remove the file if the target has no "
+            "external toolset, or declare the toolset's tool schemas in it."
+        )
     for tool_name, declared in manifest.tools.items():
         try:
             offline_validator(declared.input_schema)

@@ -496,6 +496,45 @@ def test_a_post_message_tool_is_not_silently_classified_read_only() -> None:
     assert capability.capability.action_kind is ActionKind.SEND
 
 
+@pytest.mark.parametrize(
+    ("name", "expected_kind"),
+    [
+        ("get_post", ActionKind.LOOKUP),
+        ("fetch_post", ActionKind.RETRIEVE),
+        ("read_post", ActionKind.LOOKUP),
+        ("find_post_by_id", ActionKind.LOOKUP),
+        ("get_post_comments", ActionKind.LOOKUP),
+        ("summarize_post", ActionKind.SUMMARIZE),
+        ("summary_post", ActionKind.SUMMARIZE),
+    ],
+)
+def test_an_ambiguous_post_yields_to_a_clearer_action(
+    name: str, expected_kind: ActionKind
+) -> None:
+    """The token "post" is a noun as often as a verb in its target domain.
+    Its SEND rule must not override a different recognized action and derive
+    a duplicate-side-effect policy for a non-mutating tool -- a FAIL the
+    target could never legitimately avoid."""
+
+    action_kind, state_changing, destructive = classify_tool(name)
+
+    assert state_changing is False
+    assert destructive is False
+    assert action_kind is expected_kind
+
+
+@pytest.mark.parametrize(
+    "name", ["post_message", "slack_post_message", "send_post", "post_summary"]
+)
+def test_an_ambiguous_post_stays_send_when_it_leads_or_stands_alone(
+    name: str,
+) -> None:
+    """The narrowing must not cost the case it was added for, including the
+    server-prefixed names MCP toolsets commonly use."""
+
+    assert classify_tool(name) == (ActionKind.SEND, True, False)
+
+
 def test_classification_matches_the_phase_one_name_vocabulary() -> None:
     """The gateway marks ambiguous state from these flags, so they must not drift."""
 
