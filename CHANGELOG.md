@@ -12,6 +12,29 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## 0.4.1 (2026-08-28)
+
+One fix, found validating an independent PydanticAI target
+(`slack-samples/bolt-python-starter-agent`) with a dedicated,
+framework-isolated `--python` interpreter -- exactly the setup the CLI's
+own `--python` help text recommends.
+
+**Worker-python probe required both framework SDKs regardless of
+adapter.** `_probe_worker_python()` unconditionally imported `agents`
+(the OpenAI Agents SDK) in the candidate worker interpreter, so a
+`pydantic_ai`- or `custom`-adapter target using an isolated interpreter
+that only had `pydantic-ai` installed (or neither framework, for
+`custom`) failed closed with a misleading "could not import AgentCheck
+and its runtime dependencies (pydantic, openai-agents)" error -- even
+though that adapter needs no such package. This directly contradicted the
+project's own separate-extras guarantee ("evaluating one framework never
+installs the other"). Fixed: the probe now imports only the framework
+package the *configured* adapter actually needs.
+
+**Suite identity:** unaffected. `GENERATOR_COMPATIBILITY_VERSION` stays
+`1`; this fix changes worker-interpreter diagnostics only, not inspection,
+generation, or evaluation semantics. No target's `spec_id` moves.
+
 ## 0.4.0 (2026-08-27)
 
 One new capability, four fixes found by hands-on reliability sweeps and real
