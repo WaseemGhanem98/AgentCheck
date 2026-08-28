@@ -286,6 +286,74 @@ def test_prepared_venv_with_extra_package_is_used(tmp_path: Path) -> None:
     assert result.require_value().identity.name.value == "PreparedExtra"
 
 
+CUSTOM_AGENT = """
+from agentcheck import ToolRuntime, TurnResult
+
+
+class MinimalCustomAgent:
+    name = "Minimal"
+    instructions = "Do nothing."
+    tools = ()
+
+    def start(self, message: str, tools: ToolRuntime) -> TurnResult:
+        return TurnResult(output="ok")
+
+
+agent = MinimalCustomAgent()
+"""
+
+
+@POSIX_ONLY
+def test_worker_python_probe_does_not_require_unrelated_framework_sdks(
+    tmp_path: Path,
+) -> None:
+    """A worker interpreter for one adapter must not need another adapter's SDK.
+
+    Reproduces a real bug found validating an independent PydanticAI target
+    (a Slack bolt starter agent) with a dedicated, framework-isolated
+    ``--python`` interpreter -- exactly the setup the CLI's own ``--python``
+    help text recommends. The probe used to hardcode ``import ... agents``
+    unconditionally, so a legitimate pydantic-ai-only (or, as tested here,
+    framework-free ``custom``-adapter) worker venv failed closed with a
+    misleading "could not import ... openai-agents" error even though that
+    adapter needs no such package. A bare venv with only the base AgentCheck
+    package installed -- no framework extra at all -- is the sharpest
+    reproduction: it must work for a ``custom``-adapter target, which needs
+    neither SDK.
+    """
+    root = _init(tmp_path / "target", "agent.py:agent")
+    (root / "agent.py").write_text(CUSTOM_AGENT.lstrip(), encoding="utf-8")
+
+    venv_dir = tmp_path / "bare-venv"
+    subprocess.run(
+        [sys.executable, "-m", "venv", str(venv_dir)],
+        check=True,
+        capture_output=True,
+    )
+    venv_python = venv_dir / "bin" / "python"
+    package_root = Path(__file__).resolve().parents[2]
+    subprocess.run(
+        [str(venv_python), "-m", "pip", "install", "-q", str(package_root)],
+        check=True,
+        capture_output=True,
+        timeout=180,
+    )
+    # Confirm the bare venv genuinely lacks both framework SDKs -- otherwise
+    # this test would pass for the wrong reason.
+    missing = subprocess.run(
+        [str(venv_python), "-c", "import agents"],
+        capture_output=True,
+    )
+    assert missing.returncode != 0, "bare venv unexpectedly has openai-agents installed"
+
+    _, config = load_config(root)
+    config = config.model_copy(update={"adapter": "custom"})
+    config = apply_python_executable(config, str(venv_python))
+    result = inspect_in_subprocess(root, config)
+    assert result.ok, result.infrastructure_error
+    assert result.require_value().identity.name.value == "Minimal"
+
+
 def test_child_environment_still_omits_credentials_with_explicit_python(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

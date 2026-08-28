@@ -140,21 +140,36 @@ def _read_response(path: Path) -> dict[str, Any] | None:
     return raw if isinstance(raw, dict) else None
 
 
-def _probe_worker_python(executable: Path) -> None:
-    """Fail closed if the selected interpreter cannot host an AgentCheck worker."""
+_ADAPTER_PROBE_MODULES: dict[str, tuple[str, ...]] = {
+    "openai_agents": ("agents",),
+    "pydantic_ai": ("pydantic_ai",),
+    "custom": (),
+}
+
+
+def _probe_worker_python(executable: Path, config: AgentCheckConfig) -> None:
+    """Fail closed if the selected interpreter cannot host an AgentCheck worker.
+
+    Only requires the framework package the *configured* adapter actually
+    needs. A worker interpreter is commonly a target-local, framework-isolated
+    venv (the CLI's own ``--python`` help text suggests exactly this) -- one
+    that deliberately has only ``pydantic-ai`` installed, say, with no
+    ``openai-agents`` at all. Probing for every framework unconditionally
+    would fail closed on that legitimate, recommended setup for a reason
+    unrelated to whether the worker can actually run this target.
+    """
 
     probe_config = AgentCheckConfig()
     environment = child_environment(probe_config)
     environment["PYTHONPATH"] = str(_PACKAGE_ROOT)
+    required_modules = ("agentcheck", "pydantic", *_ADAPTER_PROBE_MODULES[config.adapter])
+    import_line = "import sys, " + ", ".join(required_modules)
     try:
         completed = subprocess.run(
             [
                 str(executable),
                 "-c",
-                (
-                    "import sys, agentcheck, pydantic, agents\n"
-                    "print('%d.%d.%d' % sys.version_info[:3])"
-                ),
+                (f"{import_line}\nprint('%d.%d.%d' % sys.version_info[:3])"),
             ],
             env=environment,
             stdin=subprocess.DEVNULL,
@@ -177,11 +192,11 @@ def _probe_worker_python(executable: Path) -> None:
         )
         raise ConfigurationError(
             "The selected python_executable could not import AgentCheck and its "
-            "runtime dependencies (pydantic, openai-agents). Install AgentCheck "
-            "into that environment (`python -m pip install -e '.[agentcheck]'`) "
-            "or run AgentCheck from an environment that already contains the "
-            "target's dependencies. AgentCheck does not install packages "
-            "automatically. "
+            f"runtime dependencies ({', '.join(required_modules[1:])}). Install "
+            "AgentCheck into that environment (`python -m pip install -e "
+            "'.[agentcheck]'`) or run AgentCheck from an environment that already "
+            "contains the target's dependencies. AgentCheck does not install "
+            "packages automatically. "
             f"{stderr}".strip()
         )
     version_text = completed.stdout.decode("utf-8", errors="replace").strip().splitlines()
@@ -224,7 +239,7 @@ def _worker_command(root: Path, config: AgentCheckConfig) -> list[str]:
     # Compare the invoked wrapper paths, not symlink targets. Two venvs may
     # share a base interpreter binary but have different site-packages.
     if os.path.normpath(str(executable)) != os.path.normpath(sys.executable):
-        _probe_worker_python(executable)
+        _probe_worker_python(executable, config)
     return [
         str(executable),
         "-c",
