@@ -66,6 +66,7 @@ from agentcheck.inspect.risk_authority import declared_risk_for, resolve_tool_ri
 
 if TYPE_CHECKING:
     from agentcheck.config import ToolRiskDeclaration
+    from agentcheck.mcp_manifest import McpManifest
 from agentcheck.schema_safety import UnsafeSchemaReference, offline_validator
 from agentcheck.runner.budgets import BudgetExceeded
 from agentcheck.runner.launch_barrier import LaunchBarrier
@@ -2019,7 +2020,9 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         source: str | None = None,
         identity_locator: str | None = None,
         declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
+        mcp_manifest: "McpManifest | None" = None,
     ) -> AgentSpec:
+        del mcp_manifest  # No external-toolset concept on this adapter yet.
         _require_sdk()
         source = source or "runtime:agent"
         if type(target) is not Agent:
@@ -2467,7 +2470,10 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
             ),
         )
 
-    def preflight(self, target: Any) -> PreflightReport:
+    def preflight(
+        self, target: Any, *, mcp_manifest: "McpManifest | None" = None
+    ) -> PreflightReport:
+        del mcp_manifest  # No external-toolset concept on this adapter yet.
         _require_sdk()
         issues: list[SupportIssue] = []
         version = _sdk_version()
@@ -2711,7 +2717,9 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         identity_locator: str | None = None,
         controlled_model: bool = False,
         declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
+        mcp_manifest: "McpManifest | None" = None,
     ) -> PreparedTarget:
+        del mcp_manifest  # No external-toolset concept on this adapter yet.
         report = self.preflight(target)
         report.require_supported()
         spec = self.inspect(

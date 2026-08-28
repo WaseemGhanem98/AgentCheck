@@ -12,6 +12,35 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## 0.5.0 (2026-08-28)
+
+**PydanticAI agents with external (MCP) toolsets are no longer refused
+outright.** Previously any non-function toolset on the agent — the shape a
+real MCP-backed agent has — tripped `unsupported_toolset` at `preflight`
+unconditionally. AgentCheck still never connects to a real MCP server
+anywhere in its pipeline: that would mean spawning a subprocess or making a
+network call against target-controlled code during `inspect`, `generate`, or
+`run`, which the no-target-execution and network-deny-by-default invariants
+rule out. Instead, a developer can now declare the external toolset's tool
+schemas by hand in `agentcheck-mcp-manifest.json` (same directory as
+`agentcheck.json`), authored once out of band by connecting to the real
+server with their own credentials. A declared tool is folded into the
+target's spec exactly like a function tool -- risk-resolved, fault-tested,
+and simulated through `ToolGateway` -- while the real external toolset is
+never queried or called. The manifest loader mirrors the fixtures loader's
+safety discipline exactly: contained-path resolution with `O_NOFOLLOW`, a
+byte-size cap, `extra="forbid"` schema validation, and every declared
+`input_schema` rejected if it references a non-local `$ref`/`$dynamicRef`.
+See [docs/mcp-manifest.md](docs/mcp-manifest.md). The OpenAI Agents SDK and
+Custom adapters accept the new parameter but do not yet act on it -- there is
+no external-toolset concept on those adapters today.
+
+**Suite identity:** `GENERATOR_COMPATIBILITY_VERSION` stays `1`. Not
+breaking for any existing target: a target with no
+`agentcheck-mcp-manifest.json` behaves exactly as before, including agents
+with an external toolset, which are still refused at `preflight` exactly as
+before absent a manifest.
+
 ## 0.4.2 (2026-08-28)
 
 One fix, found running a broader external-validation campaign against

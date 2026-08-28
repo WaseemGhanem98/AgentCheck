@@ -53,6 +53,7 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from agentcheck.config import ToolRiskDeclaration
+    from agentcheck.mcp_manifest import McpManifest
 
 from jsonschema.exceptions import SchemaError  # type: ignore[import-untyped]
 
@@ -822,6 +823,7 @@ class CustomAgentAdapter(FrameworkAdapter):
         source: str | None = None,
         identity_locator: str | None = None,
         declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
+        mcp_manifest: "McpManifest | None" = None,
     ) -> AgentSpec:
         """Describe the declared surface. Nothing on the target is executed.
 
@@ -832,6 +834,7 @@ class CustomAgentAdapter(FrameworkAdapter):
         of the target access.
         """
 
+        del mcp_manifest  # No external-toolset concept on this adapter yet.
         locator = source or f"{type(target).__module__}.{type(target).__name__}"
         tool_risk_assertions: dict[str, ToolRiskAssertion] = {}
         definitions: list[ToolDefinition] = []
@@ -1080,7 +1083,9 @@ class CustomAgentAdapter(FrameworkAdapter):
 
     # -- support decision ---------------------------------------------------
 
-    def preflight(self, target: Any) -> PreflightReport:
+    def preflight(
+        self, target: Any, *, mcp_manifest: "McpManifest | None" = None
+    ) -> PreflightReport:
         """Refuse a target that cannot be driven safely, before it is driven.
 
         Every check is structural. Nothing here calls ``start``, ``resume`` or
@@ -1088,6 +1093,7 @@ class CustomAgentAdapter(FrameworkAdapter):
         declaration that has to be executed to be read is not a declaration.
         """
 
+        del mcp_manifest  # No external-toolset concept on this adapter yet.
         if not self._implements_any_of_the_contract(target):
             # One diagnosis, not three symptoms. An object with none of the
             # contract on it is almost always the wrong object -- a config
@@ -1282,6 +1288,7 @@ class CustomAgentAdapter(FrameworkAdapter):
         identity_locator: str | None = None,
         controlled_model: bool = False,
         declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
+        mcp_manifest: "McpManifest | None" = None,
     ) -> PreparedTarget:
         """Bind the declared agent to a gateway, or refuse before it runs.
 
@@ -1292,6 +1299,7 @@ class CustomAgentAdapter(FrameworkAdapter):
         constructed here.
         """
 
+        del mcp_manifest  # No external-toolset concept on this adapter yet.
         if controlled_model:
             # Refused, not recorded as a caveat. AgentCheck substitutes a
             # deterministic model by rebuilding the target around one, and a

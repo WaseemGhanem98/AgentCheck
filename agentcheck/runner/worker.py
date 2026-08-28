@@ -34,6 +34,7 @@ from agentcheck.domain import (
     ToolFixture,
 )
 from agentcheck.inspect import TargetLoadError, enable_contained_target_imports, load_target
+from agentcheck.mcp_manifest import load_mcp_manifest
 from agentcheck.privacy import redact_log_text
 
 from .network_guard import install_network_guard
@@ -248,6 +249,7 @@ def _inspect(
 ) -> tuple[Any, dict[str, Any], dict[str, Any] | None]:
     target, source = _load_agent(root, config)
     adapter = _adapter_for(config)
+    mcp_manifest = load_mcp_manifest(root)
     # A canonical target-relative locator for the same module `source` points
     # at, carrying no checkout location and no spelling of the same path.
     spec = adapter.inspect(
@@ -255,8 +257,9 @@ def _inspect(
         source=source,
         identity_locator=portable_entrypoint(root, config.entrypoint),
         declared_tool_risk=config.tool_risk,
+        mcp_manifest=mcp_manifest,
     )
-    preflight = encode_preflight_report(adapter.preflight(target))
+    preflight = encode_preflight_report(adapter.preflight(target, mcp_manifest=mcp_manifest))
     topology = adapter.describe_topology(target, source=source)
     return spec, preflight, topology
 
@@ -264,11 +267,13 @@ def _inspect(
 def _run(root: Path, config: AgentCheckConfig, scenario: Scenario, run_id: str) -> Any:
     target, source = _load_agent(root, config)
     adapter = _adapter_for(config)
+    mcp_manifest = load_mcp_manifest(root)
     spec = adapter.inspect(
         target,
         source=source,
         identity_locator=portable_entrypoint(root, config.entrypoint),
         declared_tool_risk=config.tool_risk,
+        mcp_manifest=mcp_manifest,
     )
     tools = tuple(item.value for item in spec.tools.items)
     world = WorldSimulator(scenario.initial_world_state)
@@ -287,6 +292,7 @@ def _run(root: Path, config: AgentCheckConfig, scenario: Scenario, run_id: str) 
         identity_locator=portable_entrypoint(root, config.entrypoint),
         controlled_model=config.controlled_model,
         declared_tool_risk=config.tool_risk,
+        mcp_manifest=mcp_manifest,
     )
     return asyncio.run(
         adapter.run(
