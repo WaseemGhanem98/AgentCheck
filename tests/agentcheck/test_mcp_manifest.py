@@ -131,6 +131,51 @@ def test_manifest_tool_is_added_to_the_spec_and_risk_resolved() -> None:
     assert definition.destructive is True
 
 
+def test_preflight_rejects_an_empty_manifest() -> None:
+    """A manifest declaring nothing cannot describe the external toolset, so
+    it must not clear the refusal. Substituting silence for a declaration is
+    how a target reports coverage it never had."""
+
+    agent = _agent_with_external_toolset()
+    report = PydanticAIAdapter().preflight(agent, mcp_manifest=McpManifest())
+    assert any(issue.code == "invalid_mcp_manifest" for issue in report.issues)
+
+
+def test_inspect_rejects_an_empty_manifest() -> None:
+    agent = _agent_with_external_toolset()
+    with pytest.raises(ConfigurationError, match="declares no tools"):
+        PydanticAIAdapter().inspect(agent, mcp_manifest=McpManifest())
+
+
+def test_a_manifest_without_an_external_toolset_is_rejected() -> None:
+    """A manifest only declares tools AgentCheck cannot read for itself.
+    Applying one to an agent with no external toolset -- a stale file left
+    behind by a refactor -- would add tools the agent cannot call and then
+    generate scenarios against them."""
+
+    def real_tool(x: int) -> int:
+        raise AssertionError("real function tool handler must never run")
+
+    agent = Agent("test", tools=[real_tool])
+    manifest = McpManifest(
+        tools={"phantom": DeclaredMcpTool(description="Phantom.", input_schema={})}
+    )
+    with pytest.raises(ConfigurationError, match="no external toolset"):
+        PydanticAIAdapter().inspect(agent, mcp_manifest=manifest)
+
+
+def test_preflight_rejects_a_manifest_without_an_external_toolset() -> None:
+    agent = Agent("test")
+    manifest = McpManifest(
+        tools={"phantom": DeclaredMcpTool(description="Phantom.", input_schema={})}
+    )
+    report = PydanticAIAdapter().preflight(agent, mcp_manifest=manifest)
+    assert any(
+        issue.code == "mcp_manifest_without_external_toolset"
+        for issue in report.issues
+    )
+
+
 def test_manifest_name_colliding_with_a_real_tool_is_rejected() -> None:
     agent = _agent_with_external_toolset(extra_function_tool=True)
     manifest = McpManifest(
@@ -253,6 +298,12 @@ def test_load_mcp_manifest_valid_file(tmp_path: Path) -> None:
     manifest = load_mcp_manifest(tmp_path)
     assert manifest is not None
     assert "search" in manifest.tools
+
+
+def test_load_mcp_manifest_rejects_a_file_declaring_no_tools(tmp_path: Path) -> None:
+    (tmp_path / "agentcheck-mcp-manifest.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="declares no tools"):
+        load_mcp_manifest(tmp_path)
 
 
 def test_load_mcp_manifest_rejects_malformed_json(tmp_path: Path) -> None:

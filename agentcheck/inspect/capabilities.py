@@ -91,6 +91,14 @@ _COMPOSITION_KEYWORDS = (
 # only/confidence 0.3 bucket "send" already covers. Grouped with
 # send/email/notify/publish, not created as its own bucket, since posting a
 # message is the same real-world action as sending one.
+#
+# "post" introduced a noun collision in exactly the domain that motivated
+# this token ("a post" on Slack/Reddit/WordPress versus "post a message").
+# Because SEND is matched before later rules, a plain token match would read
+# get_post/read_post/summarize_post as state-changing sends and generate
+# duplicate-side-effect policies for non-mutating tools. It is therefore
+# listed in _AMBIGUOUS_TOKENS below; token order distinguishes a leading read
+# action from a leading `post` action when both appear.
 _NAME_RULES: tuple[tuple[frozenset[str], ActionKind, bool, bool], ...] = (
     (frozenset({"delete", "remove", "destroy", "erase", "purge"}), ActionKind.DELETE, True, True),
     (frozenset({"cancel", "terminate", "close", "refund"}), ActionKind.MODIFY, True, True),
@@ -108,6 +116,19 @@ _NAME_RULES: tuple[tuple[frozenset[str], ActionKind, bool, bool], ...] = (
     (frozenset({"lookup", "find", "search", "get", "read"}), ActionKind.LOOKUP, False, False),
     (frozenset({"retrieve", "fetch"}), ActionKind.RETRIEVE, False, False),
     (frozenset({"summarize", "summary"}), ActionKind.SUMMARIZE, False, False),
+)
+
+# Tokens that name an action in one reading and an object in another. They
+# match their rule unless a different recognized action token precedes them,
+# so `post_message` and `post_summary` stay sends while `get_post` and
+# `summarize_post` reach their own rules.
+_AMBIGUOUS_TOKENS = frozenset({"post"})
+
+_UNAMBIGUOUS_ACTION_TOKENS = frozenset(
+    token
+    for rule_tokens, _, _, _ in _NAME_RULES
+    for token in rule_tokens
+    if token not in _AMBIGUOUS_TOKENS
 )
 
 _NAME_TOKEN_CONFIDENCE = 0.6
@@ -277,19 +298,31 @@ class CapabilityExtractor(Protocol):
     ) -> tuple[ExtractedCapability, ...]: ...
 
 
-def _tokens(value: str) -> set[str]:
+def _tokens(value: str) -> tuple[str, ...]:
     normalized = "".join(
         character if character.isalnum() else " " for character in value.casefold()
     )
-    return set(normalized.split())
+    return tuple(normalized.split())
 
 
 def _matched_rule(
-    tokens: set[str],
+    tokens: Sequence[str],
 ) -> tuple[frozenset[str], ActionKind, bool, bool] | None:
+    token_set = set(tokens)
+    first_ambiguous = next(
+        (index for index, token in enumerate(tokens) if token in _AMBIGUOUS_TOKENS),
+        None,
+    )
+    clearer_intent_precedes = first_ambiguous is not None and any(
+        token in _UNAMBIGUOUS_ACTION_TOKENS for token in tokens[:first_ambiguous]
+    )
     for rule in _NAME_RULES:
-        if tokens & rule[0]:
-            return rule
+        matched = token_set & rule[0]
+        if not matched:
+            continue
+        if clearer_intent_precedes and matched <= _AMBIGUOUS_TOKENS:
+            continue
+        return rule
     return None
 
 
@@ -579,7 +612,7 @@ def _classification_signals(
         )
 
     vocabulary, action_kind, state_changing, destructive = rule
-    matched = sorted(name_tokens & vocabulary)
+    matched = sorted(set(name_tokens) & vocabulary)
     signals.append(
         CapabilitySignal(
             kind=CapabilitySignalKind.NAME_TOKEN,
@@ -597,7 +630,7 @@ def _classification_signals(
     corroborated = False
     if definition.description:
         description_locator = f"tool:{definition.name}.description"
-        shared = sorted(_tokens(definition.description) & vocabulary)
+        shared = sorted(set(_tokens(definition.description)) & vocabulary)
         if shared:
             corroborated = True
             confidence = _CORROBORATED_CONFIDENCE

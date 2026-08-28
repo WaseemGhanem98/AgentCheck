@@ -256,6 +256,44 @@ def _agent_tools(target: Any) -> dict[str, Any]:
     return dict(toolset.tools)
 
 
+def _external_toolsets(target: Any) -> list[Any]:
+    """Toolsets AgentCheck cannot read for itself -- MCP and anything like it."""
+
+    toolsets = list(getattr(target, "toolsets", ()) or ())
+    own = _agent_toolset(target)
+    return [toolset for toolset in toolsets if toolset is not own]
+
+
+def _mcp_manifest_issue(
+    target: Any, mcp_manifest: "McpManifest | None"
+) -> SupportIssue | None:
+    """Return a manifest/target issue shared by every adapter surface."""
+
+    if mcp_manifest is None:
+        return None
+    if not mcp_manifest.tools:
+        return SupportIssue(
+            code="invalid_mcp_manifest",
+            message=(
+                "agentcheck-mcp-manifest.json declares no tools. An empty manifest "
+                "cannot describe an external toolset or lift its refusal."
+            ),
+            location="agentcheck-mcp-manifest.json",
+        )
+    if not _external_toolsets(target):
+        return SupportIssue(
+            code="mcp_manifest_without_external_toolset",
+            message=(
+                "agentcheck-mcp-manifest.json is present, but this agent has no "
+                "external toolset for it to describe. A manifest only declares "
+                "tools AgentCheck cannot read for itself; applying one here would "
+                "add tools the agent cannot actually call."
+            ),
+            location="agent.toolsets",
+        )
+    return None
+
+
 def _static_instruction_parts(target: Any) -> tuple[list[str], list[str]]:
     """Return (static parts, reasons the instructions are not fully static).
 
@@ -1143,6 +1181,10 @@ class PydanticAIAdapter(FrameworkAdapter):
         instructions = "\n\n".join(static) if static else None
         output_schema = _output_schema(target)
 
+        manifest_issue = _mcp_manifest_issue(target, mcp_manifest)
+        if manifest_issue is not None:
+            raise ConfigurationError(manifest_issue.message)
+
         definitions: list[ToolDefinition] = []
         tool_properties: list[AgentProperty[Any]] = []
         tool_risk_assertions: dict[str, ToolRiskAssertion] = {}
@@ -1543,10 +1585,10 @@ class PydanticAIAdapter(FrameworkAdapter):
                     location="agent.event_stream_handler",
                 )
             )
-        toolsets = list(getattr(target, "toolsets", ()) or ())
-        own = _agent_toolset(target)
-        extra = [t for t in toolsets if t is not own]
-        if extra and mcp_manifest is None:
+        manifest_issue = _mcp_manifest_issue(target, mcp_manifest)
+        if manifest_issue is not None:
+            issues.append(manifest_issue)
+        elif _external_toolsets(target) and mcp_manifest is None:
             issues.append(
                 SupportIssue(
                     code="unsupported_toolset",
