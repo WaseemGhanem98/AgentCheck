@@ -12,6 +12,51 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## 0.5.1 (2026-08-28)
+
+Three correctness fixes, found while reviewing and revalidating 0.5.0's
+new MCP-manifest support against a real Slack target.
+
+### Fixed
+
+- **An empty MCP manifest silently lifted the external-toolset refusal.**
+  A file containing `{}` declared no tools but still let `preflight` proceed,
+  creating apparent coverage for a surface AgentCheck could not see. Empty
+  manifests are now rejected by the loader, and both direct adapter surfaces
+  reject a programmatically constructed empty `McpManifest` too.
+- **A manifest could add phantom tools to an agent with no external
+  toolset.** A stale manifest survived even after its external toolset was
+  removed and inserted tools the agent could not actually call, so AgentCheck
+  could generate scenarios against a fictional surface. Inspection and
+  preflight now reject a manifest unless the PydanticAI agent actually has an
+  external toolset for it to describe.
+- **`"post"` fell into the weakest read-only risk-inference bucket.** A real
+  Slack agent's manifest-declared `post_message` tool inspected as `other,
+  read-only (confidence 0.30)`, but `post` is also a common noun in the same
+  domain. The resolver now treats a leading or standalone `post` as part of
+  the `send`/`email`/`notify`/`publish` group, while a clearer recognized
+  action before it wins. Names such as `get_post`, `fetch_post`, and
+  `summarize_post` remain non-mutating rather than acquiring impossible
+  duplicate-side-effect policies; `post_summary` remains a SEND action.
+
+**Compatibility:** this patch is intentionally breaking for two invalid
+manifest configurations that 0.5.0 silently accepted: an empty manifest now
+fails to load, and a manifest attached to an agent with no external toolset
+now fails inspection. Remove the stale file when no external toolset exists;
+otherwise declare the external toolset's actual schemas. Valid, non-empty
+manifests attached to agents with external toolsets are unaffected.
+
+**Suite identity:** `GENERATOR_COMPATIBILITY_VERSION` stays `1`. The manifest
+corrections refuse invalid configurations rather than changing valid suite
+generation. The `post` correction changes action metadata for matching tool
+names and can also change inferred risk. When it changes a tool's resolved
+`state_changing` boolean, the target gets a new `spec_id` and must regenerate an
+older frozen suite. A declared or authoritative value that keeps the resolved
+risk booleans stable also keeps `spec_id` stable, although a newly generated
+bounded suite can still record SEND rather than OTHER action metadata. Names
+with a leading recognized non-mutating action or no matching `post` token are
+unaffected.
+
 ## 0.5.0 (2026-08-28)
 
 **PydanticAI agents with external (MCP) toolsets are no longer refused
