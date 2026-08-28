@@ -404,6 +404,7 @@ def test_absent_schema_yields_no_parameters_without_failing() -> None:
         ("write", ActionKind.CREATE, True, False),
         ("save_draft", ActionKind.CREATE, True, False),
         ("send_receipt", ActionKind.SEND, True, False),
+        ("post_message", ActionKind.SEND, True, False),
         ("schedule_visit", ActionKind.SCHEDULE, True, False),
         ("lookup_account", ActionKind.LOOKUP, False, False),
         ("retrieve_invoice", ActionKind.RETRIEVE, False, False),
@@ -471,6 +472,28 @@ def test_a_refund_tool_is_not_silently_classified_read_only() -> None:
     assert capability.capability.state_changing is True
     assert capability.capability.destructive is True
     assert capability.capability.action_kind is ActionKind.MODIFY
+
+
+def test_a_post_message_tool_is_not_silently_classified_read_only() -> None:
+    """Reproduces a real MCP toolset's documented tool surface (a Slack
+    agent's external tools, validated via the new MCP-manifest feature):
+    "post a message" is the same real-world action "send" already covers,
+    and is the verb Slack's own API uses (chat.postMessage). Before "post"
+    was added to the name vocabulary, this fell through every rule to
+    OTHER/read-only/confidence 0.3 for a tool that sends a real message to
+    a channel."""
+
+    capability = extract_capabilities(
+        [
+            _tool(
+                "post_message",
+                description="Send a message to a Slack channel or thread.",
+            )
+        ]
+    )[0]
+
+    assert capability.capability.state_changing is True
+    assert capability.capability.action_kind is ActionKind.SEND
 
 
 def test_classification_matches_the_phase_one_name_vocabulary() -> None:

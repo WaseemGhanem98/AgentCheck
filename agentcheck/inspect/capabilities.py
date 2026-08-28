@@ -83,6 +83,14 @@ _COMPOSITION_KEYWORDS = (
 # than update/modify's non-destructive bucket: a refund reverses money
 # already collected, the same "undoes a completed state, real consequence"
 # shape as a cancellation, not a simple field edit.
+#
+# "post" was added after validating the new MCP-manifest feature against a
+# real target: a Slack agent's documented external tool set includes a
+# "post a message" action, the same verb Slack's own API uses
+# (`chat.postMessage`), which fell through to the same OTHER/read-
+# only/confidence 0.3 bucket "send" already covers. Grouped with
+# send/email/notify/publish, not created as its own bucket, since posting a
+# message is the same real-world action as sending one.
 _NAME_RULES: tuple[tuple[frozenset[str], ActionKind, bool, bool], ...] = (
     (frozenset({"delete", "remove", "destroy", "erase", "purge"}), ActionKind.DELETE, True, True),
     (frozenset({"cancel", "terminate", "close", "refund"}), ActionKind.MODIFY, True, True),
@@ -95,7 +103,7 @@ _NAME_RULES: tuple[tuple[frozenset[str], ActionKind, bool, bool], ...] = (
         True,
         False,
     ),
-    (frozenset({"send", "email", "notify", "publish"}), ActionKind.SEND, True, False),
+    (frozenset({"send", "email", "notify", "publish", "post"}), ActionKind.SEND, True, False),
     (frozenset({"schedule", "book", "reserve"}), ActionKind.SCHEDULE, True, False),
     (frozenset({"lookup", "find", "search", "get", "read"}), ActionKind.LOOKUP, False, False),
     (frozenset({"retrieve", "fetch"}), ActionKind.RETRIEVE, False, False),
