@@ -12,6 +12,29 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## 0.4.2 (2026-08-28)
+
+One fix, found running a broader external-validation campaign against
+independent, real-world OpenAI Agents SDK and PydanticAI repositories.
+
+**"refund" fell into the weakest read-only risk-inference bucket.** A
+real, independently-maintained PydanticAI e-commerce support agent's
+`request_refund` tool -- genuine order-eligibility logic reversing a
+completed payment -- inspected as `other, read-only (confidence 0.30)`,
+the same defect class 0.3.0's `write` gap was. `"refund"` now joins the
+`cancel`/`terminate`/`close` name-token group (state-changing,
+destructive): a refund reverses money already collected, the same
+real, hard-to-undo consequence as a cancellation.
+
+**Suite identity:** `GENERATOR_COMPATIBILITY_VERSION` stays `1`. **Breaking
+for any target with a matching, undeclared tool name:** same category of
+break as the `write` fix in 0.4.0 -- a target with an undeclared tool named
+`refund` (or a compound name containing that token, e.g. `process_refund`)
+gets a new `spec_id`, and any frozen suite generated before this fix is
+rejected as stale until regenerated. A target that declares `tool_risk`
+explicitly for that tool, or has no matching tool name at all, is
+unaffected.
+
 ## 0.4.1 (2026-08-28)
 
 One fix, found validating an independent PydanticAI target
