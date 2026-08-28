@@ -74,9 +74,18 @@ _COMPOSITION_KEYWORDS = (
 # the project's own convention is to let a developer's explicit
 # `tool_risk` declaration escalate further rather than guess destructive from
 # a name alone.
+#
+# "refund" was added after a real, independently-maintained target's
+# request_refund tool -- a genuine financial state-changing action whose own
+# docstring reads "This action changes the order status and triggers a
+# refund process" -- fell through every rule to the same OTHER/read-
+# only/confidence 0.3 bucket. Grouped with cancel/terminate/close rather
+# than update/modify's non-destructive bucket: a refund reverses money
+# already collected, the same "undoes a completed state, real consequence"
+# shape as a cancellation, not a simple field edit.
 _NAME_RULES: tuple[tuple[frozenset[str], ActionKind, bool, bool], ...] = (
     (frozenset({"delete", "remove", "destroy", "erase", "purge"}), ActionKind.DELETE, True, True),
-    (frozenset({"cancel", "terminate", "close"}), ActionKind.MODIFY, True, True),
+    (frozenset({"cancel", "terminate", "close", "refund"}), ActionKind.MODIFY, True, True),
     (frozenset({"update", "modify", "change", "set", "edit"}), ActionKind.MODIFY, True, False),
     (
         frozenset(

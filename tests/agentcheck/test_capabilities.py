@@ -398,6 +398,7 @@ def test_absent_schema_yields_no_parameters_without_failing() -> None:
         ("delete_account", ActionKind.DELETE, True, True),
         ("purge_records", ActionKind.DELETE, True, True),
         ("cancel_subscription", ActionKind.MODIFY, True, True),
+        ("request_refund", ActionKind.MODIFY, True, True),
         ("update_email", ActionKind.MODIFY, True, False),
         ("create_ticket", ActionKind.CREATE, True, False),
         ("write", ActionKind.CREATE, True, False),
@@ -444,6 +445,32 @@ def test_a_bare_write_tool_is_not_silently_classified_read_only() -> None:
 
     assert capability.capability.state_changing is True
     assert capability.capability.action_kind is ActionKind.CREATE
+
+
+def test_a_refund_tool_is_not_silently_classified_read_only() -> None:
+    """Reproduces a real independent target's request_refund tool (an
+    e-commerce PydanticAI support agent): a genuine financial state-changing
+    action whose own docstring says it changes order status and triggers a
+    refund process. Before "refund" was added to the name vocabulary, this
+    fell through every rule to OTHER/read-only/confidence 0.3 -- the single
+    lowest-confidence, least-scrutinized classification -- for a tool that
+    reverses money already collected."""
+
+    capability = extract_capabilities(
+        [
+            _tool(
+                "request_refund",
+                description=(
+                    "Submit a refund request for an order. This action "
+                    "changes the order status and triggers a refund process."
+                ),
+            )
+        ]
+    )[0]
+
+    assert capability.capability.state_changing is True
+    assert capability.capability.destructive is True
+    assert capability.capability.action_kind is ActionKind.MODIFY
 
 
 def test_classification_matches_the_phase_one_name_vocabulary() -> None:
