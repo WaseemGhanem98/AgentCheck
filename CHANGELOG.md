@@ -14,7 +14,7 @@ identity**.
 
 ## 0.5.1 (2026-08-28)
 
-Three correctness fixes, found while reviewing and revalidating 0.5.0's
+Three product correctness fixes, found while reviewing and revalidating 0.5.0's
 new MCP-manifest support against a real Slack target.
 
 ### Fixed
@@ -38,6 +38,12 @@ new MCP-manifest support against a real Slack target.
   action before it wins. Names such as `get_post`, `fetch_post`, and
   `summarize_post` remain non-mutating rather than acquiring impossible
   duplicate-side-effect policies; `post_summary` remains a SEND action.
+
+### Packaging
+
+- **Release artifacts now carry the project's `NOTICE` alongside `LICENSE`.**
+  The artifact audit positively requires both files in the wheel and source
+  distribution, so a future packaging omission fails before publication.
 
 **Compatibility:** this patch is intentionally breaking for two invalid
 manifest configurations that 0.5.0 silently accepted: an empty manifest now

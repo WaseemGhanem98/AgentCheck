@@ -38,6 +38,10 @@ FORBIDDEN = (
 # underscores. Matching that shape rather than a literal keeps this check honest
 # if either name changes again.
 WHEEL_ALLOWED = re.compile(r"^(agentcheck/|[A-Za-z0-9_.]+-[^/]*\.dist-info/)")
+WHEEL_LICENSE_PATH = re.compile(
+    r"^[A-Za-z0-9_.]+-[^/]*\.dist-info/licenses/(?P<filename>[^/]+)$"
+)
+REQUIRED_DISTRIBUTION_FILES = ("LICENSE", "NOTICE")
 
 # An sdist legitimately carries contributor material as well as the package,
 # but a new top-level directory must be reviewed. This generic allowlist catches
@@ -51,6 +55,7 @@ SDIST_ALLOWED_ROOTS = frozenset(
         "CONTRIBUTING.md",
         "LICENSE",
         "MANIFEST.in",
+        "NOTICE",
         "PKG-INFO",
         "README.md",
         "SECURITY.md",
@@ -103,8 +108,23 @@ def main() -> int:
                         f"{artifact.name}: {name} (unexpected sdist top-level path)"
                     )
 
+        required_counts = dict.fromkeys(REQUIRED_DISTRIBUTION_FILES, 0)
+        if artifact.suffix == ".whl":
+            for name in names:
+                match = WHEEL_LICENSE_PATH.fullmatch(name)
+                if match is not None and match.group("filename") in required_counts:
+                    required_counts[match.group("filename")] += 1
+        else:
+            for filename in required_counts:
+                required_counts[filename] = names.count(filename)
+        for filename, count in required_counts.items():
+            if count != 1:
+                failures.append(
+                    f"{artifact.name}: expected exactly one packaged {filename}, found {count}"
+                )
+
     if failures:
-        print("\nFAIL: distributions contain files that must not ship:")
+        print("\nFAIL: distribution audit failed:")
         for failure in failures:
             print(f"- {failure}")
         return 1
