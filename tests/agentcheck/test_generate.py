@@ -62,7 +62,6 @@ from agentcheck.generate import (
 from agentcheck.generate.boundaries import BoundaryKind
 from agentcheck.generate.selection import SelectionDecision
 from agentcheck.inspect import load_target
-from agentcheck.report import load_stored_run, render_stored_run
 from agentcheck.runner import ToolGateway
 from agentcheck.runner.orchestrator import ProcessResult
 
@@ -174,6 +173,21 @@ def _reissue(suite: FrozenSuite, **updates: Any) -> FrozenSuite:
     data["fingerprint"] = ""
     data["suite_id"] = ""
     return FrozenSuite.model_validate_json(json.dumps(data))
+
+
+def _with_missing_tool(scenario: Scenario, *, scenario_id: str) -> Scenario:
+    data = scenario.model_dump(mode="json")
+    data["scenario_id"] = scenario_id
+    for group in (
+        "tool_fixtures",
+        "required_tool_behavior",
+        "allowed_tool_behavior",
+        "forbidden_tool_behavior",
+    ):
+        for item in data[group]:
+            item["tool_name"] = "missing_tool"
+    data["fingerprint"] = ""
+    return Scenario.model_validate_json(json.dumps(data))
 
 
 def test_frozen_suite_round_trips_and_keeps_stable_identity() -> None:
@@ -368,6 +382,78 @@ def test_execute_suite_without_a_frozen_file_keeps_phase1_behavior(
     assert not (target / DEFAULT_SUITE_FILENAME).exists()
 
 
+def test_runtime_lint_invalid_generated_candidate_keeps_valid_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = _copy_example(tmp_path)
+    spec = _example_spec()
+    suite = build_frozen_suite(spec, AgentCheckConfig(), seed=SEED)
+    valid = next(
+        case.scenario
+        for case in suite.cases
+        if case.scenario.scenario_id == "happy_lookup"
+    )
+    invalid_parent = next(
+        case.scenario
+        for case in suite.cases
+        if case.scenario.scenario_id != valid.scenario_id
+    )
+    invalid = _with_missing_tool(
+        invalid_parent,
+        scenario_id="lint-invalid-generated-candidate",
+    )
+    called: list[str] = []
+
+    def _run(
+        _root: Path,
+        _config: AgentCheckConfig,
+        scenario: Scenario,
+        case_run_id: str,
+        *,
+        expected_target_id: str,
+    ) -> ProcessResult[CanonicalRun]:
+        called.append(scenario.scenario_id)
+        now = utc_now()
+        return ProcessResult(
+            value=CanonicalRun(
+                run_id=case_run_id,
+                scenario_id=scenario.scenario_id,
+                target_id=expected_target_id,
+                started_at=now,
+                ended_at=now,
+                termination=RunTermination.COMPLETED,
+                initial_world_state=scenario.initial_world_state,
+                final_world_state=scenario.initial_world_state,
+            ),
+            infrastructure_error=None,
+        )
+
+    monkeypatch.setattr(application, "_suite", lambda *_args: (valid, invalid))
+    monkeypatch.setattr(application, "run_scenario_in_subprocess", _run)
+    monkeypatch.setattr(
+        application,
+        "inspect_in_subprocess",
+        lambda *_args, **_kwargs: ProcessResult(
+            value=spec,
+            infrastructure_error=None,
+        ),
+    )
+
+    execution = application.execute_suite(
+        target,
+        run_id="generated-candidate-control",
+        persist_store=False,
+    )
+
+    assert execution.scenarios == (valid,)
+    assert tuple(
+        item.scenario.scenario_id for item in execution.invalid_scenarios
+    ) == (invalid.scenario_id,)
+    assert called == [valid.scenario_id]
+    assert execution.artifact_directory.is_dir()
+
+
 def test_spec_id_and_seed_mismatches_fail_before_execution(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -441,35 +527,30 @@ def test_lint_failure_rejects_a_frozen_suite_before_execution(
         lambda *_args, **_kwargs: ProcessResult(value=spec, infrastructure_error=None),
     )
 
+    run_id = "all-invalid-frozen"
     with pytest.raises(ScenarioValidationError, match="No valid scenarios remain"):
-        application.execute_suite(target)
+        application.execute_suite(target, run_id=run_id)
     assert called == []
+    assert not (target / ".agentcheck" / "runs" / run_id).exists()
 
 
-def test_selected_lint_invalid_frozen_case_loads_and_renders(
+def test_selected_lint_invalid_frozen_case_refuses_before_workers_and_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     target = _copy_example(tmp_path)
-    generation = application.generate_suite(target, seed=SEED, force=True)
-    suite = generation.suite
+    spec = _example_spec()
+    suite = build_frozen_suite(spec, AgentCheckConfig(), seed=SEED)
     valid_case = next(
         case for case in suite.cases if case.scenario.scenario_id == "happy_lookup"
     )
     invalid_case = next(
         case for case in suite.cases if case.scenario.scenario_id != "happy_lookup"
     )
-    invalid_data = invalid_case.scenario.model_dump(mode="json")
-    invalid_data["scenario_id"] = "lint-invalid-frozen-case"
-    for group in (
-        "tool_fixtures",
-        "required_tool_behavior",
-        "allowed_tool_behavior",
-        "forbidden_tool_behavior",
-    ):
-        for item in invalid_data[group]:
-            item["tool_name"] = "missing_tool"
-    invalid_data["fingerprint"] = ""
-    invalid_scenario = Scenario.model_validate_json(json.dumps(invalid_data))
+    invalid_scenario = _with_missing_tool(
+        invalid_case.scenario,
+        scenario_id="lint-invalid-frozen-case",
+    )
     excluded_case = next(
         case
         for case in suite.cases
@@ -514,46 +595,36 @@ def test_selected_lint_invalid_frozen_case_loads_and_renders(
     )
     write_frozen_suite(target / DEFAULT_SUITE_FILENAME, partial, force=True)
 
-    execution = application.execute_suite(
-        target,
-        run_id="partial-invalid-frozen",
-        persist_store=False,
+    called: list[str] = []
+
+    def _forbidden(*_args: object, **_kwargs: object) -> None:
+        called.append("run")
+        raise AssertionError("partial frozen suite must not execute valid cases")
+
+    monkeypatch.setattr(application, "run_scenario_in_subprocess", _forbidden)
+    monkeypatch.setattr(
+        application,
+        "inspect_in_subprocess",
+        lambda *_args, **_kwargs: ProcessResult(
+            value=spec,
+            infrastructure_error=None,
+        ),
     )
 
-    assert tuple(scenario.scenario_id for scenario in execution.scenarios) == (
-        "happy_lookup",
-    )
-    assert len(execution.invalid_scenarios) == 1
-    assert execution.behavioral_coverage.scenario_count == 1
-    assert execution.behavioral_coverage.reference_scenario_count == 1
-    assert execution.report_path.is_file()
-    assert "Declared behavioral coverage" in execution.report_path.read_text(
-        encoding="utf-8"
-    )
-    assert execution.selection == selection
-    loaded = load_stored_run(target, run_id=execution.run_id)
-    assert loaded.selection == selection
-    assert loaded.behavioral_coverage == execution.behavioral_coverage
+    run_id = "partial-invalid-frozen"
+    with pytest.raises(ScenarioValidationError) as exc_info:
+        application.execute_suite(
+            target,
+            run_id=run_id,
+        )
 
-    invalid_path = execution.artifact_directory / "invalid-scenarios.json"
-    original_invalid = json.loads(invalid_path.read_text(encoding="utf-8"))
-    duplicate_invalid = json.loads(json.dumps(original_invalid))
-    duplicate_invalid["items"].append(duplicate_invalid["items"][0])
-    invalid_path.write_text(json.dumps(duplicate_invalid), encoding="utf-8")
-    with pytest.raises(ConfigurationError, match="scenario IDs must be unique"):
-        load_stored_run(target, run_id=execution.run_id)
+    message = str(exc_info.value)
+    assert "1 scenario(s) that fail lint" in message
+    assert "refusing partial execution" in message
+    assert "No agent verdict was produced" in message
+    assert called == []
+    assert not (target / ".agentcheck" / "runs" / run_id).exists()
 
-    unexpected_invalid = json.loads(json.dumps(original_invalid))
-    unexpected_invalid["items"][0]["scenario"]["scenario_id"] = (
-        "unexpected-invalid-id"
-    )
-    invalid_path.write_text(json.dumps(unexpected_invalid), encoding="utf-8")
-    with pytest.raises(ConfigurationError, match="selection binding"):
-        load_stored_run(target, run_id=execution.run_id)
-
-    invalid_path.write_text(json.dumps(original_invalid), encoding="utf-8")
-    stored = render_stored_run(target, run_id=execution.run_id)
-    assert stored.report_path.is_file()
 
 def test_suite_path_config_selects_the_frozen_file(tmp_path: Path) -> None:
     target = _copy_example(tmp_path)
