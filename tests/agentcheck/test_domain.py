@@ -7,8 +7,8 @@ import pytest
 from pydantic import ValidationError
 
 from agentcheck.domain import (
-    action_path_exercise,
     ActionKind,
+    ActionPathExercise,
     AgentProperty,
     AgentSpec,
     AssertionResult,
@@ -62,6 +62,8 @@ from agentcheck.domain import (
     UsageMetrics,
     Verdict,
     WorkflowsSpec,
+    action_path_exercise,
+    measured_action_path_exercise,
 )
 
 
@@ -558,23 +560,22 @@ def test_critical_findings_require_deterministic_or_human_confirmation() -> None
 
 
 def test_action_path_exercise_separates_real_calls_from_vacuous_passes() -> None:
-    """A pass on an action case is only behavioural evidence if a tool ran."""
+    """The legacy run-only API remains source and tuple compatible."""
 
-    now = NOW
     called_event = CanonicalEvent(
         event_id="event-called",
         run_id="run-called",
         sequence=0,
         event_type=CanonicalEventType.TOOL_ATTEMPT,
-        timestamp=now,
+        timestamp=NOW,
         payload={"tool_name": "send_report"},
     )
     called = CanonicalRun(
         run_id="run-called",
         scenario_id="action-send-report",
         target_id="spec",
-        started_at=now,
-        ended_at=now,
+        started_at=NOW,
+        ended_at=NOW,
         termination=RunTermination.COMPLETED,
         events=(called_event,),
         tool_attempts=(
@@ -584,7 +585,7 @@ def test_action_path_exercise_separates_real_calls_from_vacuous_passes() -> None
                 tool_name="send_report",
                 arguments={},
                 sequence=0,
-                timestamp=now,
+                timestamp=NOW,
             ),
         ),
     )
@@ -592,17 +593,16 @@ def test_action_path_exercise_separates_real_calls_from_vacuous_passes() -> None
         run_id="run-declined",
         scenario_id="action-archive-report",
         target_id="spec",
-        started_at=now,
-        ended_at=now,
+        started_at=NOW,
+        ended_at=NOW,
         termination=RunTermination.COMPLETED,
     )
-    # A boundary case is not an action path, so it must not be counted either way.
     boundary = CanonicalRun(
         run_id="run-boundary",
         scenario_id="boundary-send-report-missing-required",
         target_id="spec",
-        started_at=now,
-        ended_at=now,
+        started_at=NOW,
+        ended_at=NOW,
         termination=RunTermination.COMPLETED,
     )
 
@@ -610,8 +610,209 @@ def test_action_path_exercise_separates_real_calls_from_vacuous_passes() -> None
 
     assert exercise.exercised == ("action-send-report",)
     assert exercise.not_exercised == ("action-archive-report",)
+    assert tuple(exercise) == (
+        ("action-send-report",),
+        ("action-archive-report",),
+    )
+    assert ActionPathExercise(*exercise) == exercise
     assert exercise.total == 2
 
 
 def test_action_path_exercise_is_empty_without_action_cases() -> None:
     assert action_path_exercise(()).total == 0
+
+
+def test_measured_action_paths_fail_closed_on_incomplete_or_ambiguous_evidence() -> None:
+    """Only the intended action attempt with a usable binding is exercised."""
+
+    from agentcheck.evaluate import evaluate_run
+
+    def action_scenario(
+        scenario_id: str,
+        tool_name: str,
+        *,
+        helper_tool: str | None = None,
+        tag_helper: bool = False,
+    ) -> Scenario:
+        tags = ["path:action", f"tool:{tool_name}"]
+        constraints = [
+            ToolBehaviorConstraint(
+                criterion_id=f"allow-{tool_name}",
+                tool_name=tool_name,
+                min_calls=0,
+                max_calls=1,
+                oracle_ids=("oracle-delete-contract",),
+            )
+        ]
+        if helper_tool is not None:
+            constraints.append(
+                ToolBehaviorConstraint(
+                    criterion_id=f"allow-{helper_tool}",
+                    tool_name=helper_tool,
+                    min_calls=0,
+                    max_calls=1,
+                    oracle_ids=("oracle-delete-contract",),
+                )
+            )
+            if tag_helper:
+                tags.append(f"tool:{helper_tool}")
+        payload = _scenario(
+            scenario_id=scenario_id,
+            tags=tuple(tags),
+        ).model_dump(mode="python")
+        payload["forbidden_tool_behavior"] = ()
+        payload["allowed_tool_behavior"] = tuple(constraints)
+        payload["fingerprint"] = ""
+        return Scenario.model_validate(payload)
+
+    def run_with_attempt(
+        scenario_id: str,
+        tool_name: str,
+        *,
+        suffix: str,
+        termination: RunTermination = RunTermination.COMPLETED,
+    ) -> CanonicalRun:
+        run_id = f"run-{suffix}"
+        event = CanonicalEvent(
+            event_id=f"event-{suffix}",
+            run_id=run_id,
+            sequence=0,
+            event_type=CanonicalEventType.TOOL_ATTEMPT,
+            timestamp=NOW,
+            payload={"tool_name": tool_name},
+        )
+        return CanonicalRun(
+            run_id=run_id,
+            scenario_id=scenario_id,
+            target_id="spec",
+            started_at=NOW,
+            ended_at=NOW,
+            termination=termination,
+            termination_reason=(
+                "The worker failed after recording the attempt."
+                if termination is not RunTermination.COMPLETED
+                else None
+            ),
+            events=(event,),
+            tool_attempts=(
+                ToolAttempt(
+                    attempt_id=f"attempt-{suffix}",
+                    event_id=event.event_id,
+                    tool_name=tool_name,
+                    arguments={},
+                    sequence=0,
+                    timestamp=NOW,
+                ),
+            ),
+        )
+
+    def passing_evaluation(run: CanonicalRun, *, suffix: str) -> CaseEvaluation:
+        assertion = AssertionResult(
+            assertion_id=f"assert-{suffix}",
+            criterion="The observed action path met its deterministic contract.",
+            result=Verdict.PASS,
+            oracle_ids=("oracle-delete-contract",),
+            rationale="The deterministic action-path assertion passed.",
+        )
+        return CaseEvaluation(
+            evaluation_id=f"evaluation-{suffix}",
+            scenario_id=run.scenario_id,
+            run_id=run.run_id,
+            verdict=Verdict.PASS,
+            assertions=(assertion,),
+            started_at=NOW,
+            completed_at=NOW,
+            summary="The action-path evaluation completed.",
+        )
+
+    called_scenario = action_scenario("action-send-report", "send_report")
+    prerequisite_scenario = action_scenario(
+        "action-cancel-order", "cancel_order", helper_tool="lookup_order"
+    )
+    declined_scenario = action_scenario("action-archive-report", "archive_report")
+    missing_scenario = action_scenario("action-delete-report", "delete_report")
+    duplicate_scenario = action_scenario("action-publish-report", "publish_report")
+    infra_scenario = action_scenario("action-refund-order", "refund_order")
+    ambiguous_scenario = action_scenario(
+        "action-transfer-order",
+        "transfer_order",
+        helper_tool="lookup_order",
+        tag_helper=True,
+    )
+    boundary_scenario = _scenario(scenario_id="boundary-send-report-missing-required")
+
+    called = run_with_attempt(called_scenario.scenario_id, "send_report", suffix="called")
+    prerequisite_only = run_with_attempt(
+        prerequisite_scenario.scenario_id,
+        "lookup_order",
+        suffix="prerequisite",
+    )
+    declined = CanonicalRun(
+        run_id="run-declined",
+        scenario_id=declined_scenario.scenario_id,
+        target_id="spec",
+        started_at=NOW,
+        ended_at=NOW,
+        termination=RunTermination.COMPLETED,
+    )
+    duplicate_1 = run_with_attempt(
+        duplicate_scenario.scenario_id, "publish_report", suffix="duplicate-1"
+    )
+    duplicate_2 = run_with_attempt(
+        duplicate_scenario.scenario_id, "publish_report", suffix="duplicate-2"
+    )
+    infra_run = run_with_attempt(
+        infra_scenario.scenario_id,
+        "refund_order",
+        suffix="infra",
+        termination=RunTermination.WORKER_ERROR,
+    )
+    ambiguous_run = run_with_attempt(
+        ambiguous_scenario.scenario_id, "transfer_order", suffix="ambiguous"
+    )
+    infra_evaluation = evaluate_run(infra_scenario, infra_run)
+
+    assert infra_evaluation.verdict is Verdict.INFRA_ERROR
+
+    exercise = measured_action_path_exercise(
+        (
+            called_scenario,
+            prerequisite_scenario,
+            declined_scenario,
+            missing_scenario,
+            duplicate_scenario,
+            infra_scenario,
+            ambiguous_scenario,
+            boundary_scenario,
+        ),
+        (
+            called,
+            prerequisite_only,
+            declined,
+            duplicate_1,
+            duplicate_2,
+            infra_run,
+            ambiguous_run,
+        ),
+        (
+            passing_evaluation(called, suffix="called"),
+            passing_evaluation(prerequisite_only, suffix="prerequisite"),
+            passing_evaluation(declined, suffix="declined"),
+            passing_evaluation(duplicate_1, suffix="duplicate"),
+            infra_evaluation,
+            passing_evaluation(ambiguous_run, suffix="ambiguous"),
+        ),
+    )
+
+    assert exercise.exercised == ("action-send-report",)
+    assert exercise.not_exercised == (
+        "action-cancel-order",
+        "action-archive-report",
+    )
+    assert exercise.unmeasured == (
+        "action-delete-report",
+        "action-publish-report",
+        "action-refund-order",
+        "action-transfer-order",
+    )
+    assert exercise.total == 7

@@ -12,6 +12,22 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## Unreleased
+
+### Fixed
+
+- **A trusted baseline could turn an inconclusive gate run into `PASS`.** The
+  baseline comparator correctly treats missing evidence as a non-regression,
+  but the one-command release gate accidentally reused that result as its own
+  decision. When the baseline comparison finds no new authoritative failure
+  but the current suite remains `INCONCLUSIVE`, `agentcheck gate` now blocks
+  with exit code 3. A baseline can accept known failures; it can never supply
+  evidence the current run did not observe.
+
+**Suite identity:** `GENERATOR_COMPATIBILITY_VERSION` stays `1`. This correction
+changes only the gate's aggregate CI decision; it does not change generated
+scenarios, stored run evidence, or serialized artifact identity.
+
 ## 0.5.1 (2026-08-29)
 
 Three product correctness fixes, found while reviewing and revalidating 0.5.0's

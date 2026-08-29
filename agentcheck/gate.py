@@ -259,6 +259,28 @@ def run_gate(
     checked = check_baseline(
         root, baseline_path=relative, run_id=execution.run_id, latest=False
     )
+    if checked.exit_code == EXIT_PASS and counts.get("inconclusive"):
+        # ``baseline check`` asks only whether an authoritative failure is new,
+        # so INCONCLUSIVE is deliberately non-blocking there.  The one-command
+        # release gate has a stronger contract: missing evidence can never be
+        # upgraded to PASS merely because a baseline had nothing to compare.
+        return GateResult(
+            decision=GateDecision.BLOCK,
+            exit_code=EXIT_INCONCLUSIVE,
+            reason="the suite could not decide, which is not a pass",
+            detail=(
+                f"{counts['inconclusive']} inconclusive case(s)",
+                "the baseline found no new authoritative failure, but it cannot "
+                "supply evidence the current run did not observe",
+            ),
+            summary_block=checked.summary,
+            counts=counts,
+            run_id=execution.run_id,
+            suite_fingerprint=suite_fingerprint,
+            baseline_path=relative,
+            baseline_compared=True,
+            report_path=report,
+        )
     if checked.exit_code == EXIT_PASS:
         return GateResult(
             decision=GateDecision.PASS,
