@@ -57,6 +57,7 @@ from .run import (
     CanonicalEvent,
     CanonicalEventType,
     CanonicalRun,
+    MeasuredActionPathExercise,
     RunTermination,
     StateTransition,
     StateTransitionOperation,
@@ -66,6 +67,7 @@ from .run import (
     ToolOutcomeStatus,
     UsageMetrics,
     action_path_exercise,
+    measured_action_path_exercise,
 )
 from .scenario import (
     ACTION_SCENARIO_PREFIX,
@@ -145,6 +147,8 @@ __all__ = [
     "ACTION_SCENARIO_PREFIX",
     "ActionPathExercise",
     "action_path_exercise",
+    "MeasuredActionPathExercise",
+    "measured_action_path_exercise",
     "Scenario",
     "Severity",
     "SimulatedToolOutcome",
