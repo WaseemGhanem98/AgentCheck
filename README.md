@@ -266,6 +266,9 @@ production data in configuration, fixture packs, frozen suites, or run artifacts
 
 ## License
 
+Copyright © 2026 Waseem Ghanem.
+
 Current source is licensed under the [Apache License 2.0](LICENSE). AgentCheck
 `0.1.0` and `0.1.1` were distributed under the MIT License; that license
-continues to govern those release artifacts.
+continues to govern those release artifacts. See [NOTICE](NOTICE) for the
+project's copyright notice.
