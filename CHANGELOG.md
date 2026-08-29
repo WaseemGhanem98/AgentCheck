@@ -14,8 +14,8 @@ identity**.
 
 ## 0.5.1 (2026-08-29)
 
-Three product correctness fixes, found while reviewing and revalidating 0.5.0's
-new MCP-manifest support against a real Slack target.
+Four product correctness fixes, found while reviewing and revalidating 0.5.0's
+new MCP-manifest support and its documented CI gate contract.
 
 ### Fixed
 
@@ -38,6 +38,13 @@ new MCP-manifest support against a real Slack target.
   action before it wins. Names such as `get_post`, `fetch_post`, and
   `summarize_post` remain non-mutating rather than acquiring impossible
   duplicate-side-effect policies; `post_summary` remains a SEND action.
+- **A trusted baseline could turn an inconclusive gate run into `PASS`.** The
+  baseline comparator correctly treats missing evidence as a non-regression,
+  but the one-command release gate accidentally reused that result as its own
+  decision. `agentcheck gate` now blocks with exit code 3 whenever the current
+  suite contains `INCONCLUSIVE`, including when the baseline comparison found
+  no new authoritative failure. A baseline can accept known failures; it can
+  never supply evidence the current run did not observe.
 
 ### Packaging
 
