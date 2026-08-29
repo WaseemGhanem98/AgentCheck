@@ -53,7 +53,7 @@ jobs:
             expensive=false
             while IFS= read -r -d '' path; do
               case "$path" in
-                *.md|docs/assets/*) ;;
+                *.md|docs/assets/*|NOTICE) ;;
                 *) expensive=true; break ;;
               esac
             done < <(
