@@ -244,3 +244,18 @@ def test_the_release_version_is_declared_once_in_effect() -> None:
         f"pyproject.toml declares {match.group(1)!r} but "
         f"agentcheck.__version__ is {agentcheck.__version__!r}"
     )
+
+
+def test_contributing_docs_keep_release_and_generator_versions_separate() -> None:
+    contributing = Path(__file__).resolve().parents[2] / "CONTRIBUTING.md"
+    text = contributing.read_text(encoding="utf-8")
+    prose = " ".join(text.split())
+
+    assert (
+        "Package releases and frozen-suite generation compatibility use separate"
+        in prose
+    )
+    assert "A package release alone is not a suite compatibility event" in prose
+    assert (
+        "Package and frozen-suite generator versions are currently coupled" not in text
+    )
