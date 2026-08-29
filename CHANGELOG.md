@@ -12,7 +12,7 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
-## 0.5.1 (2026-08-28)
+## 0.5.1 (2026-08-29)
 
 Three product correctness fixes, found while reviewing and revalidating 0.5.0's
 new MCP-manifest support against a real Slack target.
