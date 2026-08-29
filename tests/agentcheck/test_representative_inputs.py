@@ -167,6 +167,24 @@ def test_credential_shaped_value_is_refused(tmp_path: Path) -> None:
         load_representative_inputs(tmp_path, _spec(update_seat))
 
 
+def test_generated_placeholder_is_refused_with_an_actionable_error(
+    tmp_path: Path,
+) -> None:
+    """The template marker is not evidence of a representative input."""
+
+    _write(tmp_path, _pack(confirmation_number="REPLACE_ME"))
+
+    with pytest.raises(
+        ConfigurationError,
+        match=(
+            r"update_seat\.confirmation_number still contains the generated "
+            r"REPLACE_ME placeholder; replace it with a representative synthetic "
+            r"test value before generating or testing the suite"
+        ),
+    ):
+        load_representative_inputs(tmp_path, _spec(update_seat))
+
+
 def test_environment_reference_is_refused_rather_than_half_supported(
     tmp_path: Path,
 ) -> None:
