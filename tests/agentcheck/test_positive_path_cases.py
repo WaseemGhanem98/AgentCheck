@@ -323,9 +323,20 @@ def _exercise_output(scenario, run, capsys) -> str:
     from types import SimpleNamespace
 
     from agentcheck.cli import _print_action_path_exercise
+    from agentcheck.domain import Verdict
 
     _print_action_path_exercise(
-        SimpleNamespace(runs=(run,), scenarios=(scenario,))
+        SimpleNamespace(
+            runs=(run,),
+            scenarios=(scenario,),
+            evaluations=(
+                SimpleNamespace(
+                    scenario_id=scenario.scenario_id,
+                    run_id=run.run_id,
+                    verdict=Verdict.PASS,
+                ),
+            ),
+        )
     )
     return capsys.readouterr().out
 
@@ -372,3 +383,23 @@ def test_unexercised_authored_case_does_not_repeat_the_suggestion(capsys) -> Non
     assert "Action paths exercised: 0/1" in output
     assert '"user_request"' not in output
     assert "already carry an authored request" in output
+
+
+def test_action_path_without_a_canonical_run_stays_in_the_denominator(
+    capsys,
+) -> None:
+    """An infrastructure-failed case must not vanish from the path metric."""
+
+    from types import SimpleNamespace
+
+    from agentcheck.cli import _print_action_path_exercise
+
+    (case,) = build_positive_path_cases(_spec(update_seat), seed=1729)
+    _print_action_path_exercise(
+        SimpleNamespace(runs=(), scenarios=(case.scenario,), evaluations=())
+    )
+
+    output = capsys.readouterr().out
+    assert "Action paths exercised: 0/1" in output
+    assert f"unmeasured: {case.scenario.scenario_id}" in output
+    assert "no behavioral execution evidence" in output
