@@ -32,8 +32,16 @@ FORBIDDEN = (
     (re.compile(r"(^|/)dist/"), "nested distributions"),
 )
 
-MARKDOWN_DESTINATION = re.compile(
-    r"\]\(\s*(?P<destination><[^>\r\n]+>|[^\s)\r\n]+)"
+MARKDOWN_INLINE_DESTINATION = re.compile(
+    r"\]\(\s*(?P<destination><[^>\r\n]*>|[^\s)\r\n]*)"
+)
+MARKDOWN_REFERENCE_DEFINITION = re.compile(
+    r"\[(?:\\.|[^\]\r\n])+\]:"
+)
+HTML_DESTINATION = re.compile(
+    r"\b(?:href|src)\s*=\s*(?:\"(?P<double>[^\"]*)\"|"
+    r"'(?P<single>[^']*)'|(?P<unquoted>[^\s>]+))",
+    re.IGNORECASE,
 )
 ABSOLUTE_URI = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
@@ -117,13 +125,42 @@ def _metadata(path: pathlib.Path) -> tuple[str, str]:
         return member.name, extracted.read().decode("utf-8")
 
 
-def _relative_markdown_destinations(text: str) -> set[str]:
-    destinations: set[str] = set()
-    for match in MARKDOWN_DESTINATION.finditer(text):
-        destination = match.group("destination").strip("<>")
-        if not destination.startswith("#") and ABSOLUTE_URI.match(destination) is None:
-            destinations.add(destination)
-    return destinations
+def _is_absolute_or_same_page(destination: str) -> bool:
+    return destination.startswith("#") or ABSOLUTE_URI.match(destination) is not None
+
+
+def _long_description_link_violations(text: str) -> list[str]:
+    """Enforce AgentCheck's deliberately small README link syntax.
+
+    The public README uses inline Markdown links and images only. Reference-style
+    definitions are disallowed, as are relative raw-HTML destinations. Keeping
+    that authoring rule explicit avoids a dependency or a partial Markdown parser.
+    Link-shaped literals in README prose or code must use a different spelling.
+    """
+
+    violations: set[str] = set()
+    for match in MARKDOWN_INLINE_DESTINATION.finditer(text):
+        candidate = match.group("destination")
+        destination = (
+            candidate[1:-1]
+            if candidate.startswith("<") and candidate.endswith(">")
+            else candidate
+        )
+        if not _is_absolute_or_same_page(destination):
+            violations.add(f"relative Markdown destination {destination!r}")
+
+    if MARKDOWN_REFERENCE_DEFINITION.search(text) is not None:
+        violations.add(
+            "reference-style Markdown definitions are not allowed; "
+            "use inline absolute links"
+        )
+
+    for match in HTML_DESTINATION.finditer(text):
+        destination = next(group for group in match.groups() if group is not None)
+        if not _is_absolute_or_same_page(destination):
+            violations.add(f"relative HTML destination {destination!r}")
+
+    return sorted(violations)
 
 
 def main() -> int:
@@ -174,10 +211,9 @@ def main() -> int:
         except (OSError, UnicodeDecodeError, ValueError) as error:
             failures.append(f"{artifact.name}: invalid distribution metadata ({error})")
         else:
-            for destination in sorted(_relative_markdown_destinations(metadata)):
+            for violation in _long_description_link_violations(metadata):
                 failures.append(
-                    f"{artifact.name}: {metadata_name}: relative Markdown destination "
-                    f"{destination!r}"
+                    f"{artifact.name}: {metadata_name}: {violation}"
                 )
 
     if failures:
