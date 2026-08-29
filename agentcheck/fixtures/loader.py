@@ -117,8 +117,7 @@ def validate_fixture_pack(pack: FixturePack, spec: AgentSpec) -> dict[str, JsonO
                 raise ConfigurationError(
                     f"{tool_name}.{parameter} still contains the generated "
                     f"{_GENERATED_PLACEHOLDER} placeholder; replace it with a "
-                    "representative synthetic test value before generating or "
-                    "testing the suite"
+                    "representative synthetic test value, then regenerate the suite"
                 )
             if isinstance(value, str) and redact_log_text(value) != value:
                 raise ConfigurationError(

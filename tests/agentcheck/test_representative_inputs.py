@@ -179,7 +179,7 @@ def test_generated_placeholder_is_refused_with_an_actionable_error(
         match=(
             r"update_seat\.confirmation_number still contains the generated "
             r"REPLACE_ME placeholder; replace it with a representative synthetic "
-            r"test value before generating or testing the suite"
+            r"test value, then regenerate the suite"
         ),
     ):
         load_representative_inputs(tmp_path, _spec(update_seat))
