@@ -41,7 +41,7 @@ from agentcheck.domain import (
     Scenario,
     Severity,
     Verdict,
-    action_path_exercise,
+    measured_action_path_exercise,
 )
 from agentcheck.errors import ConfigurationError, ScenarioValidationError
 from agentcheck.generate.boundaries import (
@@ -790,7 +790,7 @@ def _fixtures_init_command(
 
 
 def _print_action_path_exercise(execution: Any) -> None:
-    """Say whether a tool was actually called, not just whether a case existed.
+    """Say whether the intended tool was attempted, not merely generated.
 
     A pass on an action-path case means two very different things depending on
     this: the agent called the tool and behaved correctly, or the agent never
@@ -798,18 +798,30 @@ def _print_action_path_exercise(execution: Any) -> None:
     reader cannot tell them apart.
     """
 
-    exercise = action_path_exercise(getattr(execution, "runs", ()) or ())
+    exercise = measured_action_path_exercise(
+        getattr(execution, "scenarios", ()) or (),
+        getattr(execution, "runs", ()) or (),
+        getattr(execution, "evaluations", ()) or (),
+    )
     if exercise.total == 0:
         return
     print()
     print(
         f"Action paths exercised: {len(exercise.exercised)}/{exercise.total} "
-        "(a tool was actually called)"
+        "(an intended action-tool attempt was observed)"
     )
     for scenario_id in exercise.not_exercised:
         print(
-            f"  not exercised: {scenario_id} - the agent did not call the tool, "
-            "so trajectory checks held vacuously"
+            f"  not exercised: {scenario_id} - the agent did not call the "
+            "intended action tool; prerequisite or unrelated calls do not "
+            "exercise this path, so this run supplies no behavioral execution "
+            "evidence for it"
+        )
+    for scenario_id in exercise.unmeasured:
+        print(
+            f"  unmeasured: {scenario_id} - no single non-infrastructure run "
+            "and evaluation were bound to one unambiguous focal action, so "
+            "there is no behavioral execution evidence"
         )
     authored = {
         scenario.scenario_id
