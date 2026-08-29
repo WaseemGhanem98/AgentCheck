@@ -92,7 +92,7 @@ def _members(path: pathlib.Path) -> list[str]:
         with zipfile.ZipFile(path) as archive:
             return archive.namelist()
     with tarfile.open(path) as archive:
-        # Strip the leading "agentcheck-0.1.0/" component an sdist always has.
+        # Strip the generated top-level distribution-and-version directory.
         return [name.split("/", 1)[1] for name in archive.getnames() if "/" in name]
 
 
