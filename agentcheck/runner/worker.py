@@ -20,15 +20,10 @@ from agentcheck.adapters import (
     UnsupportedTargetError,
     encode_preflight_report,
 )
-from agentcheck.config import (
-    AgentCheckConfig,
-    portable_entrypoint,
-    resolve_entrypoint,
-)
+from agentcheck.config import portable_entrypoint, resolve_entrypoint
 from agentcheck.domain import (
     FaultType,
     InfrastructureError,
-    Scenario,
     SimulatedToolOutcome,
     SimulatedToolStatus,
     ToolFixture,
@@ -38,8 +33,13 @@ from agentcheck.mcp_manifest import load_mcp_manifest
 from agentcheck.privacy import redact_log_text
 
 from .network_guard import install_network_guard
-from .orchestrator import WORKER_REQUEST_VERSION, WORKER_RESPONSE_VERSION
 from .tool_gateway import ToolGateway
+from .worker_protocol import (
+    WORKER_RESPONSE_VERSION,
+    WorkerExecutionInput,
+    WorkerRequest,
+    WorkerRuntimeConfig,
+)
 from .world import WorldSimulator
 
 
@@ -151,16 +151,20 @@ def _safe_error(exc: BaseException, *, phase: str) -> InfrastructureError:
     )
 
 
-def _read_request(path: Path) -> dict[str, Any]:
+def _read_request(path: Path) -> WorkerRequest:
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
+        payload = path.read_text(encoding="utf-8")
+        raw = json.loads(payload)
     except (OSError, json.JSONDecodeError, UnicodeError) as exc:
         raise ValueError("worker request must be valid UTF-8 JSON") from exc
     if not isinstance(raw, dict):
         raise ValueError("worker request must be a JSON object")
-    if raw.get("contract_version") != WORKER_REQUEST_VERSION:
-        raise ValueError("unsupported worker request contract")
-    return raw
+    try:
+        return WorkerRequest.model_validate_json(payload)
+    except ValidationError as exc:
+        raise ValueError(
+            "worker request does not match the supported contract"
+        ) from exc
 
 
 _ADAPTERS: dict[str, type[FrameworkAdapter]] = {
@@ -170,7 +174,7 @@ _ADAPTERS: dict[str, type[FrameworkAdapter]] = {
 }
 
 
-def _adapter_for(config: AgentCheckConfig) -> FrameworkAdapter:
+def _adapter_for(config: WorkerRuntimeConfig) -> FrameworkAdapter:
     """Resolve the configured adapter.
 
     The only place the framework name is dispatched on. Everything downstream
@@ -183,7 +187,7 @@ def _adapter_for(config: AgentCheckConfig) -> FrameworkAdapter:
     return factory()
 
 
-def _load_agent(root: Path, config: AgentCheckConfig) -> tuple[Any, str]:
+def _load_agent(root: Path, config: WorkerRuntimeConfig) -> tuple[Any, str]:
     if config.adapter not in _ADAPTERS:  # pragma: no cover - config narrows this
         raise ValueError(f"unsupported adapter {config.adapter!r}")
     resolve_entrypoint(root, config.entrypoint)
@@ -193,7 +197,7 @@ def _load_agent(root: Path, config: AgentCheckConfig) -> tuple[Any, str]:
     return load_target(root)
 
 
-def _fault_fixtures(scenario: Scenario) -> tuple[ToolFixture, ...]:
+def _fault_fixtures(execution_input: WorkerExecutionInput) -> tuple[ToolFixture, ...]:
     """Turn explicit injected faults into ordinary controlled gateway fixtures."""
 
     status_by_fault = {
@@ -205,7 +209,7 @@ def _fault_fixtures(scenario: Scenario) -> tuple[ToolFixture, ...]:
         FaultType.STALE_RESPONSE: SimulatedToolStatus.STALE,
     }
     fixtures: list[ToolFixture] = []
-    for fault in scenario.injected_faults:
+    for fault in execution_input.injected_faults:
         is_error = fault.fault_type in {FaultType.ERROR, FaultType.TIMEOUT}
         fixtures.append(
             ToolFixture(
@@ -227,25 +231,28 @@ def _fault_fixtures(scenario: Scenario) -> tuple[ToolFixture, ...]:
     return tuple(fixtures)
 
 
-def _controlled_fixtures(scenario: Scenario) -> tuple[ToolFixture, ...]:
+def _controlled_fixtures(
+    execution_input: WorkerExecutionInput,
+) -> tuple[ToolFixture, ...]:
     """Overlay injected faults on explicit fixtures for the same call slot."""
 
-    faults = _fault_fixtures(scenario)
+    faults = _fault_fixtures(execution_input)
     fault_slots = {
-        (fault.tool_name, fault.invocation_index) for fault in scenario.injected_faults
+        (fault.tool_name, fault.invocation_index)
+        for fault in execution_input.injected_faults
     }
-    if len(fault_slots) != len(scenario.injected_faults):
+    if len(fault_slots) != len(execution_input.injected_faults):
         raise ValueError("multiple injected faults target the same tool invocation")
     baseline = tuple(
         fixture
-        for fixture in scenario.tool_fixtures
+        for fixture in execution_input.tool_fixtures
         if (fixture.tool_name, fixture.invocation_index) not in fault_slots
     )
     return (*baseline, *faults)
 
 
 def _inspect(
-    root: Path, config: AgentCheckConfig
+    root: Path, config: WorkerRuntimeConfig
 ) -> tuple[Any, dict[str, Any], dict[str, Any] | None]:
     target, source = _load_agent(root, config)
     adapter = _adapter_for(config)
@@ -264,7 +271,11 @@ def _inspect(
     return spec, preflight, topology
 
 
-def _run(root: Path, config: AgentCheckConfig, scenario: Scenario, run_id: str) -> Any:
+def _run(
+    root: Path,
+    config: WorkerRuntimeConfig,
+    execution_input: WorkerExecutionInput,
+) -> Any:
     target, source = _load_agent(root, config)
     adapter = _adapter_for(config)
     mcp_manifest = load_mcp_manifest(root)
@@ -276,13 +287,13 @@ def _run(root: Path, config: AgentCheckConfig, scenario: Scenario, run_id: str) 
         mcp_manifest=mcp_manifest,
     )
     tools = tuple(item.value for item in spec.tools.items)
-    world = WorldSimulator(scenario.initial_world_state)
+    world = WorldSimulator(execution_input.initial_world_state)
     gateway = ToolGateway(
         tools,
-        _controlled_fixtures(scenario),
+        _controlled_fixtures(execution_input),
         world=world,
-        budgets=scenario.resource_budgets,
-        run_id=run_id,
+        budgets=execution_input.resource_budgets,
+        run_id=execution_input.run_id,
     )
     prepared = adapter.prepare(
         target,
@@ -297,11 +308,14 @@ def _run(root: Path, config: AgentCheckConfig, scenario: Scenario, run_id: str) 
     return asyncio.run(
         adapter.run(
             prepared,
-            scenario.conversation_turns,
-            followup_turns=scenario.followup_turns,
-            run_id=run_id,
-            max_turns=scenario.resource_budgets.max_model_turns,
-            scenario_id=scenario.scenario_id,
+            execution_input.conversation_turns,
+            followup_turns=execution_input.followup_turns,
+            run_id=execution_input.run_id,
+            max_turns=execution_input.resource_budgets.max_model_turns,
+            # The real Scenario ID can directly encode the evaluator's intent.
+            # Use the transport run identity inside the child; the parent
+            # validates and rebinds it only after accepting the CanonicalRun.
+            scenario_id=execution_input.run_id,
             target_id=spec.spec_id,
         )
     )
@@ -314,17 +328,17 @@ def execute_request(request_path: Path, response_path: Path) -> int:
     operation: str | None = None
     try:
         request = _read_request(request_path)
-        operation_value = request.get("operation")
-        if operation_value not in {"inspect", "run"}:
-            raise ValueError("worker operation must be 'inspect' or 'run'")
-        operation = operation_value
-        root_value = request.get("root")
-        if not isinstance(root_value, str) or not root_value:
-            raise ValueError("worker request requires a target root")
-        root = Path(root_value).expanduser().resolve()
+        operation = request.operation
+        root = Path(request.root).expanduser().resolve()
         if not root.is_dir():
             raise ValueError("worker target root must be an existing directory")
-        config = AgentCheckConfig.model_validate(request.get("config"))
+        config = request.runtime_config
+        try:
+            request_path.unlink()
+        except OSError as exc:
+            raise ValueError(
+                "worker request could not be hidden before target import"
+            ) from exc
         # Deny egress before any target module is imported, so import-time
         # network calls are contained too, not only calls made during a run.
         install_network_guard(
@@ -347,23 +361,15 @@ def execute_request(request_path: Path, response_path: Path) -> int:
                 result, preflight, topology = _inspect(root, config)
             else:
                 phase = "scenario"
-                scenario = Scenario.model_validate_json(
-                    json.dumps(
-                        request.get("scenario"),
-                        ensure_ascii=False,
-                        allow_nan=False,
-                        sort_keys=True,
-                    )
-                )
-                run_id = request.get("run_id")
-                if not isinstance(run_id, str) or not run_id or len(run_id) > 200:
-                    raise ValueError("run operation requires a valid run_id")
+                execution_input = request.execution_input
+                if execution_input is None:  # pragma: no cover - contract validator
+                    raise ValueError("run operation requires execution_input")
                 phase = "run"
                 _write_private_json(
                     response_path,
                     _response(status="running", phase=phase, operation=operation),
                 )
-                result = _run(root, config, scenario, run_id)
+                result = _run(root, config, execution_input)
 
             _write_private_json(
                 response_path,
@@ -410,6 +416,9 @@ def main(argv: list[str] | None = None) -> int:
         arguments = _parser().parse_args(argv)
     except SystemExit as exc:
         return int(exc.code or 2)
+    # The target imports in this process. Remove both private IPC paths from
+    # Python-visible arguments before any target code can inspect them.
+    sys.argv[:] = [sys.argv[0] if sys.argv else "agentcheck-worker"]
     return execute_request(arguments.request, arguments.response)
 
 
