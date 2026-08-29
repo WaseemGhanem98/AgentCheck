@@ -12,10 +12,26 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## Unreleased
+
+### Fixed
+
+- **A trusted baseline could turn an inconclusive gate run into `PASS`.** The
+  baseline comparator correctly treats missing evidence as a non-regression,
+  but the one-command release gate accidentally reused that result as its own
+  decision. `agentcheck gate` now blocks with exit code 3 whenever the current
+  suite contains `INCONCLUSIVE`, including when the baseline comparison found
+  no new authoritative failure. A baseline can accept known failures; it can
+  never supply evidence the current run did not observe.
+
+**Suite identity:** `GENERATOR_COMPATIBILITY_VERSION` stays `1`. This correction
+changes only the gate's aggregate CI decision; it does not change generated
+scenarios, stored run evidence, or serialized artifact identity.
+
 ## 0.5.1 (2026-08-29)
 
-Four product correctness fixes, found while reviewing and revalidating 0.5.0's
-new MCP-manifest support and its documented CI gate contract.
+Three product correctness fixes, found while reviewing and revalidating 0.5.0's
+new MCP-manifest support against a real Slack target.
 
 ### Fixed
 
@@ -38,13 +54,6 @@ new MCP-manifest support and its documented CI gate contract.
   action before it wins. Names such as `get_post`, `fetch_post`, and
   `summarize_post` remain non-mutating rather than acquiring impossible
   duplicate-side-effect policies; `post_summary` remains a SEND action.
-- **A trusted baseline could turn an inconclusive gate run into `PASS`.** The
-  baseline comparator correctly treats missing evidence as a non-regression,
-  but the one-command release gate accidentally reused that result as its own
-  decision. `agentcheck gate` now blocks with exit code 3 whenever the current
-  suite contains `INCONCLUSIVE`, including when the baseline comparison found
-  no new authoritative failure. A baseline can accept known failures; it can
-  never supply evidence the current run did not observe.
 
 ### Packaging
 
