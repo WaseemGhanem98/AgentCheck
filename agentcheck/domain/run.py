@@ -8,7 +8,9 @@ from typing import Literal, NamedTuple, Sequence
 from pydantic import Field, model_validator
 
 from .base import ContractModel, JsonObject, JsonValue, UtcDatetime
-from .scenario import ACTION_SCENARIO_PREFIX
+from .evaluation import CaseEvaluation
+from .scenario import ACTION_SCENARIO_PREFIX, Scenario
+from .verdict import Verdict
 
 
 CANONICAL_EVENT_CONTRACT_VERSION: Literal["agentcheck.canonical_event.v1"] = (
@@ -229,13 +231,13 @@ class CanonicalRun(ContractModel):
 
 
 class ActionPathExercise(NamedTuple):
-    """Whether the agent actually called the tool on each action-path case.
+    """Legacy run-only split retained for public API compatibility.
 
     A pass on an action-path case means one of two very different things: the
-    agent called the tool and behaved correctly, or it never called the tool
-    and every trajectory check held vacuously. Both the CLI summary and the
-    HTML report have to draw that distinction, so the classification lives
-    here rather than being recomputed, and worded differently, in each.
+    agent called a tool and behaved correctly, or it never called one and every
+    trajectory check held vacuously. This type predates complete scenario and
+    evaluation binding. Evidence-facing summaries use
+    :func:`measured_action_path_exercise` instead.
     """
 
     exercised: tuple[str, ...]
@@ -247,7 +249,12 @@ class ActionPathExercise(NamedTuple):
 
 
 def action_path_exercise(runs: Sequence[CanonicalRun]) -> ActionPathExercise:
-    """Split action-path runs by whether a tool call was actually attempted."""
+    """Split observed action-path runs by whether any tool was attempted.
+
+    This compatibility helper cannot know about missing runs, infrastructure
+    evaluations, or the scenario's focal tool. Do not use it for a complete
+    evidence metric; use :func:`measured_action_path_exercise` instead.
+    """
 
     exercised: list[str] = []
     not_exercised: list[str] = []
@@ -259,3 +266,94 @@ def action_path_exercise(runs: Sequence[CanonicalRun]) -> ActionPathExercise:
         else:
             not_exercised.append(run.scenario_id)
     return ActionPathExercise(tuple(exercised), tuple(not_exercised))
+
+
+class MeasuredActionPathExercise(NamedTuple):
+    """Evidence-safe action-path classification over the complete denominator."""
+
+    exercised: tuple[str, ...]
+    not_exercised: tuple[str, ...]
+    unmeasured: tuple[str, ...]
+
+    @property
+    def total(self) -> int:
+        return len(self.exercised) + len(self.not_exercised) + len(self.unmeasured)
+
+
+def _focal_action_tool(scenario: Scenario) -> str | None:
+    if "path:action" not in scenario.dimension_tags:
+        return None
+    tagged = {
+        tag.split(":", 1)[1]
+        for tag in scenario.dimension_tags
+        if tag.startswith("tool:") and tag != "tool:"
+    }
+    declared = {
+        item.tool_name
+        for item in (
+            *scenario.required_tool_behavior,
+            *scenario.allowed_tool_behavior,
+        )
+    }
+    focal = tagged.intersection(declared)
+    if len(focal) != 1:
+        return None
+    return next(iter(focal))
+
+
+def measured_action_path_exercise(
+    scenarios: Sequence[Scenario],
+    runs: Sequence[CanonicalRun],
+    evaluations: Sequence[CaseEvaluation],
+) -> MeasuredActionPathExercise:
+    """Classify every action path from bound run and evaluation evidence.
+
+    The scenario set owns the denominator. Deriving it from ``runs`` would make
+    an infrastructure-failed case disappear. A path is exercised only when its
+    single focal tool has an observed attempt in the single canonical run bound
+    to a non-infrastructure evaluation. Missing, duplicate, ambiguous, or
+    infrastructure evidence remains unmeasured.
+    """
+
+    exercised: list[str] = []
+    not_exercised: list[str] = []
+    unmeasured: list[str] = []
+    runs_by_scenario: dict[str, list[CanonicalRun]] = {}
+    for run in runs:
+        runs_by_scenario.setdefault(run.scenario_id, []).append(run)
+    evaluations_by_scenario: dict[str, list[CaseEvaluation]] = {}
+    for evaluation in evaluations:
+        evaluations_by_scenario.setdefault(evaluation.scenario_id, []).append(
+            evaluation
+        )
+
+    for scenario in scenarios:
+        if not str(scenario.scenario_id).startswith(ACTION_SCENARIO_PREFIX):
+            continue
+        matching_runs = runs_by_scenario.get(scenario.scenario_id, [])
+        matching_evaluations = evaluations_by_scenario.get(scenario.scenario_id, [])
+        focal_tool = _focal_action_tool(scenario)
+        if (
+            len(matching_runs) != 1
+            or len(matching_evaluations) != 1
+            or focal_tool is None
+        ):
+            unmeasured.append(scenario.scenario_id)
+            continue
+        run = matching_runs[0]
+        evaluation = matching_evaluations[0]
+        if (
+            evaluation.verdict is Verdict.INFRA_ERROR
+            or evaluation.run_id != run.run_id
+        ):
+            unmeasured.append(scenario.scenario_id)
+            continue
+        if any(
+            attempt.tool_name == focal_tool for attempt in run.tool_attempts
+        ):
+            exercised.append(scenario.scenario_id)
+        else:
+            not_exercised.append(scenario.scenario_id)
+    return MeasuredActionPathExercise(
+        tuple(exercised), tuple(not_exercised), tuple(unmeasured)
+    )

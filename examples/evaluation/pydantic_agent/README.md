@@ -38,7 +38,7 @@ Expected highlights are `Preflight: supported`, four generated schema/action
 cases, and:
 
 ```text
-Action paths exercised: 1/1 (a tool was actually called)
+Action paths exercised: 1/1 (an intended action-tool attempt was observed)
 Passed:        4
 Infra errors:  0
 ```

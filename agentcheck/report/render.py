@@ -19,7 +19,7 @@ from agentcheck.domain import (
     Finding,
     Scenario,
     Verdict,
-    action_path_exercise,
+    measured_action_path_exercise,
 )
 from agentcheck.generate.selection import SelectionPlan
 from agentcheck.generate.suite import FrozenSuite
@@ -466,19 +466,30 @@ def render_report(
     # caveat the terminal prints. Without it a reader sees a pass rate and no
     # sign that the agent never called the tool, which is the difference
     # between "behaved correctly" and "was never asked to act".
-    exercise = action_path_exercise(runs)
+    exercise = measured_action_path_exercise(scenarios, runs, evaluations)
     exercise_html = ""
     if exercise.total:
         not_exercised_html = "".join(
             f"<li><span class=\"mono\">{_escape(scenario_id)}</span> — the agent did "
-            "not call the tool, so this case's trajectory checks held vacuously and "
-            "its pass is not evidence of correct action behaviour.</li>"
+            "not call the intended action tool. Prerequisite or unrelated calls do "
+            "not exercise this path, so this run supplies no behavioral execution "
+            "evidence for it.</li>"
             for scenario_id in exercise.not_exercised
+        )
+        unmeasured_html = "".join(
+            f"<li><span class=\"mono\">{_escape(scenario_id)}</span> — no single "
+            "non-infrastructure run and evaluation were bound to one unambiguous "
+            "focal action, so this path has no behavioral execution evidence.</li>"
+            for scenario_id in exercise.unmeasured
         )
         exercise_html = (
             f"<p>Action paths exercised: {len(exercise.exercised)}/{exercise.total} "
-            "(a tool was actually called)</p>"
-            + (f"<ul>{not_exercised_html}</ul>" if not_exercised_html else "")
+            "(an intended action-tool attempt was observed)</p>"
+            + (
+                f"<ul>{not_exercised_html}{unmeasured_html}</ul>"
+                if not_exercised_html or unmeasured_html
+                else ""
+            )
         )
     selection_html = ""
     if plan is not None:
