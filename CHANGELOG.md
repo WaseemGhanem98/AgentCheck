@@ -19,10 +19,10 @@ identity**.
 - **A trusted baseline could turn an inconclusive gate run into `PASS`.** The
   baseline comparator correctly treats missing evidence as a non-regression,
   but the one-command release gate accidentally reused that result as its own
-  decision. `agentcheck gate` now blocks with exit code 3 whenever the current
-  suite contains `INCONCLUSIVE`, including when the baseline comparison found
-  no new authoritative failure. A baseline can accept known failures; it can
-  never supply evidence the current run did not observe.
+  decision. When the baseline comparison finds no new authoritative failure
+  but the current suite remains `INCONCLUSIVE`, `agentcheck gate` now blocks
+  with exit code 3. A baseline can accept known failures; it can never supply
+  evidence the current run did not observe.
 
 **Suite identity:** `GENERATOR_COMPATIBILITY_VERSION` stays `1`. This correction
 changes only the gate's aggregate CI decision; it does not change generated
