@@ -12,7 +12,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
 import json
+import os
 from pathlib import Path
+from pathlib import PurePosixPath
 import re
 from typing import Any, Mapping
 
@@ -31,19 +33,21 @@ GROUND_TRUTH_SCHEMA_VERSION = (
 FROZEN_CATALOG_ID = "agentcheck-environment-containment-v1"
 FROZEN_CATALOG_VERSION = "1.0.0"
 FROZEN_CATALOG_SHA256 = (
-    "fe37cac9709456c48bde3e39be37877c058e192beffbed6782bf53ef3b1db8cd"
+    "2ca3e50abd294f63e85b85a843e8107f41bf6fe5b21cab33963bd17fcf8d3067"
 )
 FROZEN_GROUND_TRUTH_SHA256 = (
     "3f0e26bb7856712c4c3b565ac923c0ece130153bb2d5f2771840540559068572"
 )
 FROZEN_CATALOG_DEFINITION_FINGERPRINT = (
-    "sha256:e4a383499e158bf86d1bce8fc63eeeafa9044db79bcad15165e7d439aafa57ad"
+    "sha256:598edf1c4e56878a48167d8b247c8669ff39e2a20701902bed038c40da5158ab"
 )
 FROZEN_GROUND_TRUTH_DEFINITION_FINGERPRINT = (
     "sha256:ad2ad68c64482e9d5fc53f3bd1c2decb4f39a6d102fc477fefc63c5211f6ed06"
 )
 FROZEN_HOSTILE_CASES = 27
+FROZEN_HOSTILE_SUBATTEMPTS = 40
 FROZEN_CONTROL_CASES = 2
+FROZEN_CONTROL_SUBATTEMPTS = 2
 FROZEN_BEHAVIORAL_PATHS = 9
 _RAW_SHA256 = re.compile(r"[0-9a-f]{64}")
 _SOURCE_FINGERPRINT = re.compile(r"sha256:[0-9a-f]{64}")
@@ -114,6 +118,35 @@ class EvidenceScope(str, Enum):
     """This schema records one trial, never a stochastic aggregate."""
 
     SINGLE_TRIAL = "single_trial"
+
+
+class InfrastructureStatus(str, Enum):
+    """Typed completion state for the trusted execution/observation boundary."""
+
+    NOT_RUN = "not_run"
+    COMPLETE = "complete"
+    INFRA_ERROR = "infra_error"
+
+
+class InfrastructureFailureStage(str, Enum):
+    """The trusted boundary stage that prevented complete trial evidence."""
+
+    SETUP = "setup"
+    TARGET_CONFIGURATION = "target_configuration"
+    TARGET_EXECUTION = "target_execution"
+    OBSERVER = "observer"
+    TEARDOWN = "teardown"
+
+
+class EvidenceSubjectType(str, Enum):
+    """The exact measurement subject one receipt is allowed to support."""
+
+    SUBATTEMPT = "subattempt"
+    POSTCONDITION = "postcondition"
+    EFFECT = "effect"
+    ACTION = "action"
+    PATH = "path"
+    TRIAL_COMPLETION = "trial_completion"
 
 
 class ConfirmationState(str, Enum):
@@ -220,18 +253,110 @@ def _parse_source_file_set(value: Any, field_name: str) -> SourceFileSet:
         raise ContractViolation(f"{field_name} is invalid") from exc
 
 
-@dataclass(frozen=True)
+_BOUND_EVIDENCE_TOKEN = object()
+
+
+@dataclass(frozen=True, init=False)
 class EvidenceReference:
     kind: TrustedEvidenceKind
     reference: str
-    digest: str | None = None
+    artifact_digest: str
+    artifact_size_bytes: int
+    provenance_fingerprint: str
+    run_id: str
+    trial_id: str
+    environment_instance_id: str
+    subject_type: EvidenceSubjectType
+    scope_id: str
+    subject_id: str
+    sequence_index: int
+    receipt_id: str = field(init=False)
 
-    def __post_init__(self) -> None:
-        _require_nonempty(self.reference, "evidence reference")
-        if len(self.reference) > 2_000:
+    def __init__(
+        self,
+        *,
+        kind: TrustedEvidenceKind,
+        reference: str,
+        artifact_digest: str,
+        artifact_size_bytes: int,
+        provenance_fingerprint: str,
+        run_id: str,
+        trial_id: str,
+        environment_instance_id: str,
+        subject_type: EvidenceSubjectType,
+        scope_id: str,
+        subject_id: str,
+        sequence_index: int,
+        _binding_token: object | None = None,
+    ) -> None:
+        if _binding_token is not _BOUND_EVIDENCE_TOKEN:
+            raise ContractViolation(
+                "evidence receipts must be created by hashing an artifact with "
+                "bind_evidence_bytes or bind_evidence_file"
+            )
+        for name, value in (
+            ("reference", reference),
+            ("run_id", run_id),
+            ("trial_id", trial_id),
+            ("environment_instance_id", environment_instance_id),
+            ("scope_id", scope_id),
+            ("subject_id", subject_id),
+        ):
+            _require_nonempty(value, name)
+        if len(reference) > 2_000:
             raise ContractViolation("evidence reference exceeds 2,000 characters")
-        if self.digest is not None:
-            _require_raw_digest(self.digest, "evidence digest")
+        reference_path = PurePosixPath(reference)
+        if (
+            reference_path.is_absolute()
+            or ".." in reference_path.parts
+            or str(reference_path) != reference
+        ):
+            raise ContractViolation(
+                "evidence reference must be a normalized target-independent relative path"
+            )
+        _require_raw_digest(artifact_digest, "evidence artifact digest")
+        if artifact_size_bytes < 0:
+            raise ContractViolation("evidence artifact size cannot be negative")
+        if _SOURCE_FINGERPRINT.fullmatch(provenance_fingerprint) is None:
+            raise ContractViolation("evidence provenance fingerprint is malformed")
+        if sequence_index < 0:
+            raise ContractViolation("evidence sequence index cannot be negative")
+        values = {
+            "kind": kind,
+            "reference": reference,
+            "artifact_digest": artifact_digest,
+            "artifact_size_bytes": artifact_size_bytes,
+            "provenance_fingerprint": provenance_fingerprint,
+            "run_id": run_id,
+            "trial_id": trial_id,
+            "environment_instance_id": environment_instance_id,
+            "subject_type": subject_type,
+            "scope_id": scope_id,
+            "subject_id": subject_id,
+            "sequence_index": sequence_index,
+        }
+        for name, attribute_value in values.items():
+            object.__setattr__(self, name, attribute_value)
+        object.__setattr__(
+            self,
+            "receipt_id",
+            canonical_hash(
+                {
+                    "kind": kind.value,
+                    "reference": reference,
+                    "artifact_digest": artifact_digest,
+                    "artifact_size_bytes": artifact_size_bytes,
+                    "provenance_fingerprint": provenance_fingerprint,
+                    "run_id": run_id,
+                    "trial_id": trial_id,
+                    "environment_instance_id": environment_instance_id,
+                    "subject_type": subject_type.value,
+                    "scope_id": scope_id,
+                    "subject_id": subject_id,
+                    "sequence_index": sequence_index,
+                }
+            ),
+        )
 
 
 @dataclass(frozen=True)
@@ -258,6 +383,7 @@ class RunProvenance:
     provider_version: str
     containment_profile: str
     behavioral_execution_allowed: bool
+    infrastructure_status: InfrastructureStatus = InfrastructureStatus.NOT_RUN
     containment_tier: str | None = None
     containment_status: str | None = None
     evidence_scope: EvidenceScope = EvidenceScope.SINGLE_TRIAL
@@ -308,6 +434,360 @@ class RunProvenance:
         ):
             if optional_value is not None:
                 _require_nonempty(optional_value, optional_name)
+
+    @property
+    def fingerprint(self) -> str:
+        """Bind receipts to every execution/provenance field in this trial."""
+
+        return canonical_hash(
+            {
+                "schema_version": self.schema_version,
+                "evidence_scope": self.evidence_scope.value,
+                "run_id": self.run_id,
+                "trial_id": self.trial_id,
+                "environment_instance_ids": list(self.environment_instance_ids),
+                "repetition_index": self.repetition_index,
+                "target_source_digest": self.target_source_digest,
+                "target_source_binding": self.target_source_binding,
+                "catalog_digest": self.catalog_digest,
+                "semantic_ground_truth_digest": self.semantic_ground_truth_digest,
+                "environment_provider": self.environment_provider,
+                "provider_version": self.provider_version,
+                "containment_profile": self.containment_profile,
+                "behavioral_execution_allowed": self.behavioral_execution_allowed,
+                "infrastructure_status": self.infrastructure_status.value,
+                "containment_tier": self.containment_tier,
+                "containment_status": self.containment_status,
+            }
+        )
+
+
+def _bind_evidence_digest(
+    *,
+    kind: TrustedEvidenceKind,
+    reference: str,
+    artifact_digest: str,
+    artifact_size_bytes: int,
+    provenance: RunProvenance,
+    environment_instance_id: str,
+    subject_type: EvidenceSubjectType,
+    scope_id: str,
+    subject_id: str,
+    sequence_index: int,
+) -> EvidenceReference:
+    if environment_instance_id not in provenance.environment_instance_ids:
+        raise ContractViolation(
+            "evidence environment is absent from the run provenance"
+        )
+    return EvidenceReference(
+        kind=kind,
+        reference=reference,
+        artifact_digest=artifact_digest,
+        artifact_size_bytes=artifact_size_bytes,
+        provenance_fingerprint=provenance.fingerprint,
+        run_id=provenance.run_id,
+        trial_id=provenance.trial_id,
+        environment_instance_id=environment_instance_id,
+        subject_type=subject_type,
+        scope_id=scope_id,
+        subject_id=subject_id,
+        sequence_index=sequence_index,
+        _binding_token=_BOUND_EVIDENCE_TOKEN,
+    )
+
+
+def bind_evidence_bytes(
+    *,
+    kind: TrustedEvidenceKind,
+    reference: str,
+    artifact: bytes,
+    provenance: RunProvenance,
+    environment_instance_id: str,
+    subject_type: EvidenceSubjectType,
+    scope_id: str,
+    subject_id: str,
+    sequence_index: int = 0,
+) -> EvidenceReference:
+    """Content-address one host/provider artifact and bind its exact subject.
+
+    This proves artifact integrity and internal run/subject binding. It does not
+    authenticate who supplied ``artifact``; producer trust must come from the
+    maintained provider boundary, outside target reach.
+    """
+
+    if not isinstance(artifact, bytes):
+        raise ContractViolation("evidence artifact must be bytes")
+    return _bind_evidence_digest(
+        kind=kind,
+        reference=reference,
+        artifact_digest=hashlib.sha256(artifact).hexdigest(),
+        artifact_size_bytes=len(artifact),
+        provenance=provenance,
+        environment_instance_id=environment_instance_id,
+        subject_type=subject_type,
+        scope_id=scope_id,
+        subject_id=subject_id,
+        sequence_index=sequence_index,
+    )
+
+
+def _hash_stable_evidence_file(artifact_path: Path) -> tuple[str, int]:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(artifact_path, flags)
+    except OSError as exc:
+        raise ContractViolation("evidence artifact cannot be opened safely") from exc
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        before = os.fstat(descriptor)
+        while True:
+            chunk = os.read(descriptor, 64 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+            size += len(chunk)
+        after = os.fstat(descriptor)
+    finally:
+        os.close(descriptor)
+    identity_before = (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+    )
+    identity_after = (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+    )
+    if identity_before != identity_after or size != after.st_size:
+        raise ContractViolation("evidence artifact changed while it was hashed")
+    return digest.hexdigest(), size
+
+
+def bind_evidence_file(
+    *,
+    kind: TrustedEvidenceKind,
+    reference: str,
+    artifact_path: Path,
+    provenance: RunProvenance,
+    environment_instance_id: str,
+    subject_type: EvidenceSubjectType,
+    scope_id: str,
+    subject_id: str,
+    sequence_index: int = 0,
+) -> EvidenceReference:
+    """Hash a stable, non-symlink host artifact before creating its receipt."""
+
+    artifact_digest, artifact_size_bytes = _hash_stable_evidence_file(artifact_path)
+    return _bind_evidence_digest(
+        kind=kind,
+        reference=reference,
+        artifact_digest=artifact_digest,
+        artifact_size_bytes=artifact_size_bytes,
+        provenance=provenance,
+        environment_instance_id=environment_instance_id,
+        subject_type=subject_type,
+        scope_id=scope_id,
+        subject_id=subject_id,
+        sequence_index=sequence_index,
+    )
+
+
+def verify_evidence_file(
+    reference: EvidenceReference,
+    artifact_path: Path,
+) -> None:
+    """Re-attest that persisted artifact bytes still match a bound receipt."""
+
+    artifact_digest, artifact_size_bytes = _hash_stable_evidence_file(artifact_path)
+    if (
+        artifact_digest != reference.artifact_digest
+        or artifact_size_bytes != reference.artifact_size_bytes
+    ):
+        raise ContractViolation("evidence artifact bytes do not match their receipt")
+
+
+def _validate_evidence_bindings(
+    references: tuple[EvidenceReference, ...],
+    *,
+    provenance: RunProvenance,
+    subject_type: EvidenceSubjectType,
+    scope_id: str,
+    subject_id: str,
+    sequence_index: int,
+    environment_instance_ids: tuple[str, ...],
+) -> None:
+    for reference in references:
+        if (
+            reference.provenance_fingerprint != provenance.fingerprint
+            or reference.run_id != provenance.run_id
+            or reference.trial_id != provenance.trial_id
+        ):
+            raise ContractViolation(
+                f"evidence receipt is bound to the wrong run for {scope_id}/{subject_id}"
+            )
+        if reference.environment_instance_id not in environment_instance_ids:
+            raise ContractViolation(
+                f"evidence receipt is bound to the wrong environment for "
+                f"{scope_id}/{subject_id}"
+            )
+        if (
+            reference.subject_type is not subject_type
+            or reference.scope_id != scope_id
+            or reference.subject_id != subject_id
+            or reference.sequence_index != sequence_index
+        ):
+            raise ContractViolation(
+                f"evidence receipt is bound to the wrong subject for "
+                f"{scope_id}/{subject_id}"
+            )
+
+
+def _require_unique_receipt_uses(references: tuple[EvidenceReference, ...]) -> None:
+    receipt_ids = tuple(reference.receipt_id for reference in references)
+    if len(receipt_ids) != len(set(receipt_ids)):
+        raise ContractViolation(
+            "one evidence receipt cannot be reused across measurement subjects"
+        )
+
+
+def _container_exit_status_artifact(exit_code: int) -> bytes:
+    return canonical_json({"container_exit_code": exit_code}).encode("utf-8")
+
+
+def bind_container_exit_status(
+    *,
+    reference: str,
+    exit_code: int,
+    provenance: RunProvenance,
+    environment_instance_id: str,
+) -> EvidenceReference:
+    """Bind the host-observed process exit to this exact run and trial.
+
+    The canonical artifact binds the typed integer to the receipt digest. As
+    with every evidence binder here, producer authentication remains the
+    maintained provider's responsibility and is not claimed by this schema.
+    """
+
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        raise ContractViolation("container exit code must be an integer")
+    return bind_evidence_bytes(
+        kind=TrustedEvidenceKind.CONTAINER_EXIT_STATUS,
+        reference=reference,
+        artifact=_container_exit_status_artifact(exit_code),
+        provenance=provenance,
+        environment_instance_id=environment_instance_id,
+        subject_type=EvidenceSubjectType.TRIAL_COMPLETION,
+        scope_id=provenance.run_id,
+        subject_id=provenance.trial_id,
+        sequence_index=0,
+    )
+
+
+@dataclass(frozen=True)
+class TrialCompletion:
+    """Typed host-side completion facts for exactly one frozen trial."""
+
+    status: InfrastructureStatus
+    container_exit_code: int | None
+    evidence_references: tuple[EvidenceReference, ...] = ()
+    failure_stage: InfrastructureFailureStage | None = None
+    limitations: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.status, InfrastructureStatus):
+            raise ContractViolation("trial completion status must be typed")
+        if self.failure_stage is not None and not isinstance(
+            self.failure_stage, InfrastructureFailureStage
+        ):
+            raise ContractViolation("trial failure stage must be typed")
+        if self.container_exit_code is not None and (
+            isinstance(self.container_exit_code, bool)
+            or not isinstance(self.container_exit_code, int)
+        ):
+            raise ContractViolation("container exit code must be an integer")
+        if any(not item.strip() for item in self.limitations):
+            raise ContractViolation("trial-completion limitations must be non-empty")
+        if any(
+            item.kind is not TrustedEvidenceKind.CONTAINER_EXIT_STATUS
+            for item in self.evidence_references
+        ):
+            raise ContractViolation(
+                "trial completion accepts only container-exit-status evidence"
+            )
+
+        if self.status is InfrastructureStatus.NOT_RUN:
+            if (
+                self.container_exit_code is not None
+                or self.evidence_references
+                or self.failure_stage is not None
+            ):
+                raise ContractViolation(
+                    "a not-run trial cannot claim completion or failure evidence"
+                )
+            return
+
+        if self.status is InfrastructureStatus.COMPLETE:
+            if self.container_exit_code != 0:
+                raise ContractViolation(
+                    "a complete trial requires a successful container exit"
+                )
+            if self.failure_stage is not None:
+                raise ContractViolation("a complete trial cannot name a failure stage")
+        else:
+            if self.failure_stage is None:
+                raise ContractViolation("an infrastructure error needs a typed failure stage")
+            if self.failure_stage in {
+                InfrastructureFailureStage.TARGET_CONFIGURATION,
+                InfrastructureFailureStage.TARGET_EXECUTION,
+            } and (self.container_exit_code is None or self.container_exit_code == 0):
+                raise ContractViolation(
+                    "a target configuration/execution error needs a nonzero exit"
+                )
+
+        if self.container_exit_code is None:
+            if self.evidence_references:
+                raise ContractViolation(
+                    "a trial without a process exit cannot carry exit-status evidence"
+                )
+        elif len(self.evidence_references) != 1:
+            raise ContractViolation(
+                "a recorded container exit requires exactly one bound exit receipt"
+            )
+
+
+def _validate_trial_completion(
+    completion: TrialCompletion,
+    *,
+    provenance: RunProvenance,
+) -> None:
+    if completion.status is not provenance.infrastructure_status:
+        raise ContractViolation(
+            "trial completion status does not match run provenance"
+        )
+    _validate_evidence_bindings(
+        completion.evidence_references,
+        provenance=provenance,
+        subject_type=EvidenceSubjectType.TRIAL_COMPLETION,
+        scope_id=provenance.run_id,
+        subject_id=provenance.trial_id,
+        sequence_index=0,
+        environment_instance_ids=provenance.environment_instance_ids,
+    )
+    if completion.container_exit_code is None:
+        return
+    expected = _container_exit_status_artifact(completion.container_exit_code)
+    reference = completion.evidence_references[0]
+    if (
+        reference.artifact_digest != hashlib.sha256(expected).hexdigest()
+        or reference.artifact_size_bytes != len(expected)
+    ):
+        raise ContractViolation(
+            "container exit receipt does not match the typed exit status"
+        )
 
 
 @dataclass(frozen=True)
@@ -492,6 +972,32 @@ class FrozenCatalog:
         controls = sum(item.case_type is CaseType.CONTROL for item in self.cases)
         if (hostile, controls) != (FROZEN_HOSTILE_CASES, FROZEN_CONTROL_CASES):
             raise ContractViolation("frozen catalog denominator is not 27 hostile + 2 controls")
+        hostile_subattempts = sum(
+            len(item.subattempt_ids)
+            for item in self.cases
+            if item.case_type is CaseType.HOSTILE
+        )
+        control_subattempts = sum(
+            len(item.subattempt_ids)
+            for item in self.cases
+            if item.case_type is CaseType.CONTROL
+        )
+        if (hostile_subattempts, control_subattempts) != (
+            FROZEN_HOSTILE_SUBATTEMPTS,
+            FROZEN_CONTROL_SUBATTEMPTS,
+        ):
+            raise ContractViolation(
+                "frozen operation denominator is not 40 hostile + 2 controls"
+            )
+        all_subattempt_ids = tuple(
+            subattempt_id
+            for item in self.cases
+            for subattempt_id in item.subattempt_ids
+        )
+        if len(all_subattempt_ids) != len(set(all_subattempt_ids)):
+            raise ContractViolation(
+                "frozen subattempt IDs must be globally unique"
+            )
         definition_fingerprint = _catalog_definition_fingerprint(
             source_digest=self.source_digest,
             catalog_id=self.catalog_id,
@@ -687,19 +1193,27 @@ class AttackMeasurement:
 
 @dataclass(frozen=True)
 class ContainmentMetrics:
-    attempts_defined: int
-    attempts_executed: int
-    blocked: int
-    observed: int
-    silently_escaped: int
+    hostile_cases_defined: int
+    hostile_cases_executed: int
+    hostile_cases_blocked: int
+    hostile_cases_observed: int
+    hostile_cases_silently_escaped: int
+    hostile_subattempts_defined: int
+    hostile_subattempts_executed: int
+    hostile_subattempts_observed: int
     external_canary_changes: int | None
     controlled_mutations_reached: int | None
     real_external_mutations_observed: int | None
     host_secret_leakages_observed: int | None
     persistent_descendants_observed: int | None
-    controls_defined: int
-    controls_executed: int
-    controls_succeeded: int
+    control_cases_defined: int
+    control_cases_executed: int
+    control_cases_succeeded: int
+    control_subattempts_defined: int
+    control_subattempts_executed: int
+    control_subattempts_observed: int
+    total_cases_defined: int
+    total_subattempts_defined: int
 
 
 def _complete_effect_count(
@@ -727,6 +1241,7 @@ class ContainmentMeasurement:
     provenance: RunProvenance
     catalog: FrozenCatalog
     cases: tuple[AttackMeasurement, ...]
+    trial_completion: TrialCompletion
     static_discovery: StaticDiscovery | None = None
     metrics: ContainmentMetrics = field(init=False)
 
@@ -754,8 +1269,58 @@ class ContainmentMeasurement:
             raise ContractViolation(
                 "measurements must preserve every frozen catalog case in order"
             )
+        _validate_trial_completion(
+            self.trial_completion,
+            provenance=self.provenance,
+        )
+        any_execution = any(
+            subattempt.executed
+            for case in self.cases
+            for subattempt in case.subattempts
+        )
+        favorable_outcomes = _FAVORABLE_HOSTILE_OUTCOMES | {
+            AttackOutcome.CONTROL_SUCCEEDED
+        }
+        if (
+            self.trial_completion.status is InfrastructureStatus.NOT_RUN
+            and any_execution
+        ):
+            raise ContractViolation(
+                "not-run infrastructure cannot carry executed containment attempts"
+            )
+        if (
+            self.trial_completion.status is InfrastructureStatus.INFRA_ERROR
+            and any(case.outcome in favorable_outcomes for case in self.cases)
+        ):
+            raise ContractViolation(
+                "an infrastructure error cannot carry favorable containment outcomes"
+            )
         for definition, measured in zip(self.catalog.cases, self.cases):
             self._validate_case(definition, measured)
+        _require_unique_receipt_uses(
+            tuple(
+                (
+                    *self.trial_completion.evidence_references,
+                    *(
+                        reference
+                        for case in self.cases
+                        for reference in (
+                            *(
+                                receipt
+                                for subattempt in case.subattempts
+                                for receipt in subattempt.evidence_references
+                            ),
+                            *case.postcondition.evidence_references,
+                            *(
+                                receipt
+                                for effect in case.effects
+                                for receipt in effect.evidence_references
+                            ),
+                        )
+                    ),
+                )
+            )
+        )
 
         hostile = tuple(
             item for item in self.cases if item.case_type is CaseType.HOSTILE
@@ -766,15 +1331,32 @@ class ContainmentMeasurement:
         controls = tuple(
             item for item in self.cases if item.case_type is CaseType.CONTROL
         )
+        hostile_subattempts = tuple(
+            subattempt for item in hostile for subattempt in item.subattempts
+        )
+        control_subattempts = tuple(
+            subattempt for item in controls for subattempt in item.subattempts
+        )
         object.__setattr__(
             self,
             "metrics",
             ContainmentMetrics(
-                attempts_defined=len(hostile),
-                attempts_executed=sum(item.executed for item in hostile),
-                blocked=sum(item.outcome is AttackOutcome.BLOCKED for item in hostile),
-                observed=sum(item.observed for item in hostile),
-                silently_escaped=sum(item.silently_escaped for item in hostile),
+                hostile_cases_defined=len(hostile),
+                hostile_cases_executed=sum(item.executed for item in hostile),
+                hostile_cases_blocked=sum(
+                    item.outcome is AttackOutcome.BLOCKED for item in hostile
+                ),
+                hostile_cases_observed=sum(item.observed for item in hostile),
+                hostile_cases_silently_escaped=sum(
+                    item.silently_escaped for item in hostile
+                ),
+                hostile_subattempts_defined=len(hostile_subattempts),
+                hostile_subattempts_executed=sum(
+                    item.executed for item in hostile_subattempts
+                ),
+                hostile_subattempts_observed=sum(
+                    item.observed for item in hostile_subattempts
+                ),
                 external_canary_changes=_complete_effect_count(
                     hostile_definitions,
                     hostile,
@@ -800,11 +1382,22 @@ class ContainmentMeasurement:
                     hostile,
                     EffectKind.PERSISTENT_DESCENDANT,
                 ),
-                controls_defined=len(controls),
-                controls_executed=sum(item.executed for item in controls),
-                controls_succeeded=sum(
+                control_cases_defined=len(controls),
+                control_cases_executed=sum(item.executed for item in controls),
+                control_cases_succeeded=sum(
                     item.outcome is AttackOutcome.CONTROL_SUCCEEDED
                     for item in controls
+                ),
+                control_subattempts_defined=len(control_subattempts),
+                control_subattempts_executed=sum(
+                    item.executed for item in control_subattempts
+                ),
+                control_subattempts_observed=sum(
+                    item.observed for item in control_subattempts
+                ),
+                total_cases_defined=len(self.cases),
+                total_subattempts_defined=(
+                    len(hostile_subattempts) + len(control_subattempts)
                 ),
             ),
         )
@@ -854,16 +1447,43 @@ class ContainmentMeasurement:
                 f"case environment is absent from run provenance for "
                 f"{definition.attack_id}"
             )
-        for subattempt in measured.subattempts:
+        for sequence_index, subattempt in enumerate(measured.subattempts, start=1):
+            _validate_evidence_bindings(
+                subattempt.evidence_references,
+                provenance=self.provenance,
+                subject_type=EvidenceSubjectType.SUBATTEMPT,
+                scope_id=definition.attack_id,
+                subject_id=subattempt.subattempt_id,
+                sequence_index=sequence_index,
+                environment_instance_ids=measured.environment_instance_ids,
+            )
             kinds = {item.kind for item in subattempt.evidence_references}
             if subattempt.observed and not definition.attempt_evidence_kinds <= kinds:
                 raise ContractViolation(
                     f"wrong observation channel for {definition.attack_id}/"
                     f"{subattempt.subattempt_id}"
                 )
-        for effect_definition, effect in zip(
-            definition.effect_checks, measured.effects
+        _validate_evidence_bindings(
+            measured.postcondition.evidence_references,
+            provenance=self.provenance,
+            subject_type=EvidenceSubjectType.POSTCONDITION,
+            scope_id=definition.attack_id,
+            subject_id=definition.mutation_sentinel,
+            sequence_index=0,
+            environment_instance_ids=measured.environment_instance_ids,
+        )
+        for sequence_index, (effect_definition, effect) in enumerate(
+            zip(definition.effect_checks, measured.effects), start=1
         ):
+            _validate_evidence_bindings(
+                effect.evidence_references,
+                provenance=self.provenance,
+                subject_type=EvidenceSubjectType.EFFECT,
+                scope_id=definition.attack_id,
+                subject_id=effect.kind.value,
+                sequence_index=sequence_index,
+                environment_instance_ids=measured.environment_instance_ids,
+            )
             effect_kinds = {item.kind for item in effect.evidence_references}
             if effect.occurred is not None and not (
                 effect_definition.required_evidence_kinds <= effect_kinds
@@ -1076,6 +1696,7 @@ class FrozenBehavioralGroundTruth:
 @dataclass(frozen=True)
 class ActionMeasurement:
     action_id: str
+    sequence_index: int
     tool_name: str
     arguments_json: str
     outcome_status: str
@@ -1087,6 +1708,8 @@ class ActionMeasurement:
 
     def __post_init__(self) -> None:
         _require_nonempty(self.action_id, "action_id")
+        if self.sequence_index < 1:
+            raise ContractViolation("action sequence_index must start at one")
         _require_nonempty(self.tool_name, "tool_name")
         _require_nonempty(self.outcome_status, "outcome_status")
         if self.outcome_detail is not None:
@@ -1129,6 +1752,11 @@ class BehavioralPathMeasurement:
         action_ids = tuple(item.action_id for item in self.actions)
         if len(action_ids) != len(set(action_ids)):
             raise ContractViolation("action IDs must be unique within a path")
+        action_sequence = tuple(item.sequence_index for item in self.actions)
+        if action_sequence != tuple(range(1, len(self.actions) + 1)):
+            raise ContractViolation(
+                "action sequence indexes must be contiguous, unique, and one-based"
+            )
         evidence_kinds = {item.kind for item in self.evidence_references}
         if self.exercised and not self.attempted:
             raise ContractViolation("an exercised path must first be attempted")
@@ -1223,6 +1851,7 @@ class BehavioralMeasurement:
     provenance: RunProvenance
     ground_truth: FrozenBehavioralGroundTruth
     paths: tuple[BehavioralPathMeasurement, ...]
+    trial_completion: TrialCompletion
     metrics: BehavioralMetrics = field(init=False)
 
     def __post_init__(self) -> None:
@@ -1254,6 +1883,26 @@ class BehavioralMeasurement:
             raise ContractViolation(
                 "measurements must preserve every frozen behavioral path in order"
             )
+        _validate_trial_completion(
+            self.trial_completion,
+            provenance=self.provenance,
+        )
+        any_attempted = any(item.attempted for item in self.paths)
+        any_exercised = any(item.exercised for item in self.paths)
+        if (
+            self.trial_completion.status is InfrastructureStatus.NOT_RUN
+            and any_attempted
+        ):
+            raise ContractViolation(
+                "not-run infrastructure cannot carry attempted behavioral paths"
+            )
+        if (
+            self.trial_completion.status is InfrastructureStatus.INFRA_ERROR
+            and any_exercised
+        ):
+            raise ContractViolation(
+                "an infrastructure error cannot carry exercised behavioral paths"
+            )
         for definition, measured in zip(self.ground_truth.paths, self.paths):
             self._validate_path(definition, measured)
         if not self.provenance.behavioral_execution_allowed and any(
@@ -1262,6 +1911,25 @@ class BehavioralMeasurement:
             raise ContractViolation(
                 "behavioral paths cannot be exercised when provenance forbids it"
             )
+        _require_unique_receipt_uses(
+            tuple(
+                (
+                    *self.trial_completion.evidence_references,
+                    *(
+                        reference
+                        for path in self.paths
+                        for reference in (
+                            *path.evidence_references,
+                            *(
+                                receipt
+                                for action in path.actions
+                                for receipt in action.evidence_references
+                            ),
+                        )
+                    ),
+                )
+            )
+        )
 
         observed_actions = tuple(
             action
@@ -1292,8 +1960,8 @@ class BehavioralMeasurement:
             ),
         )
 
-    @staticmethod
     def _validate_path(
+        self,
         definition: BehavioralPathDefinition,
         measured: BehavioralPathMeasurement,
     ) -> None:
@@ -1314,6 +1982,7 @@ class BehavioralMeasurement:
         )
         measured_actions = tuple(
             (
+                item.sequence_index,
                 item.tool_name,
                 item.arguments_json,
                 item.semantic_status,
@@ -1323,16 +1992,59 @@ class BehavioralMeasurement:
             )
             for item in measured.actions
         )
+        indexed_expected_actions = tuple(
+            (index, *item)
+            for index, item in enumerate(expected_actions, start=1)
+        )
+        _validate_evidence_bindings(
+            measured.evidence_references,
+            provenance=self.provenance,
+            subject_type=EvidenceSubjectType.PATH,
+            scope_id=definition.path_id,
+            subject_id=definition.path_id,
+            sequence_index=0,
+            environment_instance_ids=self.provenance.environment_instance_ids,
+        )
+        for action in measured.actions:
+            _validate_evidence_bindings(
+                action.evidence_references,
+                provenance=self.provenance,
+                subject_type=EvidenceSubjectType.ACTION,
+                scope_id=definition.path_id,
+                subject_id=action.action_id,
+                sequence_index=action.sequence_index,
+                environment_instance_ids=self.provenance.environment_instance_ids,
+            )
+        measured_execution_facts = (
+            measured.turn_count,
+            measured.confirmation_state,
+            measured.confirmation_token,
+            measured.final_output,
+        )
+        expected_execution_facts = (
+            definition.expected_turn_count,
+            definition.expected_confirmation_state,
+            definition.expected_confirmation_token,
+            definition.expected_final_output,
+        )
         if measured.attempted and not measured.exercised:
-            if measured_actions != expected_actions[: len(measured_actions)]:
+            if measured_actions != indexed_expected_actions[: len(measured_actions)]:
                 raise ContractViolation(
                     f"partial observed actions are not a frozen prefix for "
                     f"{definition.path_id}"
                 )
+            if (
+                measured_actions == indexed_expected_actions
+                and measured_execution_facts == expected_execution_facts
+            ):
+                raise ContractViolation(
+                    f"complete frozen evidence cannot be downgraded to unexercised "
+                    f"for {definition.path_id}"
+                )
             return
         if not measured.exercised:
             return
-        if measured_actions != expected_actions:
+        if measured_actions != indexed_expected_actions:
             raise ContractViolation(
                 f"measured action sequence or event detail drifted for {definition.path_id}"
             )
@@ -1340,29 +2052,18 @@ class BehavioralMeasurement:
             raise ContractViolation(
                 f"an exercised path needs every action observed for {definition.path_id}"
             )
-        if (
-            measured.turn_count,
-            measured.confirmation_state,
-            measured.confirmation_token,
-            measured.final_output,
-        ) != (
-            definition.expected_turn_count,
-            definition.expected_confirmation_state,
-            definition.expected_confirmation_token,
-            definition.expected_final_output,
-        ):
+        if measured_execution_facts != expected_execution_facts:
             raise ContractViolation(
                 f"measured turn/confirmation/output evidence drifted for {definition.path_id}"
             )
-        if measured.policy_verifiable:
-            if not definition.policy_verifiable:
-                raise ContractViolation(
-                    f"ground truth forbids a policy claim for {definition.path_id}"
-                )
-            if measured.policy_result is not definition.expected_policy_result:
-                raise ContractViolation(
-                    f"policy result drifted from ground truth for {definition.path_id}"
-                )
+        if measured.policy_verifiable is not definition.policy_verifiable:
+            raise ContractViolation(
+                f"policy verifiability drifted from ground truth for {definition.path_id}"
+            )
+        if measured.policy_result is not definition.expected_policy_result:
+            raise ContractViolation(
+                f"policy result drifted from ground truth for {definition.path_id}"
+            )
 
 
 def load_json_object(path: Path) -> Mapping[str, Any]:
@@ -1543,9 +2244,14 @@ def load_frozen_catalog(path: Path) -> FrozenCatalog:
             )
         )
     expected_counts = {
-        "hostile": FROZEN_HOSTILE_CASES,
-        "control": FROZEN_CONTROL_CASES,
-        "total": FROZEN_HOSTILE_CASES + FROZEN_CONTROL_CASES,
+        "hostile_cases": FROZEN_HOSTILE_CASES,
+        "hostile_subattempts": FROZEN_HOSTILE_SUBATTEMPTS,
+        "control_cases": FROZEN_CONTROL_CASES,
+        "control_subattempts": FROZEN_CONTROL_SUBATTEMPTS,
+        "total_cases": FROZEN_HOSTILE_CASES + FROZEN_CONTROL_CASES,
+        "total_subattempts": (
+            FROZEN_HOSTILE_SUBATTEMPTS + FROZEN_CONTROL_SUBATTEMPTS
+        ),
     }
     if payload.get("declared_counts") != expected_counts:
         raise ContractViolation("catalog declared denominator has drifted")
@@ -1782,6 +2488,7 @@ __all__ = [
     "DiagnosticChannel",
     "EvidenceReference",
     "EvidenceScope",
+    "EvidenceSubjectType",
     "EffectKind",
     "EffectMeasurement",
     "FrozenBehavioralGroundTruth",
@@ -1789,6 +2496,8 @@ __all__ = [
     "FROZEN_CATALOG_SHA256",
     "FROZEN_GROUND_TRUTH_SHA256",
     "GroundTruthExpectedAction",
+    "InfrastructureFailureStage",
+    "InfrastructureStatus",
     "MEASUREMENT_SCHEMA_VERSION",
     "PolicyResult",
     "RunProvenance",
@@ -1796,9 +2505,13 @@ __all__ = [
     "StaticDiscovery",
     "SubattemptMeasurement",
     "SubattemptDisposition",
+    "TrialCompletion",
     "TrustedEvidenceKind",
     "TrustedPostcondition",
     "UntrustedDiagnostic",
+    "bind_container_exit_status",
+    "bind_evidence_bytes",
+    "bind_evidence_file",
     "canonical_json",
     "load_frozen_catalog",
     "load_frozen_ground_truth",
@@ -1806,4 +2519,5 @@ __all__ = [
     "materialize_unexecuted_cases",
     "materialize_unexercised_paths",
     "sha256_file",
+    "verify_evidence_file",
 ]

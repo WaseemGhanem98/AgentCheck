@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, fields, replace
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -162,6 +163,7 @@ def _provenance(
     environment_instance_ids: tuple[str, ...] = (
         "contract-test-clean-environment",
     ),
+    infrastructure_status: Any = None,
 ) -> Any:
     catalog = measurement.load_frozen_catalog(CATALOG_PATH)
     ground_truth = measurement.load_frozen_ground_truth(GROUND_TRUTH_PATH)
@@ -171,6 +173,11 @@ def _provenance(
         target_source_digest = ground_truth.target_file_set.fingerprint
     else:
         raise AssertionError(f"unknown test target: {target}")
+    bound_infrastructure_status = (
+        infrastructure_status
+        if infrastructure_status is not None
+        else measurement.InfrastructureStatus.COMPLETE
+    )
     return measurement.RunProvenance(
         run_id="contract-test-run",
         trial_id="contract-test-trial",
@@ -184,7 +191,8 @@ def _provenance(
         provider_version="not-applicable",
         containment_profile="unexecuted",
         behavioral_execution_allowed=behavioral_execution_allowed,
-        containment_status="not_run",
+        infrastructure_status=bound_infrastructure_status,
+        containment_status=f"contract_test_{bound_infrastructure_status.value}",
     )
 
 
@@ -197,7 +205,14 @@ def test_catalog_freezes_exact_hostile_and_control_denominators() -> None:
         "agentcheck.environment_containment.catalog.v1"
     )
     assert catalog["frozen"] is True
-    assert catalog["declared_counts"] == {"hostile": 27, "control": 2, "total": 29}
+    assert catalog["declared_counts"] == {
+        "hostile_cases": 27,
+        "hostile_subattempts": 40,
+        "control_cases": 2,
+        "control_subattempts": 2,
+        "total_cases": 29,
+        "total_subattempts": 42,
+    }
 
     cases = catalog["cases"]
     ids = [case["attack_id"] for case in cases]
@@ -210,6 +225,21 @@ def test_catalog_freezes_exact_hostile_and_control_denominators() -> None:
     assert tuple(requirements) == tuple(ids)
     assert tuple(effect_requirements) == tuple(ids)
     assert all(requirements[attack_id]["subattempt_ids"] for attack_id in ids)
+    hostile_subattempt_ids = tuple(
+        subattempt_id
+        for case in cases
+        if case["case_type"] == "hostile"
+        for subattempt_id in requirements[case["attack_id"]]["subattempt_ids"]
+    )
+    control_subattempt_ids = tuple(
+        subattempt_id
+        for case in cases
+        if case["case_type"] == "control"
+        for subattempt_id in requirements[case["attack_id"]]["subattempt_ids"]
+    )
+    assert len(hostile_subattempt_ids) == 40
+    assert len(control_subattempt_ids) == 2
+    assert len(set((*hostile_subattempt_ids, *control_subattempt_ids))) == 42
     assert all(
         tuple(requirements[attack_id]["allowed_subattempt_dispositions"])
         == tuple(requirements[attack_id]["subattempt_ids"])
@@ -272,6 +302,23 @@ def test_catalog_freezes_exact_hostile_and_control_denominators() -> None:
         assert "network_policy_postcondition" in (
             real_external["required_evidence_kinds"]
         )
+
+
+def test_frozen_subattempt_denominator_rejects_cross_case_duplicate_ids() -> None:
+    catalog = measurement.load_frozen_catalog(CATALOG_PATH)
+    single_subattempt_indexes = tuple(
+        index
+        for index, definition in enumerate(catalog.cases)
+        if len(definition.subattempt_ids) == 1
+    )
+    source_index, target_index = single_subattempt_indexes[:2]
+    changed_cases = list(catalog.cases)
+    changed_cases[target_index] = replace(
+        changed_cases[target_index],
+        subattempt_ids=changed_cases[source_index].subattempt_ids,
+    )
+    with pytest.raises(measurement.ContractViolation, match="globally unique"):
+        replace(catalog, cases=tuple(changed_cases))
 
 
 def test_catalog_has_no_prefilled_or_target_authored_evidence() -> None:
@@ -362,7 +409,31 @@ def test_hostile_target_is_import_inert_explicitly_armed_and_not_inspectable() -
     assert isinstance(top_level_expressions[0].value.value, str)
 
     for node in tree.body:
-        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            imported_roots = {
+                alias.name.partition(".")[0]
+                for alias in node.names
+            }
+            if isinstance(node, ast.ImportFrom) and node.module is not None:
+                imported_roots = {node.module.partition(".")[0]}
+            assert imported_roots <= {
+                "__future__",
+                "_socket",
+                "argparse",
+                "ctypes",
+                "errno",
+                "ipaddress",
+                "json",
+                "os",
+                "pathlib",
+                "shlex",
+                "socket",
+                "subprocess",
+                "sys",
+                "time",
+                "typing",
+            }
+        elif isinstance(node, (ast.Assign, ast.AnnAssign)):
             value = node.value
             assert value is not None
             assert not any(isinstance(child, ast.Call) for child in ast.walk(value))
@@ -383,6 +454,50 @@ def test_hostile_target_is_import_inert_explicitly_armed_and_not_inspectable() -
                 "tuple(_CASES) != TARGET_CASE_IDS",
                 "__name__ == '__main__'",
             }
+        elif isinstance(node, ast.Expr):
+            assert node is top_level_expressions[0]
+        else:
+            raise AssertionError(
+                f"unexpected executable top-level node: {type(node).__name__}"
+            )
+
+
+def test_hostile_target_main_errors_have_distinct_nonzero_exits_without_import() -> None:
+    source = ADVERSARIAL_TARGET.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=str(ADVERSARIAL_TARGET))
+    assert _literal_assignment(tree, "TARGET_SUCCESS_EXIT_CODE") == 0
+    assert _literal_assignment(tree, "TARGET_NOT_ARMED_EXIT_CODE") == 64
+    assert _literal_assignment(tree, "TARGET_UNEXPECTED_ERROR_EXIT_CODE") == 70
+    assert _literal_assignment(tree, "TARGET_CONFIGURATION_ERROR_EXIT_CODE") == 78
+
+    main = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    target_dispatch = next(node for node in main.body if isinstance(node, ast.Try))
+    handler_exit_values: dict[str, str] = {}
+    for handler in target_dispatch.handlers:
+        assert isinstance(handler.type, ast.Name)
+        exit_assignment = next(
+            node
+            for node in handler.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "exit_code"
+                for target in node.targets
+            )
+        )
+        assert isinstance(exit_assignment.value, ast.Name)
+        handler_exit_values[handler.type.id] = exit_assignment.value.id
+    assert handler_exit_values == {
+        "FixtureConfigurationError": "TARGET_CONFIGURATION_ERROR_EXIT_CODE",
+        "Exception": "TARGET_UNEXPECTED_ERROR_EXIT_CODE",
+    }
+    final_return = main.body[-1]
+    assert isinstance(final_return, ast.Return)
+    assert isinstance(final_return.value, ast.Name)
+    assert final_return.value.id == "exit_code"
 
 
 def test_hostile_target_uses_only_symbolic_controlled_inputs() -> None:
@@ -507,11 +622,20 @@ def test_target_leaves_exclude_host_owned_control_material(tmp_path: Path) -> No
 
 def test_spike_and_dependent_contract_test_are_excluded_from_distributions() -> None:
     manifest = (REPOSITORY_ROOT / "MANIFEST.in").read_text(encoding="utf-8")
-    assert "prune spikes" in manifest
-    assert "exclude tests/agentcheck/test_environment_containment_spike_contract.py" in (
-        manifest
+    directives = {
+        line.strip()
+        for line in manifest.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert "prune spikes" in directives
+    assert (
+        "exclude tests/agentcheck/test_environment_containment_spike_contract.py"
+        in directives
     )
-    assert "recursive-include spikes" not in manifest
+    assert not any(
+        directive.startswith("recursive-include spikes")
+        for directive in directives
+    )
 
 
 def test_behavioral_ground_truth_freezes_nine_paths_and_unknown_semantics() -> None:
@@ -643,8 +767,82 @@ def test_behavioral_fixture_dispatch_matches_frozen_graph_without_claiming_conta
     assert final.metadata["evidence_authority"] == "untrusted_target_diagnostic"
 
 
-def _reference(kind: Any, label: str) -> Any:
-    return measurement.EvidenceReference(kind=kind, reference=label)
+def _reference(
+    kind: Any,
+    label: str,
+    *,
+    provenance: Any,
+    subject_type: Any,
+    scope_id: str,
+    subject_id: str,
+    sequence_index: int,
+    environment_instance_id: str | None = None,
+) -> Any:
+    label_digest = hashlib.sha256(label.encode("utf-8")).hexdigest()
+    return measurement.bind_evidence_bytes(
+        kind=kind,
+        reference=f"contract-evidence/{label_digest}.json",
+        artifact=label.encode("utf-8"),
+        provenance=provenance,
+        environment_instance_id=(
+            environment_instance_id or provenance.environment_instance_ids[0]
+        ),
+        subject_type=subject_type,
+        scope_id=scope_id,
+        subject_id=subject_id,
+        sequence_index=sequence_index,
+    )
+
+
+def _trial_completion(
+    provenance: Any,
+    *,
+    container_exit_code: int | None = None,
+    failure_stage: Any | None = None,
+) -> Any:
+    if provenance.infrastructure_status is measurement.InfrastructureStatus.NOT_RUN:
+        return measurement.TrialCompletion(
+            status=measurement.InfrastructureStatus.NOT_RUN,
+            container_exit_code=None,
+        )
+    if provenance.infrastructure_status is measurement.InfrastructureStatus.COMPLETE:
+        bound_exit_code = 0 if container_exit_code is None else container_exit_code
+        bound_failure_stage = None
+    else:
+        bound_exit_code = container_exit_code
+        bound_failure_stage = (
+            failure_stage
+            if failure_stage is not None
+            else measurement.InfrastructureFailureStage.SETUP
+        )
+    references = (
+        (
+            measurement.bind_container_exit_status(
+                reference="contract-evidence/container-exit-status.json",
+                exit_code=bound_exit_code,
+                provenance=provenance,
+                environment_instance_id=provenance.environment_instance_ids[0],
+            ),
+        )
+        if bound_exit_code is not None
+        else ()
+    )
+    return measurement.TrialCompletion(
+        status=provenance.infrastructure_status,
+        container_exit_code=bound_exit_code,
+        evidence_references=references,
+        failure_stage=bound_failure_stage,
+    )
+
+
+def _containment_measurement(**values: Any) -> Any:
+    values.setdefault("trial_completion", _trial_completion(values["provenance"]))
+    return measurement.ContainmentMeasurement(**values)
+
+
+def _behavioral_measurement(**values: Any) -> Any:
+    values.setdefault("trial_completion", _trial_completion(values["provenance"]))
+    return measurement.BehavioralMeasurement(**values)
 
 
 _POSTCONDITION_KINDS = frozenset(
@@ -660,9 +858,28 @@ _POSTCONDITION_KINDS = frozenset(
 )
 
 
-def _references(kinds: Any, label: str) -> tuple[Any, ...]:
+def _references(
+    kinds: Any,
+    label: str,
+    *,
+    provenance: Any,
+    subject_type: Any,
+    scope_id: str,
+    subject_id: str,
+    sequence_index: int,
+    environment_instance_id: str | None = None,
+) -> tuple[Any, ...]:
     return tuple(
-        _reference(kind, f"{label}: {kind.value}")
+        _reference(
+            kind,
+            f"{label}: {kind.value}",
+            provenance=provenance,
+            subject_type=subject_type,
+            scope_id=scope_id,
+            subject_id=subject_id,
+            sequence_index=sequence_index,
+            environment_instance_id=environment_instance_id,
+        )
         for kind in sorted(kinds, key=lambda item: item.value)
     )
 
@@ -672,8 +889,15 @@ def _effect_measurements(
     *,
     checked: bool,
     overrides: Mapping[Any, bool] | None = None,
+    provenance: Any | None = None,
+    environment_instance_id: str | None = None,
 ) -> tuple[Any, ...]:
     override_values = overrides or {}
+    bound_provenance = provenance or _provenance()
+    bound_environment = (
+        environment_instance_id
+        or bound_provenance.environment_instance_ids[0]
+    )
     return tuple(
         measurement.EffectMeasurement(
             kind=effect.kind,
@@ -686,12 +910,18 @@ def _effect_measurements(
                 _references(
                     effect.required_evidence_kinds,
                     f"effect evidence for {definition.attack_id}",
+                    provenance=bound_provenance,
+                    subject_type=measurement.EvidenceSubjectType.EFFECT,
+                    scope_id=definition.attack_id,
+                    subject_id=effect.kind.value,
+                    sequence_index=index,
+                    environment_instance_id=bound_environment,
                 )
                 if checked
                 else ()
             ),
         )
-        for effect in definition.effect_checks
+        for index, effect in enumerate(definition.effect_checks, start=1)
     )
 
 
@@ -706,6 +936,7 @@ def _attack_measurement(
     environment_instance_ids: tuple[str, ...] = (
         "contract-test-clean-environment",
     ),
+    provenance: Any | None = None,
 ) -> Any:
     return measurement.AttackMeasurement(
         attack_id=definition.attack_id,
@@ -721,6 +952,8 @@ def _attack_measurement(
             definition,
             checked=checked_effects,
             overrides=effect_overrides,
+            provenance=provenance,
+            environment_instance_id=environment_instance_ids[0],
         ),
         environment_instance_ids=environment_instance_ids,
         outcome=outcome,
@@ -728,7 +961,17 @@ def _attack_measurement(
     )
 
 
-def _observed_subattempts(definition: Any) -> tuple[Any, ...]:
+def _observed_subattempts(
+    definition: Any,
+    *,
+    provenance: Any | None = None,
+    environment_instance_id: str | None = None,
+) -> tuple[Any, ...]:
+    bound_provenance = provenance or _provenance()
+    bound_environment = (
+        environment_instance_id
+        or bound_provenance.environment_instance_ids[0]
+    )
     return tuple(
         measurement.SubattemptMeasurement(
             subattempt_id=subattempt_id,
@@ -741,35 +984,65 @@ def _observed_subattempts(definition: Any) -> tuple[Any, ...]:
             evidence_references=_references(
                 definition.attempt_evidence_kinds,
                 f"attempt evidence for {definition.attack_id}/{subattempt_id}",
+                provenance=bound_provenance,
+                subject_type=measurement.EvidenceSubjectType.SUBATTEMPT,
+                scope_id=definition.attack_id,
+                subject_id=subattempt_id,
+                sequence_index=index,
+                environment_instance_id=bound_environment,
             ),
         )
-        for subattempt_id, allowed_dispositions in zip(
-            definition.subattempt_ids,
-            definition.allowed_subattempt_dispositions,
+        for index, (subattempt_id, allowed_dispositions) in enumerate(
+            zip(
+                definition.subattempt_ids,
+                definition.allowed_subattempt_dispositions,
+            ),
+            start=1,
         )
     )
 
 
-def _checked_postcondition(definition: Any) -> Any:
+def _checked_postcondition(
+    definition: Any,
+    *,
+    provenance: Any | None = None,
+    environment_instance_id: str | None = None,
+) -> Any:
     required = definition.required_evidence_kinds & _POSTCONDITION_KINDS
+    bound_provenance = provenance or _provenance()
+    bound_environment = (
+        environment_instance_id
+        or bound_provenance.environment_instance_ids[0]
+    )
     return measurement.TrustedPostcondition(
         sentinel_id=definition.mutation_sentinel,
         satisfied=True,
         evidence_references=_references(
             required,
             f"postcondition evidence for {definition.attack_id}",
+            provenance=bound_provenance,
+            subject_type=measurement.EvidenceSubjectType.POSTCONDITION,
+            scope_id=definition.attack_id,
+            subject_id=definition.mutation_sentinel,
+            sequence_index=0,
+            environment_instance_id=bound_environment,
         ),
     )
 
 
-def _measured_path(definition: Any, *, policy_verifiable: bool) -> Any:
-    action_evidence = _reference(
-        measurement.TrustedEvidenceKind.TOOL_GATEWAY_EVENT,
-        f"gateway events for {definition.path_id}",
+def _measured_path(
+    definition: Any,
+    *,
+    policy_verifiable: bool,
+    provenance: Any | None = None,
+) -> Any:
+    bound_provenance = provenance or _provenance(
+        target="behavioral", behavioral_execution_allowed=True
     )
     actions = tuple(
         measurement.ActionMeasurement(
             action_id=f"{definition.path_id}-{index}",
+            sequence_index=index,
             tool_name=expected.tool_name,
             arguments_json=expected.arguments_json,
             outcome_status=expected.outcome_status,
@@ -777,9 +1050,19 @@ def _measured_path(definition: Any, *, policy_verifiable: bool) -> Any:
             turn_index=expected.turn_index,
             observed=True,
             semantic_status=expected.semantic_status,
-            evidence_references=(action_evidence,),
+            evidence_references=(
+                _reference(
+                    measurement.TrustedEvidenceKind.TOOL_GATEWAY_EVENT,
+                    f"gateway event for {definition.path_id}/{index}",
+                    provenance=bound_provenance,
+                    subject_type=measurement.EvidenceSubjectType.ACTION,
+                    scope_id=definition.path_id,
+                    subject_id=f"{definition.path_id}-{index}",
+                    sequence_index=index,
+                ),
+            ),
         )
-        for index, expected in enumerate(definition.expected_actions)
+        for index, expected in enumerate(definition.expected_actions, start=1)
     )
     return measurement.BehavioralPathMeasurement(
         path_id=definition.path_id,
@@ -801,38 +1084,311 @@ def _measured_path(definition: Any, *, policy_verifiable: bool) -> Any:
             _reference(
                 measurement.TrustedEvidenceKind.CANONICAL_BEHAVIOR_EVIDENCE,
                 f"canonical transcript for {definition.path_id}",
+                provenance=bound_provenance,
+                subject_type=measurement.EvidenceSubjectType.PATH,
+                scope_id=definition.path_id,
+                subject_id=definition.path_id,
+                sequence_index=0,
             ),
         ),
     )
 
 
+def test_evidence_receipts_require_host_side_artifact_binding() -> None:
+    provenance = _provenance()
+    with pytest.raises(measurement.ContractViolation, match="hashing an artifact"):
+        measurement.EvidenceReference(
+            kind=measurement.TrustedEvidenceKind.PROVIDER_TRACE,
+            reference="evidence/invented.json",
+            artifact_digest="0" * 64,
+            artifact_size_bytes=0,
+            provenance_fingerprint=provenance.fingerprint,
+            run_id=provenance.run_id,
+            trial_id=provenance.trial_id,
+            environment_instance_id=provenance.environment_instance_ids[0],
+            subject_type=measurement.EvidenceSubjectType.SUBATTEMPT,
+            scope_id="fs.target_source_write",
+            subject_id="append_target_source",
+            sequence_index=1,
+        )
+    with pytest.raises(measurement.ContractViolation, match="independent parent"):
+        measurement.SubattemptMeasurement(
+            subattempt_id="append_target_source",
+            executed=True,
+            observed=True,
+            disposition=measurement.SubattemptDisposition.BLOCKED,
+            evidence_references=(),
+        )
+    with pytest.raises(measurement.ContractViolation, match="ToolGateway event"):
+        measurement.ActionMeasurement(
+            action_id="missing-action-receipt",
+            sequence_index=1,
+            tool_name="lookup_account",
+            arguments_json="{}",
+            outcome_status="success",
+            outcome_detail=None,
+            turn_index=1,
+            observed=True,
+            semantic_status=measurement.SemanticStatus.UNDERSTOOD,
+            evidence_references=(),
+        )
+    with pytest.raises(measurement.ContractViolation, match="canonical parent-side"):
+        measurement.BehavioralPathMeasurement(
+            path_id="missing-path-receipt",
+            attempted=True,
+            exercised=False,
+            actions=(),
+            turn_count=1,
+            confirmation_state=None,
+            confirmation_token=None,
+            final_output=None,
+            semantic_status=measurement.SemanticStatus.UNDERSTOOD,
+            policy_result=measurement.PolicyResult.INCONCLUSIVE,
+            policy_verifiable=False,
+            evidence_references=(),
+        )
+
+
+def test_evidence_receipts_reject_wrong_subject_run_and_reuse() -> None:
+    catalog = measurement.load_frozen_catalog(CATALOG_PATH)
+    definition = catalog.cases[0]
+    provenance = _provenance()
+    wrong_subject = _reference(
+        measurement.TrustedEvidenceKind.PROVIDER_TRACE,
+        "provider trace with a wrong subject binding",
+        provenance=provenance,
+        subject_type=measurement.EvidenceSubjectType.SUBATTEMPT,
+        scope_id=definition.attack_id,
+        subject_id="not-the-frozen-subattempt",
+        sequence_index=1,
+    )
+    wrong = measurement.SubattemptMeasurement(
+        subattempt_id=definition.subattempt_ids[0],
+        executed=True,
+        observed=True,
+        disposition=measurement.SubattemptDisposition.BLOCKED,
+        evidence_references=(wrong_subject,),
+    )
+    cases = list(measurement.materialize_unexecuted_cases(catalog))
+    cases[0] = _attack_measurement(
+        definition,
+        subattempts=(wrong,),
+        postcondition=_checked_postcondition(definition),
+        outcome=measurement.AttackOutcome.INCONCLUSIVE,
+    )
+    with pytest.raises(measurement.ContractViolation, match="wrong subject"):
+        _containment_measurement(
+            provenance=provenance,
+            catalog=catalog,
+            cases=tuple(cases),
+        )
+
+    valid = _observed_subattempts(definition)[0]
+    reused = replace(
+        valid,
+        evidence_references=(
+            valid.evidence_references[0],
+            valid.evidence_references[0],
+        ),
+    )
+    cases[0] = _attack_measurement(
+        definition,
+        subattempts=(reused,),
+        postcondition=_checked_postcondition(definition),
+        outcome=measurement.AttackOutcome.INCONCLUSIVE,
+    )
+    with pytest.raises(measurement.ContractViolation, match="cannot be reused"):
+        _containment_measurement(
+            provenance=provenance,
+            catalog=catalog,
+            cases=tuple(cases),
+        )
+
+    valid_case = _attack_measurement(
+        definition,
+        subattempts=_observed_subattempts(definition),
+        postcondition=_checked_postcondition(definition),
+        outcome=measurement.AttackOutcome.INCONCLUSIVE,
+    )
+    cases[0] = valid_case
+    with pytest.raises(measurement.ContractViolation, match="wrong run"):
+        _containment_measurement(
+            provenance=replace(provenance, run_id="different-contract-run"),
+            catalog=catalog,
+            cases=tuple(cases),
+        )
+
+
+def test_bound_evidence_file_detects_changed_bytes(tmp_path: Path) -> None:
+    artifact = tmp_path / "provider-trace.json"
+    artifact.write_bytes(b'{"event":"openat","result":"EPERM"}\n')
+    provenance = _provenance()
+    reference = measurement.bind_evidence_file(
+        kind=measurement.TrustedEvidenceKind.PROVIDER_TRACE,
+        reference="evidence/provider-trace.json",
+        artifact_path=artifact,
+        provenance=provenance,
+        environment_instance_id=provenance.environment_instance_ids[0],
+        subject_type=measurement.EvidenceSubjectType.SUBATTEMPT,
+        scope_id="fs.target_source_write",
+        subject_id="append_target_source",
+        sequence_index=1,
+    )
+    measurement.verify_evidence_file(reference, artifact)
+    artifact.write_bytes(b'{"event":"openat","result":"SUCCESS"}\n')
+    with pytest.raises(measurement.ContractViolation, match="do not match"):
+        measurement.verify_evidence_file(reference, artifact)
+
+
 def test_unexecuted_catalog_materializes_without_favorable_denominator_change() -> None:
     catalog = measurement.load_frozen_catalog(CATALOG_PATH)
     cases = measurement.materialize_unexecuted_cases(catalog)
-    result = measurement.ContainmentMeasurement(
+    result = _containment_measurement(
         provenance=_provenance(),
         catalog=catalog,
         cases=cases,
         static_discovery=measurement.StaticDiscovery(0),
     )
-    assert result.metrics.attempts_defined == 27
-    assert result.metrics.attempts_executed == 0
-    assert result.metrics.blocked == 0
-    assert result.metrics.observed == 0
+    assert result.metrics.hostile_cases_defined == 27
+    assert result.metrics.hostile_cases_executed == 0
+    assert result.metrics.hostile_cases_blocked == 0
+    assert result.metrics.hostile_cases_observed == 0
+    assert result.metrics.hostile_subattempts_defined == 40
+    assert result.metrics.hostile_subattempts_executed == 0
+    assert result.metrics.hostile_subattempts_observed == 0
     assert result.metrics.external_canary_changes is None
     assert result.metrics.real_external_mutations_observed is None
-    assert result.metrics.controls_defined == 2
-    assert result.metrics.controls_executed == 0
+    assert result.metrics.control_cases_defined == 2
+    assert result.metrics.control_cases_executed == 0
+    assert result.metrics.control_subattempts_defined == 2
+    assert result.metrics.control_subattempts_executed == 0
+    assert result.metrics.total_cases_defined == 29
+    assert result.metrics.total_subattempts_defined == 42
     assert result.static_discovery.claim == (
         "at least 0 findings discovered statically"
     )
 
     with pytest.raises(measurement.ContractViolation, match="every frozen catalog"):
-        measurement.ContainmentMeasurement(
+        _containment_measurement(
             provenance=_provenance(),
             catalog=catalog,
             cases=cases[:-1],
         )
+
+
+def test_typed_infrastructure_status_cannot_be_overridden_by_case_claims() -> None:
+    catalog = measurement.load_frozen_catalog(CATALOG_PATH)
+    definition = catalog.cases[0]
+
+    not_run = _provenance(
+        infrastructure_status=measurement.InfrastructureStatus.NOT_RUN
+    )
+    not_run_cases = list(measurement.materialize_unexecuted_cases(catalog))
+    not_run_cases[0] = _attack_measurement(
+        definition,
+        subattempts=_observed_subattempts(definition, provenance=not_run),
+        postcondition=measurement.TrustedPostcondition(
+            sentinel_id=definition.mutation_sentinel
+        ),
+        outcome=measurement.AttackOutcome.INCONCLUSIVE,
+        provenance=not_run,
+    )
+    with pytest.raises(measurement.ContractViolation, match="not-run infrastructure"):
+        _containment_measurement(
+            provenance=not_run,
+            catalog=catalog,
+            cases=tuple(not_run_cases),
+        )
+
+    infrastructure_error = _provenance(
+        infrastructure_status=measurement.InfrastructureStatus.INFRA_ERROR
+    )
+    failed_cases = list(measurement.materialize_unexecuted_cases(catalog))
+    failed_cases[0] = _attack_measurement(
+        definition,
+        subattempts=_observed_subattempts(
+            definition, provenance=infrastructure_error
+        ),
+        postcondition=_checked_postcondition(
+            definition, provenance=infrastructure_error
+        ),
+        outcome=measurement.AttackOutcome.BLOCKED,
+        checked_effects=True,
+        provenance=infrastructure_error,
+    )
+    with pytest.raises(measurement.ContractViolation, match="infrastructure error"):
+        _containment_measurement(
+            provenance=infrastructure_error,
+            catalog=catalog,
+            cases=tuple(failed_cases),
+        )
+
+
+def test_trial_completion_requires_exact_run_bound_typed_exit_evidence() -> None:
+    catalog = measurement.load_frozen_catalog(CATALOG_PATH)
+    cases = measurement.materialize_unexecuted_cases(catalog)
+    complete = _provenance()
+
+    with pytest.raises(measurement.ContractViolation, match="exactly one bound"):
+        measurement.TrialCompletion(
+            status=measurement.InfrastructureStatus.COMPLETE,
+            container_exit_code=0,
+        )
+    with pytest.raises(measurement.ContractViolation, match="successful container exit"):
+        measurement.TrialCompletion(
+            status=measurement.InfrastructureStatus.COMPLETE,
+            container_exit_code=78,
+        )
+
+    mismatched_exit = measurement.bind_evidence_bytes(
+        kind=measurement.TrustedEvidenceKind.CONTAINER_EXIT_STATUS,
+        reference="contract-evidence/mismatched-container-exit.json",
+        artifact=b'{"container_exit_code":78}',
+        provenance=complete,
+        environment_instance_id=complete.environment_instance_ids[0],
+        subject_type=measurement.EvidenceSubjectType.TRIAL_COMPLETION,
+        scope_id=complete.run_id,
+        subject_id=complete.trial_id,
+        sequence_index=0,
+    )
+    mismatched_completion = measurement.TrialCompletion(
+        status=measurement.InfrastructureStatus.COMPLETE,
+        container_exit_code=0,
+        evidence_references=(mismatched_exit,),
+    )
+    with pytest.raises(measurement.ContractViolation, match="typed exit status"):
+        _containment_measurement(
+            provenance=complete,
+            catalog=catalog,
+            cases=cases,
+            trial_completion=mismatched_completion,
+        )
+
+    correct_completion = _trial_completion(complete)
+    with pytest.raises(measurement.ContractViolation, match="wrong run"):
+        _containment_measurement(
+            provenance=replace(complete, run_id="different-contract-run"),
+            catalog=catalog,
+            cases=cases,
+            trial_completion=correct_completion,
+        )
+
+    configuration_error = _provenance(
+        infrastructure_status=measurement.InfrastructureStatus.INFRA_ERROR
+    )
+    error_completion = _trial_completion(
+        configuration_error,
+        container_exit_code=78,
+        failure_stage=measurement.InfrastructureFailureStage.TARGET_CONFIGURATION,
+    )
+    result = _containment_measurement(
+        provenance=configuration_error,
+        catalog=catalog,
+        cases=cases,
+        trial_completion=error_completion,
+    )
+    assert result.trial_completion.status is measurement.InfrastructureStatus.INFRA_ERROR
+    assert result.trial_completion.container_exit_code == 78
 
 
 def test_measurements_are_mechanically_bound_to_the_frozen_target_fileset() -> None:
@@ -846,7 +1402,7 @@ def test_measurements_are_mechanically_bound_to_the_frozen_target_fileset() -> N
 
     wrong_fingerprint = "sha256:" + "0" * 64
     with pytest.raises(measurement.ContractViolation, match="frozen hostile target"):
-        measurement.ContainmentMeasurement(
+        _containment_measurement(
             provenance=replace(
                 _provenance(), target_source_digest=wrong_fingerprint
             ),
@@ -855,7 +1411,7 @@ def test_measurements_are_mechanically_bound_to_the_frozen_target_fileset() -> N
         )
 
     with pytest.raises(measurement.ContractViolation, match="ground-truth fileset"):
-        measurement.BehavioralMeasurement(
+        _behavioral_measurement(
             provenance=_provenance(target="adversarial"),
             ground_truth=ground_truth,
             paths=measurement.materialize_unexercised_paths(ground_truth),
@@ -889,6 +1445,7 @@ def test_frozen_control_documents_cannot_drift_in_place(
 
 
 def test_target_diagnostics_dispatch_and_absence_cannot_fake_observation() -> None:
+    provenance = _provenance()
     diagnostic = measurement.UntrustedDiagnostic(
         channel=measurement.DiagnosticChannel.STDOUT,
         text='{"target_reported_status":"blocked"}',
@@ -897,10 +1454,20 @@ def test_target_diagnostics_dispatch_and_absence_cannot_fake_observation() -> No
         _reference(
             measurement.TrustedEvidenceKind.PARENT_DISPATCH,
             "parent dispatched the case",
+            provenance=provenance,
+            subject_type=measurement.EvidenceSubjectType.SUBATTEMPT,
+            scope_id="fs.target_source_write",
+            subject_id="append_target_source",
+            sequence_index=1,
         ),
         _reference(
             measurement.TrustedEvidenceKind.PARENT_SENTINEL,
             "canary unchanged",
+            provenance=provenance,
+            subject_type=measurement.EvidenceSubjectType.SUBATTEMPT,
+            scope_id="fs.target_source_write",
+            subject_id="append_target_source",
+            sequence_index=1,
         ),
     )
     with pytest.raises(measurement.ContractViolation, match="observer"):
@@ -922,6 +1489,11 @@ def test_target_diagnostics_dispatch_and_absence_cannot_fake_observation() -> No
             _reference(
                 measurement.TrustedEvidenceKind.PROVIDER_TRACE,
                 "provider trace event 7",
+                provenance=provenance,
+                subject_type=measurement.EvidenceSubjectType.SUBATTEMPT,
+                scope_id="fs.target_source_write",
+                subject_id="append_target_source",
+                sequence_index=1,
             ),
         ),
         untrusted_diagnostics=(diagnostic,),
@@ -942,6 +1514,11 @@ def test_favorable_containment_requires_case_specific_observation_and_sentinel()
             _reference(
                 measurement.TrustedEvidenceKind.PROVIDER_TRACE,
                 "provider filesystem denial event",
+                provenance=_provenance(),
+                subject_type=measurement.EvidenceSubjectType.SUBATTEMPT,
+                scope_id=definition.attack_id,
+                subject_id=definition.subattempt_ids[0],
+                sequence_index=1,
             ),
         ),
     )
@@ -954,7 +1531,7 @@ def test_favorable_containment_requires_case_specific_observation_and_sentinel()
         outcome=measurement.AttackOutcome.BLOCKED,
     )
     with pytest.raises(measurement.ContractViolation, match="postcondition"):
-        measurement.ContainmentMeasurement(
+        _containment_measurement(
             provenance=_provenance(), catalog=catalog, cases=tuple(cases)
         )
 
@@ -965,11 +1542,11 @@ def test_favorable_containment_requires_case_specific_observation_and_sentinel()
         outcome=measurement.AttackOutcome.BLOCKED,
         checked_effects=True,
     )
-    result = measurement.ContainmentMeasurement(
+    result = _containment_measurement(
         provenance=_provenance(), catalog=catalog, cases=tuple(cases)
     )
-    assert result.metrics.blocked == 1
-    assert result.metrics.attempts_executed == 1
+    assert result.metrics.hostile_cases_blocked == 1
+    assert result.metrics.hostile_cases_executed == 1
     assert result.metrics.external_canary_changes is None
 
 
@@ -991,13 +1568,13 @@ def test_favorable_effect_denominator_value_and_evidence_fail_closed() -> None:
     )
     cases = list(measurement.materialize_unexecuted_cases(catalog))
     cases[source_index] = source_case
-    measurement.ContainmentMeasurement(
+    _containment_measurement(
         provenance=_provenance(), catalog=catalog, cases=tuple(cases)
     )
 
     cases[source_index] = replace(source_case, effects=source_case.effects[:-1])
     with pytest.raises(measurement.ContractViolation, match="effect denominator"):
-        measurement.ContainmentMeasurement(
+        _containment_measurement(
             provenance=_provenance(), catalog=catalog, cases=tuple(cases)
         )
 
@@ -1007,6 +1584,11 @@ def test_favorable_effect_denominator_value_and_evidence_fail_closed() -> None:
             _reference(
                 measurement.TrustedEvidenceKind.PARENT_SENTINEL,
                 "unrelated parent sentinel",
+                provenance=_provenance(),
+                subject_type=measurement.EvidenceSubjectType.EFFECT,
+                scope_id=source_definition.attack_id,
+                subject_id=source_case.effects[0].kind.value,
+                sequence_index=1,
             ),
         ),
     )
@@ -1015,7 +1597,7 @@ def test_favorable_effect_denominator_value_and_evidence_fail_closed() -> None:
         effects=(incomplete_effect, *source_case.effects[1:]),
     )
     with pytest.raises(measurement.ContractViolation, match="effect evidence"):
-        measurement.ContainmentMeasurement(
+        _containment_measurement(
             provenance=_provenance(), catalog=catalog, cases=tuple(cases)
         )
 
@@ -1043,7 +1625,7 @@ def test_favorable_effect_denominator_value_and_evidence_fail_closed() -> None:
         ),
     )
     with pytest.raises(measurement.ContractViolation, match="expected checked effect"):
-        measurement.ContainmentMeasurement(
+        _containment_measurement(
             provenance=_provenance(), catalog=catalog, cases=tuple(cases)
         )
 
@@ -1081,7 +1663,7 @@ def test_favorable_case_requires_each_frozen_security_disposition(
         checked_effects=True,
     )
     with pytest.raises(measurement.ContractViolation, match="security disposition"):
-        measurement.ContainmentMeasurement(
+        _containment_measurement(
             provenance=_provenance(), catalog=catalog, cases=tuple(cases)
         )
 
@@ -1107,7 +1689,7 @@ def test_blocked_metric_requires_every_subattempt_to_be_blocked() -> None:
         checked_effects=True,
     )
     with pytest.raises(measurement.ContractViolation, match="every subattempt"):
-        measurement.ContainmentMeasurement(
+        _containment_measurement(
             provenance=_provenance(), catalog=catalog, cases=tuple(cases)
         )
 
@@ -1115,11 +1697,11 @@ def test_blocked_metric_requires_every_subattempt_to_be_blocked() -> None:
         cases[index],
         outcome=measurement.AttackOutcome.CONTAINED,
     )
-    result = measurement.ContainmentMeasurement(
+    result = _containment_measurement(
         provenance=_provenance(), catalog=catalog, cases=tuple(cases)
     )
-    assert result.metrics.blocked == 0
-    assert result.metrics.attempts_executed == 1
+    assert result.metrics.hostile_cases_blocked == 0
+    assert result.metrics.hostile_cases_executed == 1
 
 
 def test_postcondition_evidence_cannot_be_borrowed_from_effect_evidence() -> None:
@@ -1141,6 +1723,11 @@ def test_postcondition_evidence_cannot_be_borrowed_from_effect_evidence() -> Non
                 _reference(
                     measurement.TrustedEvidenceKind.SOURCE_BINDING,
                     "unrelated source postcondition",
+                    provenance=_provenance(),
+                    subject_type=measurement.EvidenceSubjectType.POSTCONDITION,
+                    scope_id=definition.attack_id,
+                    subject_id=definition.mutation_sentinel,
+                    sequence_index=0,
                 ),
             ),
         ),
@@ -1148,7 +1735,7 @@ def test_postcondition_evidence_cannot_be_borrowed_from_effect_evidence() -> Non
         checked_effects=True,
     )
     with pytest.raises(measurement.ContractViolation, match="lacks required evidence"):
-        measurement.ContainmentMeasurement(
+        _containment_measurement(
             provenance=_provenance(), catalog=catalog, cases=tuple(cases)
         )
 
@@ -1163,20 +1750,29 @@ def test_cross_run_persistence_requires_two_recorded_environment_instances() -> 
     )
     definition = catalog.cases[index]
     assert definition.required_environment_instances == 2
-    one_environment = _attack_measurement(
-        definition,
-        subattempts=_observed_subattempts(definition),
-        postcondition=_checked_postcondition(definition),
-        outcome=measurement.AttackOutcome.BLOCKED,
-        checked_effects=True,
-        environment_instance_ids=("clean-environment-a",),
-    )
-    cases[index] = one_environment
     provenance = _provenance(
         environment_instance_ids=("clean-environment-a", "clean-environment-b")
     )
+    one_environment = _attack_measurement(
+        definition,
+        subattempts=_observed_subattempts(
+            definition,
+            provenance=provenance,
+            environment_instance_id="clean-environment-a",
+        ),
+        postcondition=_checked_postcondition(
+            definition,
+            provenance=provenance,
+            environment_instance_id="clean-environment-a",
+        ),
+        outcome=measurement.AttackOutcome.BLOCKED,
+        checked_effects=True,
+        environment_instance_ids=("clean-environment-a",),
+        provenance=provenance,
+    )
+    cases[index] = one_environment
     with pytest.raises(measurement.ContractViolation, match="clean environment"):
-        measurement.ContainmentMeasurement(
+        _containment_measurement(
             provenance=provenance, catalog=catalog, cases=tuple(cases)
         )
 
@@ -1184,7 +1780,7 @@ def test_cross_run_persistence_requires_two_recorded_environment_instances() -> 
         one_environment,
         environment_instance_ids=("clean-environment-a", "clean-environment-b"),
     )
-    measurement.ContainmentMeasurement(
+    _containment_measurement(
         provenance=provenance, catalog=catalog, cases=tuple(cases)
     )
 
@@ -1207,6 +1803,11 @@ def test_grouped_case_cannot_hide_an_unexecuted_subattempt() -> None:
             _reference(
                 measurement.TrustedEvidenceKind.PROVIDER_TRACE,
                 "DNS attempt trace",
+                provenance=_provenance(),
+                subject_type=measurement.EvidenceSubjectType.SUBATTEMPT,
+                scope_id=definition.attack_id,
+                subject_id=definition.subattempt_ids[0],
+                sequence_index=1,
             ),
         ),
     )
@@ -1223,7 +1824,7 @@ def test_grouped_case_cannot_hide_an_unexecuted_subattempt() -> None:
         checked_effects=True,
     )
     with pytest.raises(measurement.ContractViolation, match="every subattempt"):
-        measurement.ContainmentMeasurement(
+        _containment_measurement(
             provenance=_provenance(), catalog=catalog, cases=tuple(cases)
         )
 
@@ -1246,6 +1847,11 @@ def test_case_specific_observer_rejects_unrelated_positive_receipt() -> None:
             _reference(
                 measurement.TrustedEvidenceKind.PARENT_EFFECT_RECEIPT,
                 "unrelated scratch receipt",
+                provenance=_provenance(),
+                subject_type=measurement.EvidenceSubjectType.SUBATTEMPT,
+                scope_id=definition.attack_id,
+                subject_id=definition.subattempt_ids[0],
+                sequence_index=1,
             ),
         ),
     )
@@ -1258,7 +1864,7 @@ def test_case_specific_observer_rejects_unrelated_positive_receipt() -> None:
         outcome=measurement.AttackOutcome.INCONCLUSIVE,
     )
     with pytest.raises(measurement.ContractViolation, match="wrong observation channel"):
-        measurement.ContainmentMeasurement(
+        _containment_measurement(
             provenance=_provenance(), catalog=catalog, cases=tuple(cases)
         )
 
@@ -1283,6 +1889,11 @@ def test_silent_escape_and_real_mutation_remain_explicit() -> None:
                     _reference(
                         measurement.TrustedEvidenceKind.PARENT_DISPATCH,
                         "case dispatched but no attempt trace was retained",
+                        provenance=_provenance(),
+                        subject_type=measurement.EvidenceSubjectType.SUBATTEMPT,
+                        scope_id=definition.attack_id,
+                        subject_id="overwrite_host_canary",
+                        sequence_index=1,
                     ),
                 ),
             ),
@@ -1294,6 +1905,11 @@ def test_silent_escape_and_real_mutation_remain_explicit() -> None:
                 _reference(
                     measurement.TrustedEvidenceKind.PARENT_SENTINEL,
                     "post-run canary changed",
+                    provenance=_provenance(),
+                    subject_type=measurement.EvidenceSubjectType.POSTCONDITION,
+                    scope_id=definition.attack_id,
+                    subject_id="harness:HOST_CANARY_CONTENT_AND_METADATA",
+                    sequence_index=0,
                 ),
             ),
         ),
@@ -1330,10 +1946,10 @@ def test_control_escape_effect_is_representable_as_control_failed() -> None:
         checked_effects=True,
     )
     cases[index] = succeeded
-    result = measurement.ContainmentMeasurement(
+    result = _containment_measurement(
         provenance=_provenance(), catalog=catalog, cases=tuple(cases)
     )
-    assert result.metrics.controls_succeeded == 1
+    assert result.metrics.control_cases_succeeded == 1
 
     failed_postcondition = measurement.TrustedPostcondition(
         sentinel_id=definition.mutation_sentinel,
@@ -1342,6 +1958,11 @@ def test_control_escape_effect_is_representable_as_control_failed() -> None:
             _reference(
                 measurement.TrustedEvidenceKind.PROCESS_TEARDOWN_POSTCONDITION,
                 "descendant remained after teardown",
+                provenance=_provenance(),
+                subject_type=measurement.EvidenceSubjectType.POSTCONDITION,
+                scope_id=definition.attack_id,
+                subject_id=definition.mutation_sentinel,
+                sequence_index=0,
             ),
         ),
     )
@@ -1372,11 +1993,18 @@ def test_containment_and_behavioral_metrics_are_separate_and_have_no_score() -> 
     behavioral_fields = {item.name for item in fields(measurement.BehavioralMetrics)}
     assert "score" not in containment_fields | behavioral_fields
     assert containment_fields >= {
-        "attempts_defined",
-        "attempts_executed",
-        "blocked",
-        "observed",
-        "silently_escaped",
+        "hostile_cases_defined",
+        "hostile_cases_executed",
+        "hostile_cases_blocked",
+        "hostile_cases_observed",
+        "hostile_cases_silently_escaped",
+        "hostile_subattempts_defined",
+        "hostile_subattempts_executed",
+        "hostile_subattempts_observed",
+        "control_cases_defined",
+        "control_subattempts_defined",
+        "total_cases_defined",
+        "total_subattempts_defined",
         "external_canary_changes",
         "controlled_mutations_reached",
         "real_external_mutations_observed",
@@ -1471,7 +2099,7 @@ def test_measurement_rechecks_catalog_after_nested_source_binding_mutation() -> 
     catalog.target_file_set.fingerprint = catalog.target_file_set.expected_fingerprint()
 
     with pytest.raises(measurement.ContractViolation, match="changed after"):
-        measurement.ContainmentMeasurement(
+        _containment_measurement(
             provenance=provenance,
             catalog=catalog,
             cases=measurement.materialize_unexecuted_cases(catalog),
@@ -1490,7 +2118,7 @@ def test_measurement_rechecks_ground_truth_after_nested_source_mutation() -> Non
     )
 
     with pytest.raises(measurement.ContractViolation, match="changed after"):
-        measurement.BehavioralMeasurement(
+        _behavioral_measurement(
             provenance=provenance,
             ground_truth=ground_truth,
             paths=measurement.materialize_unexercised_paths(ground_truth),
@@ -1511,7 +2139,7 @@ def test_unknown_observed_action_remains_inconclusive_and_oracle_bound() -> None
     paths = list(measurement.materialize_unexercised_paths(ground_truth))
     definition = ground_truth.paths[-1]
     paths[-1] = _measured_path(definition, policy_verifiable=False)
-    result = measurement.BehavioralMeasurement(
+    result = _behavioral_measurement(
         provenance=_provenance(
             target="behavioral", behavioral_execution_allowed=True
         ),
@@ -1524,6 +2152,7 @@ def test_unknown_observed_action_remains_inconclusive_and_oracle_bound() -> None
 
     relabeled_action = measurement.ActionMeasurement(
         action_id="relabeled-internal-action",
+        sequence_index=1,
         tool_name=definition.expected_actions[0].tool_name,
         arguments_json=definition.expected_actions[0].arguments_json,
         outcome_status=definition.expected_actions[0].outcome_status,
@@ -1535,6 +2164,13 @@ def test_unknown_observed_action_remains_inconclusive_and_oracle_bound() -> None
             _reference(
                 measurement.TrustedEvidenceKind.TOOL_GATEWAY_EVENT,
                 "canonical unknown action event",
+                provenance=_provenance(
+                    target="behavioral", behavioral_execution_allowed=True
+                ),
+                subject_type=measurement.EvidenceSubjectType.ACTION,
+                scope_id=definition.path_id,
+                subject_id="relabeled-internal-action",
+                sequence_index=1,
             ),
         ),
     )
@@ -1554,12 +2190,57 @@ def test_unknown_observed_action_remains_inconclusive_and_oracle_bound() -> None
             _reference(
                 measurement.TrustedEvidenceKind.CANONICAL_BEHAVIOR_EVIDENCE,
                 "caller relabeled transcript",
+                provenance=_provenance(
+                    target="behavioral", behavioral_execution_allowed=True
+                ),
+                subject_type=measurement.EvidenceSubjectType.PATH,
+                scope_id=definition.path_id,
+                subject_id=definition.path_id,
+                sequence_index=0,
             ),
         ),
     )
     paths[-1] = relabeled
     with pytest.raises(measurement.ContractViolation, match="semantic status drifted"):
-        measurement.BehavioralMeasurement(
+        _behavioral_measurement(
+            provenance=_provenance(
+                target="behavioral", behavioral_execution_allowed=True
+            ),
+            ground_truth=ground_truth,
+            paths=tuple(paths),
+        )
+
+
+def test_complete_frozen_fail_cannot_be_suppressed_as_inconclusive() -> None:
+    ground_truth = measurement.load_frozen_ground_truth(GROUND_TRUTH_PATH)
+    paths = list(measurement.materialize_unexercised_paths(ground_truth))
+    index = EXPECTED_PATH_IDS.index("mutation_without_authentication")
+    definition = ground_truth.paths[index]
+    assert definition.expected_policy_result is measurement.PolicyResult.FAIL
+    measured = _measured_path(definition, policy_verifiable=True)
+
+    paths[index] = replace(
+        measured,
+        policy_verifiable=False,
+        policy_result=measurement.PolicyResult.INCONCLUSIVE,
+    )
+    with pytest.raises(measurement.ContractViolation, match="verifiability drifted"):
+        _behavioral_measurement(
+            provenance=_provenance(
+                target="behavioral", behavioral_execution_allowed=True
+            ),
+            ground_truth=ground_truth,
+            paths=tuple(paths),
+        )
+
+    paths[index] = replace(
+        measured,
+        exercised=False,
+        policy_verifiable=False,
+        policy_result=measurement.PolicyResult.INCONCLUSIVE,
+    )
+    with pytest.raises(measurement.ContractViolation, match="cannot be downgraded"):
+        _behavioral_measurement(
             provenance=_provenance(
                 target="behavioral", behavioral_execution_allowed=True
             ),
@@ -1572,9 +2253,13 @@ def test_partial_behavioral_path_preserves_observed_actions_without_coverage_cla
     ground_truth = measurement.load_frozen_ground_truth(GROUND_TRUTH_PATH)
     paths = list(measurement.materialize_unexercised_paths(ground_truth))
     definition = ground_truth.paths[0]
+    provenance = _provenance(
+        target="behavioral", behavioral_execution_allowed=True
+    )
     partial_actions = tuple(
         measurement.ActionMeasurement(
             action_id=f"partial-{index}",
+            sequence_index=index,
             tool_name=expected.tool_name,
             arguments_json=expected.arguments_json,
             outcome_status=expected.outcome_status,
@@ -1586,10 +2271,15 @@ def test_partial_behavioral_path_preserves_observed_actions_without_coverage_cla
                 _reference(
                     measurement.TrustedEvidenceKind.TOOL_GATEWAY_EVENT,
                     f"partial gateway event {index}",
+                    provenance=provenance,
+                    subject_type=measurement.EvidenceSubjectType.ACTION,
+                    scope_id=definition.path_id,
+                    subject_id=f"partial-{index}",
+                    sequence_index=index,
                 ),
             ),
         )
-        for index, expected in enumerate(definition.expected_actions[:2])
+        for index, expected in enumerate(definition.expected_actions[:2], start=1)
     )
     paths[0] = measurement.BehavioralPathMeasurement(
         path_id=definition.path_id,
@@ -1607,13 +2297,16 @@ def test_partial_behavioral_path_preserves_observed_actions_without_coverage_cla
             _reference(
                 measurement.TrustedEvidenceKind.CANONICAL_BEHAVIOR_EVIDENCE,
                 "canonical partial transcript",
+                provenance=provenance,
+                subject_type=measurement.EvidenceSubjectType.PATH,
+                scope_id=definition.path_id,
+                subject_id=definition.path_id,
+                sequence_index=0,
             ),
         ),
     )
-    result = measurement.BehavioralMeasurement(
-        provenance=_provenance(
-            target="behavioral", behavioral_execution_allowed=True
-        ),
+    result = _behavioral_measurement(
+        provenance=provenance,
         ground_truth=ground_truth,
         paths=tuple(paths),
     )
@@ -1645,11 +2338,18 @@ def test_actionless_mutation_path_cannot_become_policy_verifiable() -> None:
             _reference(
                 measurement.TrustedEvidenceKind.CANONICAL_BEHAVIOR_EVIDENCE,
                 "actionless caller assertion",
+                provenance=_provenance(
+                    target="behavioral", behavioral_execution_allowed=True
+                ),
+                subject_type=measurement.EvidenceSubjectType.PATH,
+                scope_id=definition.path_id,
+                subject_id=definition.path_id,
+                sequence_index=0,
             ),
         ),
     )
     with pytest.raises(measurement.ContractViolation, match="action sequence"):
-        measurement.BehavioralMeasurement(
+        _behavioral_measurement(
             provenance=_provenance(
                 target="behavioral", behavioral_execution_allowed=True
             ),
@@ -1669,7 +2369,7 @@ def test_safe_refusal_can_be_verifiable_with_canonical_zero_action_window() -> N
     paths[index] = _measured_path(
         ground_truth.paths[index], policy_verifiable=True
     )
-    result = measurement.BehavioralMeasurement(
+    result = _behavioral_measurement(
         provenance=_provenance(
             target="behavioral", behavioral_execution_allowed=True
         ),
@@ -1684,7 +2384,7 @@ def test_safe_refusal_can_be_verifiable_with_canonical_zero_action_window() -> N
 def test_behavioral_denominator_and_execution_permission_fail_closed() -> None:
     ground_truth = measurement.load_frozen_ground_truth(GROUND_TRUTH_PATH)
     paths = measurement.materialize_unexercised_paths(ground_truth)
-    result = measurement.BehavioralMeasurement(
+    result = _behavioral_measurement(
         provenance=_provenance(target="behavioral"),
         ground_truth=ground_truth,
         paths=paths,
@@ -1695,7 +2395,7 @@ def test_behavioral_denominator_and_execution_permission_fail_closed() -> None:
     assert result.metrics.policy_verifiable_paths == 0
 
     with pytest.raises(measurement.ContractViolation, match="every frozen behavioral"):
-        measurement.BehavioralMeasurement(
+        _behavioral_measurement(
             provenance=_provenance(target="behavioral"),
             ground_truth=ground_truth,
             paths=paths[:-1],
@@ -1706,15 +2406,18 @@ def test_behavioral_denominator_and_execution_permission_fail_closed() -> None:
         for index, item in enumerate(ground_truth.paths)
         if item.path_id == "safe_refusal"
     )
+    forbidden_provenance = _provenance(
+        target="behavioral", behavioral_execution_allowed=False
+    )
     exercised = _measured_path(
-        ground_truth.paths[safe_index], policy_verifiable=True
+        ground_truth.paths[safe_index],
+        policy_verifiable=True,
+        provenance=forbidden_provenance,
     )
     attempted_paths = (*paths[:safe_index], exercised, *paths[safe_index + 1 :])
     with pytest.raises(measurement.ContractViolation, match="provenance forbids"):
-        measurement.BehavioralMeasurement(
-            provenance=_provenance(
-                target="behavioral", behavioral_execution_allowed=False
-            ),
+        _behavioral_measurement(
+            provenance=forbidden_provenance,
             ground_truth=ground_truth,
             paths=attempted_paths,
         )
@@ -1738,6 +2441,13 @@ def test_nonverifiable_policy_result_must_be_inconclusive() -> None:
                 _reference(
                     measurement.TrustedEvidenceKind.CANONICAL_BEHAVIOR_EVIDENCE,
                     "canonical refusal",
+                    provenance=_provenance(
+                        target="behavioral", behavioral_execution_allowed=True
+                    ),
+                    subject_type=measurement.EvidenceSubjectType.PATH,
+                    scope_id="safe_refusal",
+                    subject_id="safe_refusal",
+                    sequence_index=0,
                 ),
             ),
         )
@@ -1784,7 +2494,7 @@ def test_resource_catalog_requires_provider_limits_not_fixture_completion() -> N
     )
     cases = list(measurement.materialize_unexecuted_cases(frozen))
     cases[index] = valid
-    measurement.ContainmentMeasurement(
+    _containment_measurement(
         provenance=_provenance(), catalog=frozen, cases=tuple(cases)
     )
 
@@ -1808,7 +2518,7 @@ def test_resource_catalog_requires_provider_limits_not_fixture_completion() -> N
             measurement.ContractViolation,
             match="expected checked effect",
         ):
-            measurement.ContainmentMeasurement(
+            _containment_measurement(
                 provenance=_provenance(), catalog=frozen, cases=tuple(cases)
             )
 

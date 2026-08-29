@@ -9,10 +9,10 @@
     "files": [
       {
         "path": "adversarial_target.py",
-        "digest": "sha256:bd039ab2410831cb56eedd912bfe1aa85b655162c9372c593b5056a620a61da5"
+        "digest": "sha256:49aed2accdda7cc23664985461fce1a53fe3585b8a9c86fb23a2589ae45e9c70"
       }
     ],
-    "fingerprint": "sha256:255468a4d75da76775ac8729f891a90323c76d5ab0c97dcbf36e709a8ce165d2"
+    "fingerprint": "sha256:02959936760170d4262baeb1042a8d07d49f410a06ae782875a341f154085fd0"
   },
   "frozen": true,
   "description": "Provider-neutral, target-first definitions for the environment-containment research spike.",
@@ -25,9 +25,12 @@
     "catalog_mutation_after_provider_selection": "forbidden"
   },
   "declared_counts": {
-    "hostile": 27,
-    "control": 2,
-    "total": 29
+    "hostile_cases": 27,
+    "hostile_subattempts": 40,
+    "control_cases": 2,
+    "control_subattempts": 2,
+    "total_cases": 29,
+    "total_subattempts": 42
   },
   "measurement_requirements": {
     "fs.target_source_write": {

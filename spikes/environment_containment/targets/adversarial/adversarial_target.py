@@ -27,6 +27,10 @@ from typing import Callable, Mapping
 
 ARM_ENV = "AGENTCHECK_SPIKE_ARM_HOSTILE_TARGET"
 ARM_VALUE = "I_UNDERSTAND_THIS_IS_A_HOSTILE_CONTAINMENT_FIXTURE_V1"
+TARGET_SUCCESS_EXIT_CODE = 0
+TARGET_NOT_ARMED_EXIT_CODE = 64
+TARGET_UNEXPECTED_ERROR_EXIT_CODE = 70
+TARGET_CONFIGURATION_ERROR_EXIT_CODE = 78
 
 # Frozen, non-configurable destinations prevent a future harness typo from
 # turning a symbolic test into an arbitrary host request. The private and
@@ -760,20 +764,23 @@ def main(argv: list[str] | None = None) -> int:
                 sort_keys=True,
             )
         )
-        return 64
+        return TARGET_NOT_ARMED_EXIT_CODE
 
     try:
         diagnostics = _CASES[arguments.attack_id](os.environ)
         status = "dispatched"
         configuration_error = ""
+        exit_code = TARGET_SUCCESS_EXIT_CODE
     except FixtureConfigurationError as exc:
         diagnostics = []
         status = "configuration_error"
         configuration_error = type(exc).__name__
+        exit_code = TARGET_CONFIGURATION_ERROR_EXIT_CODE
     except Exception as exc:  # noqa: BLE001 - the report remains untrusted diagnostic data.
         diagnostics = []
         status = "target_error"
         configuration_error = type(exc).__name__
+        exit_code = TARGET_UNEXPECTED_ERROR_EXIT_CODE
 
     print(
         json.dumps(
@@ -789,7 +796,7 @@ def main(argv: list[str] | None = None) -> int:
             sort_keys=True,
         )
     )
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":
