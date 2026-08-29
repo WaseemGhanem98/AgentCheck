@@ -22,19 +22,25 @@ from agentcheck.domain import (
     CapabilitiesSpec,
     CanonicalRun,
     CaseEvaluation,
+    ConversationRole,
+    ConversationTurn,
     IdentitySpec,
     InspectionProvenance,
     InstructionsSpec,
     InterfaceSpec,
     ObservabilitySpec,
+    OracleProvenance,
+    OracleStrength,
     Policy,
     PoliciesSpec,
     RunTermination,
     RuntimeSpec,
+    Scenario,
     SourceKind,
     SourceReference,
     SpecEvidence,
     ToolsSpec,
+    ToolBehaviorConstraint,
     UsageMetrics,
     Verdict,
     utc_now,
@@ -1009,22 +1015,83 @@ def test_report_states_when_an_action_path_was_never_exercised() -> None:
         ended_at=now,
         termination=RunTermination.COMPLETED,
     )
+    oracle = OracleProvenance(
+        oracle_id="action-oracle",
+        strength=OracleStrength.TOOL_CONTRACT,
+        source="declared tool contract",
+        confidence=1.0,
+        evidence_ids=("declared-tool",),
+        supports_hard_failure=True,
+    )
+
+    def action_scenario(scenario_id: str, tool_name: str) -> Scenario:
+        return Scenario(
+            scenario_id=scenario_id,
+            title=f"Exercise {tool_name}",
+            conversation_turns=(
+                ConversationTurn(
+                    turn_id=f"turn-{scenario_id}",
+                    role=ConversationRole.USER,
+                    content=f"Please perform {tool_name}.",
+                ),
+            ),
+            allowed_tool_behavior=(
+                ToolBehaviorConstraint(
+                    criterion_id=f"allow-{tool_name}",
+                    tool_name=tool_name,
+                    min_calls=0,
+                    max_calls=1,
+                    oracle_ids=(oracle.oracle_id,),
+                ),
+            ),
+            dimension_tags=("path:action", f"tool:{tool_name}"),
+            oracle_provenance=(oracle,),
+            generation_seed=SEED,
+        )
+
+    declined_scenario = action_scenario(
+        "action-send-flagged-notification", "send_flagged_notification"
+    )
+    unexecuted_scenario = action_scenario(
+        "action-archive-flagged-notification", "archive_flagged_notification"
+    )
+    declined_evaluation = CaseEvaluation(
+        evaluation_id="evaluation-declined-action",
+        scenario_id=declined.scenario_id,
+        run_id=declined.run_id,
+        verdict=Verdict.PASS,
+        assertions=(
+            AssertionResult(
+                assertion_id="assert-declined-action",
+                criterion="The declined action path met its deterministic contract.",
+                result=Verdict.PASS,
+                oracle_ids=(oracle.oracle_id,),
+                rationale="No prohibited action behavior was observed.",
+            ),
+        ),
+        started_at=now,
+        completed_at=now,
+        summary="The declined action-path evaluation completed.",
+    )
 
     report = render_report(
         run_id="run",
         target="target",
         git_revision=None,
         spec=_spec("agent"),
-        scenarios=(),
+        scenarios=(declined_scenario, unexecuted_scenario),
         runs=(declined,),
-        evaluations=(),
+        evaluations=(declined_evaluation,),
         findings=(),
     )
 
-    assert "Action paths exercised: 0/1" in report
+    assert "Action paths exercised: 0/2" in report
     assert "action-send-flagged-notification" in report
-    assert "held vacuously" in report
-    assert "not evidence of correct action behaviour" in report
+    assert "did not call the intended action tool" in report
+    assert "Prerequisite or unrelated calls do not exercise this path" in report
+    assert "action-archive-flagged-notification" in report
+    assert "no single non-infrastructure run and evaluation" in report
+    assert "no behavioral execution evidence" in report
 
 
 def test_report_case_origins_account_for_every_case() -> None:
