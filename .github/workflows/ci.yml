@@ -115,7 +115,7 @@ jobs:
         run: uv pip install --python "$RUNNER_TEMP/venv/bin/python" -e ".[dev]"
 
       - name: Compile Python sources
-        run: python -m compileall -q agentcheck scripts examples tests
+        run: python -m compileall -q agentcheck scripts examples tests spikes
 
       - name: Test
         # The primary interpreter runs everything; the others run the
@@ -187,11 +187,15 @@ jobs:
 
       - name: Ruff
         if: ${{ !cancelled() && needs.scope.outputs.expensive == 'true' }}
-        run: python -m ruff check agentcheck tests scripts
+        run: python -m ruff check agentcheck tests scripts spikes
 
       - name: Mypy
         if: ${{ !cancelled() && needs.scope.outputs.expensive == 'true' }}
-        run: python -m mypy agentcheck
+        run: >-
+          python -m mypy agentcheck
+          spikes/environment_containment/measurement.py
+          spikes/environment_containment/targets/adversarial/adversarial_target.py
+          spikes/environment_containment/targets/behavioral/behavioral_target.py
 
       - name: Secret scan
         if: ${{ !cancelled() }}
