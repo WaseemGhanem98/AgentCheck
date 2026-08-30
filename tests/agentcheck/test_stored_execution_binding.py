@@ -189,6 +189,46 @@ def _replace_jsonl(path: Path, values: tuple[object, ...]) -> None:
     path.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
 
 
+def _replace_suite(stored: StoredArtifacts, scenarios: tuple[Scenario, ...]) -> None:
+    _replace_json(
+        stored.directory / "suite.json",
+        {
+            "schema_version": "agentcheck.suite.v1",
+            "run_id": RUN_ID,
+            "seed": SEED,
+            "scenarios": [scenario.model_dump(mode="json") for scenario in scenarios],
+        },
+    )
+
+
+def test_empty_stored_execution_cannot_produce_loaded_run_report_or_baseline(
+    tmp_path: Path,
+) -> None:
+    stored = _write_stored_artifacts(tmp_path)
+    _replace_suite(stored, ())
+    _replace_jsonl(stored.directory / "runs.jsonl", ())
+    _replace_jsonl(stored.directory / "evaluations.jsonl", ())
+
+    message = "suite.json must contain at least one scenario"
+    with pytest.raises(ConfigurationError, match=message):
+        load_stored_run(stored.root, run_id=RUN_ID)
+    with pytest.raises(ConfigurationError, match=message):
+        render_stored_run(stored.root, run_id=RUN_ID)
+    with pytest.raises(ConfigurationError, match=message):
+        create_baseline(stored.root, run_id=RUN_ID, out="baseline.json")
+
+    assert not (stored.directory / "report.html").exists()
+    assert not (stored.root / "baseline.json").exists()
+
+
+def test_duplicate_suite_scenario_ids_are_rejected(tmp_path: Path) -> None:
+    stored = _write_stored_artifacts(tmp_path)
+    _replace_suite(stored, (stored.scenario, stored.scenario))
+
+    with pytest.raises(ConfigurationError, match="scenario IDs must be unique"):
+        load_stored_run(stored.root, run_id=RUN_ID)
+
+
 def test_non_infrastructure_evaluation_requires_a_canonical_run(
     tmp_path: Path,
 ) -> None:

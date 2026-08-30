@@ -362,16 +362,23 @@ def _validate_execution_bindings(
     runs: tuple[CanonicalRun, ...],
     evaluations: tuple[CaseEvaluation, ...],
 ) -> None:
-    """Fail closed when independently valid stored artifacts do not bind.
+    """Require internal identity and cardinality across stored execution records.
 
-    An infrastructure failure may happen before a worker returns a canonical
-    trajectory, so only behavioral verdicts require a run. Every other
-    identity is one-to-one: accepting duplicate or cross-scenario records
-    would let counts and trusted baselines describe evidence that did not
-    belong to the persisted suite execution.
+    This validation does not establish parent-execution membership, source or
+    artifact-transaction provenance, or verdict derivation. A non-infrastructure
+    evaluation requires a matching canonical run. An infrastructure evaluation
+    may retain its planned run ID when failure occurred before a canonical
+    trajectory existed; when a run does exist, the IDs must match. Duplicate or
+    cross-scenario records remain invalid because they make stored counts and
+    baselines internally contradictory.
     """
 
     scenario_ids = [scenario.scenario_id for scenario in scenarios]
+    if not scenario_ids:
+        raise ConfigurationError(
+            "invalid stored execution binding: suite.json must contain at least "
+            "one scenario"
+        )
     if len(scenario_ids) != len(set(scenario_ids)):
         raise ConfigurationError(
             "invalid stored execution binding: suite.json scenario IDs must be unique"
