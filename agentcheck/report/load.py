@@ -38,6 +38,7 @@ from agentcheck.domain import (
     CaseEvaluation,
     Finding,
     Scenario,
+    Verdict,
 )
 from agentcheck.errors import ConfigurationError
 from agentcheck.identity import spec_identity_matches
@@ -174,6 +175,12 @@ def load_stored_run(
         version_field="contract_version",
         expected=CANONICAL_RUN_CONTRACT_VERSION,
         filename="runs.jsonl",
+    )
+    _validate_execution_bindings(
+        spec=spec,
+        scenarios=scenarios,
+        runs=runs,
+        evaluations=evaluations,
     )
     findings = _load_findings(directory / "findings.json")
     frozen = _optional_frozen_suite(
@@ -346,6 +353,126 @@ def _digest_equal(left: str, right: str) -> bool:
         hmac.compare_digest(left_bytes, left_bytes)
         return False
     return hmac.compare_digest(left_bytes, right_bytes)
+
+
+def _validate_execution_bindings(
+    *,
+    spec: AgentSpec,
+    scenarios: tuple[Scenario, ...],
+    runs: tuple[CanonicalRun, ...],
+    evaluations: tuple[CaseEvaluation, ...],
+) -> None:
+    """Require internal identity and cardinality across stored execution records.
+
+    This validation does not establish parent-execution membership, source or
+    artifact-transaction provenance, or verdict derivation. A non-infrastructure
+    evaluation requires a matching canonical run. An infrastructure evaluation
+    may retain its planned run ID when failure occurred before a canonical
+    trajectory existed; when a run does exist, the IDs must match. Duplicate or
+    cross-scenario records remain invalid because they make stored counts and
+    baselines internally contradictory.
+    """
+
+    scenario_ids = [scenario.scenario_id for scenario in scenarios]
+    if not scenario_ids:
+        raise ConfigurationError(
+            "invalid stored execution binding: suite.json must contain at least "
+            "one scenario"
+        )
+    if len(scenario_ids) != len(set(scenario_ids)):
+        raise ConfigurationError(
+            "invalid stored execution binding: suite.json scenario IDs must be unique"
+        )
+    expected_scenario_ids = set(scenario_ids)
+
+    evaluations_by_scenario: dict[str, CaseEvaluation] = {}
+    evaluation_ids: set[str] = set()
+    evaluation_run_ids: set[str] = set()
+    for evaluation in evaluations:
+        if evaluation.evaluation_id in evaluation_ids:
+            raise ConfigurationError(
+                "invalid stored execution binding: evaluation IDs must be unique"
+            )
+        evaluation_ids.add(evaluation.evaluation_id)
+        if evaluation.scenario_id in evaluations_by_scenario:
+            raise ConfigurationError(
+                "invalid stored execution binding: more than one evaluation exists "
+                f"for scenario {evaluation.scenario_id!r}"
+            )
+        evaluations_by_scenario[evaluation.scenario_id] = evaluation
+        if evaluation.run_id is not None:
+            if evaluation.run_id in evaluation_run_ids:
+                raise ConfigurationError(
+                    "invalid stored execution binding: evaluation run IDs must be unique"
+                )
+            evaluation_run_ids.add(evaluation.run_id)
+
+    evaluated_scenario_ids = set(evaluations_by_scenario)
+    extra_evaluations = evaluated_scenario_ids.difference(expected_scenario_ids)
+    if extra_evaluations:
+        raise ConfigurationError(
+            "invalid stored execution binding: evaluations reference scenarios "
+            "outside suite.json: " + ", ".join(sorted(extra_evaluations))
+        )
+    missing_evaluations = expected_scenario_ids.difference(evaluated_scenario_ids)
+    if missing_evaluations:
+        raise ConfigurationError(
+            "invalid stored execution binding: suite scenarios are missing evaluations: "
+            + ", ".join(sorted(missing_evaluations))
+        )
+
+    runs_by_id: dict[str, CanonicalRun] = {}
+    runs_by_scenario: dict[str, CanonicalRun] = {}
+    for run in runs:
+        if run.run_id in runs_by_id:
+            raise ConfigurationError(
+                "invalid stored execution binding: canonical run IDs must be unique"
+            )
+        runs_by_id[run.run_id] = run
+        if run.scenario_id not in expected_scenario_ids:
+            raise ConfigurationError(
+                "invalid stored execution binding: canonical runs reference scenarios "
+                f"outside suite.json: {run.scenario_id}"
+            )
+        if run.scenario_id in runs_by_scenario:
+            raise ConfigurationError(
+                "invalid stored execution binding: more than one canonical run exists "
+                f"for scenario {run.scenario_id!r}"
+            )
+        runs_by_scenario[run.scenario_id] = run
+        if run.target_id != spec.spec_id:
+            raise ConfigurationError(
+                "invalid stored execution binding: canonical run target_id does not "
+                f"match agent-spec.json for scenario {run.scenario_id!r}"
+            )
+
+    for scenario_id, evaluation in evaluations_by_scenario.items():
+        scenario_run = runs_by_scenario.get(scenario_id)
+        referenced_run = (
+            runs_by_id.get(evaluation.run_id) if evaluation.run_id is not None else None
+        )
+        if referenced_run is not None and referenced_run.scenario_id != scenario_id:
+            raise ConfigurationError(
+                "invalid stored execution binding: evaluation run_id references a "
+                f"different scenario for {scenario_id!r}"
+            )
+        if evaluation.verdict is Verdict.INFRA_ERROR:
+            if scenario_run is not None and evaluation.run_id != scenario_run.run_id:
+                raise ConfigurationError(
+                    "invalid stored execution binding: infrastructure evaluation does "
+                    f"not match the canonical run for scenario {scenario_id!r}"
+                )
+            continue
+        if evaluation.run_id is None or referenced_run is None:
+            raise ConfigurationError(
+                "invalid stored execution binding: non-infrastructure evaluation has "
+                f"no matching canonical run for scenario {scenario_id!r}"
+            )
+        if scenario_run is not referenced_run:
+            raise ConfigurationError(
+                "invalid stored execution binding: evaluation and canonical run do not "
+                f"match for scenario {scenario_id!r}"
+            )
 
 
 def _optional_frozen_suite(
