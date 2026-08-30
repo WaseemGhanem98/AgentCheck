@@ -563,7 +563,7 @@ def test_lint_failure_rejects_a_frozen_suite_before_execution(
     assert not (target / ".agentcheck" / "runs" / run_id).exists()
 
 
-def test_selected_lint_invalid_frozen_case_refuses_before_workers_and_artifacts(
+def test_selected_lint_invalid_frozen_case_refuses_before_scenario_workers_and_artifacts(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:

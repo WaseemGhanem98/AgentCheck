@@ -420,8 +420,9 @@ def execute_suite(
         # Every case persisted in a frozen suite is part of that suite's evidence
         # contract. Dropping only the cases that no longer lint would make the
         # remaining verdicts and coverage look complete while silently shrinking
-        # their denominator. Refuse before selection, workers, or artifacts can
-        # turn that incomplete run into plausible-looking behavioral evidence.
+        # their denominator. Refuse before selection, scenario-execution
+        # workers, or artifacts can turn that incomplete run into
+        # plausible-looking behavioral evidence.
         raise ScenarioValidationError(
             f"Frozen suite contains {len(invalid)} scenario(s) that fail lint "
             "against the inspected target; refusing partial execution. Re-run "
