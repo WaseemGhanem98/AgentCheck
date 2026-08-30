@@ -11,6 +11,12 @@ recursive-include scripts *.py
 recursive-include docs *.md
 recursive-include .github *.yml
 
+# The containment spike and its contract test are repository-only research.
+# Shipping one without the other would be misleading; shipping hostile fixture
+# code at all would violate the release boundary.
+prune spikes
+exclude tests/agentcheck/test_environment_containment_spike_contract.py
+
 # Evaluation runs write under .agentcheck/ next to the target. Those are local
 # artifacts with absolute host paths in them and must never be redistributed.
 prune **/.agentcheck

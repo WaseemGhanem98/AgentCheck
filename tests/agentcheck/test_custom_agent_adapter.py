@@ -1463,10 +1463,15 @@ def _scenario(*, followups: Sequence[ConversationTurn] = ()) -> Scenario:
 
 def test_the_worker_selects_the_custom_adapter_from_config() -> None:
     from agentcheck.runner import worker
+    from agentcheck.runner.worker_protocol import WorkerRuntimeConfig
 
     assert worker._ADAPTERS["custom"] is CustomAgentAdapter
     assert (
-        type(worker._adapter_for(AgentCheckConfig(adapter="custom")))
+        type(
+            worker._adapter_for(
+                WorkerRuntimeConfig.from_config(AgentCheckConfig(adapter="custom"))
+            )
+        )
         is CustomAgentAdapter
     )
 
@@ -1673,7 +1678,7 @@ def test_the_shared_contracts_were_not_reshaped_to_fit_a_custom_agent() -> None:
     assert SCENARIO_CONTRACT_VERSION == "agentcheck.scenario.v1"
     assert CANONICAL_RUN_CONTRACT_VERSION == "agentcheck.canonical_run.v1"
     assert CANONICAL_EVENT_CONTRACT_VERSION == "agentcheck.canonical_event.v1"
-    assert WORKER_REQUEST_VERSION == "agentcheck.worker_request.v1"
+    assert WORKER_REQUEST_VERSION == "agentcheck.worker_request.v2"
     assert WORKER_RESPONSE_VERSION == "agentcheck.worker_response.v1"
 
     assert set(ToolDefinition.model_fields) == {

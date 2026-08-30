@@ -16,7 +16,7 @@ import tempfile
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import IO, Any, Generic, TypeVar, cast
+from typing import IO, Any, Generic, Literal, TypeVar, cast
 
 from pydantic import ValidationError
 
@@ -40,9 +40,15 @@ from agentcheck.domain import (
 from agentcheck.errors import ConfigurationError
 from agentcheck.privacy import redact_log_text
 
+from .worker_protocol import (
+    WORKER_REQUEST_VERSION,
+    WORKER_RESPONSE_VERSION,
+    WorkerExecutionInput,
+    WorkerRequest,
+    WorkerRuntimeConfig,
+)
 
-WORKER_REQUEST_VERSION = "agentcheck.worker_request.v1"
-WORKER_RESPONSE_VERSION = "agentcheck.worker_response.v1"
+
 _MAX_DIAGNOSTIC_BYTES = 16 * 1024
 _PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
@@ -249,7 +255,7 @@ def _worker_command(root: Path, config: AgentCheckConfig) -> list[str]:
 
 def _worker_environment(config: AgentCheckConfig) -> dict[str, str]:
     environment = child_environment(config)
-    # Never inherit PYTHONPATH from the caller.  This controlled path only makes
+    # Never inherit PYTHONPATH from the caller. This controlled path only makes
     # the AgentCheck package importable when running directly from a checkout.
     environment["PYTHONPATH"] = str(_PACKAGE_ROOT)
     return environment
@@ -329,11 +335,38 @@ def _failed_result(
     )
 
 
+def _worker_request(
+    *,
+    root: Path,
+    config: AgentCheckConfig,
+    operation: Literal["inspect", "run"],
+    scenario: Scenario | None,
+    run_id: str | None,
+) -> WorkerRequest:
+    """Build the strict worker request without serializing evaluator-only data."""
+
+    execution_input: WorkerExecutionInput | None = None
+    if operation == "run":
+        if scenario is None or run_id is None:
+            raise ValueError("run worker requests require a scenario and run_id")
+        execution_input = WorkerExecutionInput.from_scenario(scenario, run_id=run_id)
+    elif scenario is not None or run_id is not None:
+        raise ValueError(
+            "inspect worker requests cannot include scenario execution data"
+        )
+    return WorkerRequest(
+        operation=operation,
+        root=str(root),
+        runtime_config=WorkerRuntimeConfig.from_config(config),
+        execution_input=execution_input,
+    )
+
+
 def _execute_worker(
     *,
     root: Path,
     config: AgentCheckConfig,
-    operation: str,
+    operation: Literal["inspect", "run"],
     timeout_seconds: float,
     scenario: Scenario | None = None,
     run_id: str | None = None,
@@ -347,23 +380,20 @@ def _execute_worker(
     # Validate the containment boundary before starting trusted target code.
     resolve_entrypoint(root, config.entrypoint)
 
-    request: dict[str, Any] = {
-        "contract_version": WORKER_REQUEST_VERSION,
-        "operation": operation,
-        "root": str(root),
-        "config": config.model_dump(mode="json"),
-    }
-    if scenario is not None:
-        request["scenario"] = scenario.model_dump(mode="json")
-    if run_id is not None:
-        request["run_id"] = run_id
+    request = _worker_request(
+        root=root,
+        config=config,
+        operation=operation,
+        scenario=scenario,
+        run_id=run_id,
+    )
 
     with tempfile.TemporaryDirectory(prefix="agentcheck-worker-") as raw_directory:
         directory = Path(raw_directory)
         directory.chmod(0o700)
         request_path = directory / "request.json"
         response_path = directory / "response.json"
-        _write_private_json(request_path, request)
+        _write_private_json(request_path, request.model_dump(mode="json"))
         _write_private_json(
             response_path,
             {
@@ -611,9 +641,9 @@ def _execute_worker(
                     "expected": run_id,
                     "observed": value.run_id,
                 }
-            if scenario is None or value.scenario_id != scenario.scenario_id:
+            if value.scenario_id != run_id:
                 mismatches["scenario_id"] = {
-                    "expected": scenario.scenario_id if scenario is not None else None,
+                    "expected": run_id,
                     "observed": value.scenario_id,
                 }
             if expected_target_id is not None and value.target_id != expected_target_id:
@@ -635,6 +665,20 @@ def _execute_worker(
                     timed_out=False,
                     worker_pid=worker_pid,
                 )
+            if scenario is None:  # pragma: no cover - parent request invariant
+                return _failed_result(
+                    _infrastructure_error(
+                        code="worker_result_identity_mismatch",
+                        message="Canonical run had no parent scenario identity.",
+                        phase="worker_response",
+                    ),
+                    stdout=stdout,
+                    stderr=stderr,
+                    returncode=returncode,
+                    timed_out=False,
+                    worker_pid=worker_pid,
+                )
+            value = value.model_copy(update={"scenario_id": scenario.scenario_id})
 
         return ProcessResult(
             value=value,

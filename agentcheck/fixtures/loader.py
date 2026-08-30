@@ -24,6 +24,7 @@ from .pack import DEFAULT_FIXTURES_FILENAME, FixturePack
 
 _MAX_FIXTURE_BYTES = 64 * 1024
 _ENV_KEY = "$env"
+_GENERATED_PLACEHOLDER = "REPLACE_ME"
 
 
 def load_fixture_pack(root: Path, *, filename: str | None = None) -> FixturePack | None:
@@ -111,6 +112,12 @@ def validate_fixture_pack(pack: FixturePack, spec: AgentSpec) -> dict[str, JsonO
                     f"fixture for {tool_name} names unknown parameter "
                     f"{parameter!r}; the tool declares: {known}. The tool schema "
                     "may have changed since the fixture was written."
+                )
+            if value == _GENERATED_PLACEHOLDER:
+                raise ConfigurationError(
+                    f"{tool_name}.{parameter} still contains the generated "
+                    f"{_GENERATED_PLACEHOLDER} placeholder; replace it with a "
+                    "representative synthetic test value, then regenerate the suite"
                 )
             if isinstance(value, str) and redact_log_text(value) != value:
                 raise ConfigurationError(

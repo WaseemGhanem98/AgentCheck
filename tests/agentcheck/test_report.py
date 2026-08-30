@@ -22,19 +22,25 @@ from agentcheck.domain import (
     CapabilitiesSpec,
     CanonicalRun,
     CaseEvaluation,
+    ConversationRole,
+    ConversationTurn,
     IdentitySpec,
     InspectionProvenance,
     InstructionsSpec,
     InterfaceSpec,
     ObservabilitySpec,
+    OracleProvenance,
+    OracleStrength,
     Policy,
     PoliciesSpec,
     RunTermination,
     RuntimeSpec,
+    Scenario,
     SourceKind,
     SourceReference,
     SpecEvidence,
     ToolsSpec,
+    ToolBehaviorConstraint,
     UsageMetrics,
     Verdict,
     utc_now,
@@ -336,6 +342,94 @@ def _selection_plan(selected_id: str, excluded_id: str) -> SelectionPlan:
             ),
         ),
     )
+
+
+def test_legacy_invalid_scenario_artifacts_remain_bound_and_unique(
+    tmp_path: Path,
+) -> None:
+    """Keep historical-artifact validation after new runs stop producing these."""
+
+    root = tmp_path / "target"
+    root.mkdir()
+    valid, invalid, excluded = build_account_support_suite(seed=SEED)[:3]
+    directory = _write_run(
+        root,
+        "run-legacy-invalid",
+        scenario=valid,
+    )
+    selection = SelectionPlan(
+        max_cases=2,
+        selected_ids=(valid.scenario_id, invalid.scenario_id),
+        excluded_ids=(excluded.scenario_id,),
+        decisions=(
+            SelectionDecision(
+                scenario_id=valid.scenario_id,
+                selected=True,
+                reason="selected before lint",
+            ),
+            SelectionDecision(
+                scenario_id=invalid.scenario_id,
+                selected=True,
+                reason="selected before lint",
+            ),
+            SelectionDecision(
+                scenario_id=excluded.scenario_id,
+                selected=False,
+                reason="excluded before lint",
+            ),
+        ),
+    )
+    invalid_path = directory / "invalid-scenarios.json"
+    original_invalid = {
+        "schema_version": "agentcheck.invalid_scenarios.v1",
+        "items": [
+            {
+                "scenario": json.loads(invalid.model_dump_json()),
+                "issues": [
+                    {
+                        "code": "nonexistent_tool",
+                        "message": "the declared tool was not inspected",
+                        "severity": "error",
+                    }
+                ],
+            }
+        ],
+    }
+    invalid_path.write_text(json.dumps(original_invalid), encoding="utf-8")
+    summary_path = directory / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["invalid_scenarios"] = 1
+    summary["selection"] = selection.model_dump(mode="json")
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    loaded = load_stored_run(root, run_id="run-legacy-invalid")
+    assert loaded.selection == selection
+    assert loaded.behavioral_coverage is not None
+    assert loaded.behavioral_coverage.scenario_count == 1
+    assert loaded.behavioral_coverage.reference_scenario_count == 1
+    assert (
+        loaded.behavioral_coverage.reference_scope
+        is BehavioralCoverageReferenceScope.AVAILABLE_SCENARIOS_ONLY
+    )
+    assert render_stored_run(
+        root,
+        run_id="run-legacy-invalid",
+    ).report_path.is_file()
+
+    duplicate_invalid = json.loads(json.dumps(original_invalid))
+    duplicate_invalid["items"].append(duplicate_invalid["items"][0])
+    invalid_path.write_text(json.dumps(duplicate_invalid), encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="scenario IDs must be unique"):
+        load_stored_run(root, run_id="run-legacy-invalid")
+
+    unexpected_invalid = json.loads(json.dumps(original_invalid))
+    unexpected_invalid["items"][0]["scenario"]["scenario_id"] = (
+        "unexpected-invalid-id"
+    )
+    unexpected_invalid["items"][0]["scenario"]["fingerprint"] = ""
+    invalid_path.write_text(json.dumps(unexpected_invalid), encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="selection binding"):
+        load_stored_run(root, run_id="run-legacy-invalid")
 
 
 def test_old_summary_derives_behavioral_coverage_from_stored_artifacts(
@@ -1009,22 +1103,83 @@ def test_report_states_when_an_action_path_was_never_exercised() -> None:
         ended_at=now,
         termination=RunTermination.COMPLETED,
     )
+    oracle = OracleProvenance(
+        oracle_id="action-oracle",
+        strength=OracleStrength.TOOL_CONTRACT,
+        source="declared tool contract",
+        confidence=1.0,
+        evidence_ids=("declared-tool",),
+        supports_hard_failure=True,
+    )
+
+    def action_scenario(scenario_id: str, tool_name: str) -> Scenario:
+        return Scenario(
+            scenario_id=scenario_id,
+            title=f"Exercise {tool_name}",
+            conversation_turns=(
+                ConversationTurn(
+                    turn_id=f"turn-{scenario_id}",
+                    role=ConversationRole.USER,
+                    content=f"Please perform {tool_name}.",
+                ),
+            ),
+            allowed_tool_behavior=(
+                ToolBehaviorConstraint(
+                    criterion_id=f"allow-{tool_name}",
+                    tool_name=tool_name,
+                    min_calls=0,
+                    max_calls=1,
+                    oracle_ids=(oracle.oracle_id,),
+                ),
+            ),
+            dimension_tags=("path:action", f"tool:{tool_name}"),
+            oracle_provenance=(oracle,),
+            generation_seed=SEED,
+        )
+
+    declined_scenario = action_scenario(
+        "action-send-flagged-notification", "send_flagged_notification"
+    )
+    unexecuted_scenario = action_scenario(
+        "action-archive-flagged-notification", "archive_flagged_notification"
+    )
+    declined_evaluation = CaseEvaluation(
+        evaluation_id="evaluation-declined-action",
+        scenario_id=declined.scenario_id,
+        run_id=declined.run_id,
+        verdict=Verdict.PASS,
+        assertions=(
+            AssertionResult(
+                assertion_id="assert-declined-action",
+                criterion="The declined action path met its deterministic contract.",
+                result=Verdict.PASS,
+                oracle_ids=(oracle.oracle_id,),
+                rationale="No prohibited action behavior was observed.",
+            ),
+        ),
+        started_at=now,
+        completed_at=now,
+        summary="The declined action-path evaluation completed.",
+    )
 
     report = render_report(
         run_id="run",
         target="target",
         git_revision=None,
         spec=_spec("agent"),
-        scenarios=(),
+        scenarios=(declined_scenario, unexecuted_scenario),
         runs=(declined,),
-        evaluations=(),
+        evaluations=(declined_evaluation,),
         findings=(),
     )
 
-    assert "Action paths exercised: 0/1" in report
+    assert "Action paths exercised: 0/2" in report
     assert "action-send-flagged-notification" in report
-    assert "held vacuously" in report
-    assert "not evidence of correct action behaviour" in report
+    assert "did not call the intended action tool" in report
+    assert "Prerequisite or unrelated calls do not exercise this path" in report
+    assert "action-archive-flagged-notification" in report
+    assert "no single non-infrastructure run and evaluation" in report
+    assert "no behavioral execution evidence" in report
 
 
 def test_report_case_origins_account_for_every_case() -> None:
