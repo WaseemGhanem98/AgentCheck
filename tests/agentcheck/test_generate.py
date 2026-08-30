@@ -625,12 +625,23 @@ def test_selected_lint_invalid_frozen_case_refuses_before_workers_and_artifacts(
     write_frozen_suite(target / DEFAULT_SUITE_FILENAME, partial, force=True)
 
     called: list[str] = []
+    selected: list[str] = []
+    prepared: list[str] = []
 
     def _forbidden(*_args: object, **_kwargs: object) -> None:
         called.append("run")
         raise AssertionError("partial frozen suite must not execute valid cases")
 
+    def _forbidden_selection(*_args: object, **_kwargs: object) -> None:
+        selected.append("select")
+        raise AssertionError("partial frozen suite must refuse before selection")
+
+    def _forbidden_prepared(*_args: object, **_kwargs: object) -> None:
+        prepared.append("prepared")
+        raise AssertionError("partial frozen suite must refuse before preparation")
+
     monkeypatch.setattr(application, "run_scenario_in_subprocess", _forbidden)
+    monkeypatch.setattr(application, "select_scenarios", _forbidden_selection)
     monkeypatch.setattr(
         application,
         "inspect_in_subprocess",
@@ -645,6 +656,8 @@ def test_selected_lint_invalid_frozen_case_refuses_before_workers_and_artifacts(
         application.execute_suite(
             target,
             run_id=run_id,
+            select="coverage",
+            on_prepared=_forbidden_prepared,
         )
 
     message = str(exc_info.value)
@@ -652,6 +665,8 @@ def test_selected_lint_invalid_frozen_case_refuses_before_workers_and_artifacts(
     assert "refusing partial execution" in message
     assert "No agent verdict was produced" in message
     assert called == []
+    assert selected == []
+    assert prepared == []
     assert not (target / ".agentcheck" / "runs" / run_id).exists()
 
 
