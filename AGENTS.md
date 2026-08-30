@@ -5,13 +5,19 @@ repository. Read this before changing anything under `agentcheck/`.
 
 ## What this project is
 
-AgentCheck evaluates AI agents. It imports a trusted local agent, derives
-adversarial scenarios from what it finds, and runs them in isolated child
-processes where every tool call is simulated. It emits `PASS` / `FAIL` /
-`INCONCLUSIVE` / `INFRA_ERROR`, an HTML report, and a replay manifest.
+AgentCheck is an evidence authority for AI-agent behavior, not a framework
+compatibility layer. It imports a trusted local agent, derives adversarial
+scenarios from what it finds, and runs them in same-user child processes where
+declared tool calls are simulated. It emits `PASS` / `FAIL` / `INCONCLUSIVE` /
+`INFRA_ERROR`, an HTML report, and a replay manifest.
 
 The product's value is that its verdicts can be trusted. Every rule below
 exists to protect that.
+
+Keep four evidence dimensions separate: contained, observed, semantically
+understood, and policy-verifiable. One never implies the next. A blocked and
+observed runtime action with unknown semantics remains `INCONCLUSIVE`, never a
+`PASS`. Static discovery is lower-bounded, not exhaustive.
 
 ## Non-negotiable invariants
 
@@ -22,8 +28,11 @@ Breaking any of these is a correctness bug, not a style issue:
 2. **Unknown tools fail closed.** Never synthesize a tool result.
 3. **No real mutations.** Only the simulated world changes.
 4. **Worker isolation.** Scenarios run in child processes; the environment
-   allowlist is empty by default.
-5. **Network denied by default**, and containment failures surface.
+   allowlist is empty by default. This is trusted-code process isolation, not a
+   hostile-code sandbox.
+5. **Network denied by default**, and containment failures surface. The current
+   Python guard is not a kernel security boundary and must not be described as
+   one.
 6. **`INCONCLUSIVE` and `INFRA_ERROR` never collapse into `PASS`.**
 7. **Redaction at the artifact and log boundary**, before writing or printing.
 8. **Never overstate replay.** It reproduces inputs and harness behavior, not
@@ -47,6 +56,7 @@ Breaking any of these is a correctness bug, not a style issue:
 | `agentcheck/identity.py` | Portable target identity and its bounded legacy compatibility path. |
 | `agentcheck/redaction.py`, `agentcheck/privacy.py` | Credential redaction for artifacts and logs. |
 | `agentcheck/cli.py` | The `agentcheck` command. |
+| `spikes/environment_containment/` | Repository-only, provider-neutral research contracts. Control metadata stays outside its minimal target leaves and never ships in distributions. |
 
 Dependency direction: `adapters` may import `domain`; `domain` must not import
 `adapters`. Nothing in `agentcheck/` may import a private or host-repo module —
@@ -85,13 +95,21 @@ out why rather than re-freezing the expected values.
 ```bash
 python -m pytest tests/agentcheck/test_<area>.py -q     # focused, preferred
 python -m pytest tests -q -n 2                          # full, slow
-python -m ruff check agentcheck tests
-python -m mypy agentcheck
+python -m ruff check agentcheck tests scripts spikes
+python -m mypy agentcheck \
+  spikes/environment_containment/measurement.py \
+  spikes/environment_containment/targets/adversarial/adversarial_target.py \
+  spikes/environment_containment/targets/behavioral/behavioral_target.py
 ```
 
 Tests must be offline, credential-free, and free. Never add a test that calls a
 real provider. The bundled example target uses a scripted local model precisely
 so the suite costs nothing.
+
+The hostile containment-spike target is never imported or executed by ordinary
+tests or the current worker. Contract tests parse it as data. Only a separately
+reviewed maintained environment provider may arm it, with synthetic canaries
+and host/provider-side evidence; target stdout is untrusted diagnostics.
 
 ## Adapters
 
