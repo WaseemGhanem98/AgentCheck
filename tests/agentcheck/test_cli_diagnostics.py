@@ -21,6 +21,7 @@ from agentcheck.evaluate import infrastructure_evaluation
 from agentcheck.errors import ConfigurationError
 from agentcheck.generate import build_account_support_suite
 from agentcheck.initialize import write_initial_config
+from scripts.check_distribution import _long_description_link_violations
 
 
 def _empty_behavioral_coverage() -> BehavioralCoverage:
@@ -500,6 +501,29 @@ def test_public_safety_docs_keep_the_declared_tool_boundary_narrow() -> None:
     assert "Network denial is not a general operating-system sandbox" in custom
 
 
+def test_distribution_readme_link_policy_is_conservative() -> None:
+    markdown = """
+[absolute](https://example.com/guide) [fragment](#guide)
+![image](https://example.com/image.png)
+[relative](docs/guide.md)
+[reference]: https://example.com/reference
+<a href="docs/raw-html.md">relative HTML</a>
+<img src=images/raw-html.png>
+"""
+    reference_error = (
+        "reference-style Markdown definitions are not allowed; use inline absolute links"
+    )
+
+    assert _long_description_link_violations(markdown) == [
+        reference_error,
+        "relative HTML destination 'docs/raw-html.md'",
+        "relative HTML destination 'images/raw-html.png'",
+        "relative Markdown destination 'docs/guide.md'",
+    ]
+    for reference in (r"[foo\]bar]: docs/guide.md", "> [guide]: docs/guide.md"):
+        assert _long_description_link_violations(reference) == [reference_error]
+
+
 def test_allowed_public_alpha_polish_does_not_drift() -> None:
     root = Path(__file__).parents[2]
     readme = (root / "README.md").read_text(encoding="utf-8")
@@ -512,6 +536,11 @@ def test_allowed_public_alpha_polish_does_not_drift() -> None:
     assert "python -m pytest tests -q -n 2" in readme
     assert "964 tests" not in ci_docs
     assert "381 of 964" not in ci_docs
+    link_violations = _long_description_link_violations(readme)
+    assert not link_violations, (
+        "README links are copied into distribution metadata: "
+        f"{link_violations}"
+    )
     assert "integration shape, not a finished agent policy" in " ".join(custom.split())
     assert "first generated evaluation can contain behavioral `FAIL`" in custom
     assert "not a CLI demonstration of the three planted handoff defects" in " ".join(handoff.split())

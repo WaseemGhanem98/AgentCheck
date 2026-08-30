@@ -144,6 +144,30 @@ def test_no_new_failure_against_the_baseline_passes(
     assert result.baseline_compared is True
 
 
+def test_inconclusive_run_with_a_baseline_is_never_reported_as_pass(
+    monkeypatch: pytest.MonkeyPatch, target: Path
+) -> None:
+    """A regression baseline cannot certify evidence the current run lacks."""
+
+    _baseline(target)
+    calls = _patch(
+        monkeypatch,
+        counts={Verdict.PASS: 39, Verdict.INCONCLUSIVE: 1},
+        root=target,
+        checked=_FakeChecked(EXIT_PASS),
+    )
+
+    result = run_gate(target)
+
+    assert result.decision == GateDecision.BLOCK
+    assert result.exit_code == EXIT_INCONCLUSIVE
+    assert result.baseline_compared is True
+    assert "not a pass" in result.reason
+    assert any("cannot supply evidence" in item for item in result.detail)
+    assert result.summary_block == "summary\n"
+    assert calls["check_baseline"] == 1
+
+
 def test_a_new_failure_against_the_baseline_blocks(
     monkeypatch: pytest.MonkeyPatch, target: Path
 ) -> None:

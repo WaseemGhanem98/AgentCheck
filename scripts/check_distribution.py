@@ -5,6 +5,9 @@ gets mirrored. Both are easy to pollute by accident: a stray run artifact, a
 local checkout, an .env someone was testing with. This runs over the built
 artifacts rather than the source tree, because the source tree is not what
 gets published.
+
+PyPI also renders the README from distribution metadata, where repository-
+relative Markdown links resolve against the package index instead of the repo.
 """
 
 from __future__ import annotations
@@ -28,6 +31,19 @@ FORBIDDEN = (
     (re.compile(r"\.sqlite3?$"), "local database"),
     (re.compile(r"(^|/)dist/"), "nested distributions"),
 )
+
+MARKDOWN_INLINE_DESTINATION = re.compile(
+    r"\]\(\s*(?P<destination><[^>\r\n]*>|[^\s)\r\n]*)"
+)
+MARKDOWN_REFERENCE_DEFINITION = re.compile(
+    r"\[(?:\\.|[^\]\r\n])+\]:"
+)
+HTML_DESTINATION = re.compile(
+    r"\b(?:href|src)\s*=\s*(?:\"(?P<double>[^\"]*)\"|"
+    r"'(?P<single>[^']*)'|(?P<unquoted>[^\s>]+))",
+    re.IGNORECASE,
+)
+ABSOLUTE_URI = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
 # The wheel is the installed package. Tests, examples, and docs belong in the
 # sdist and the repository, not in every user's site-packages.
@@ -76,8 +92,75 @@ def _members(path: pathlib.Path) -> list[str]:
         with zipfile.ZipFile(path) as archive:
             return archive.namelist()
     with tarfile.open(path) as archive:
-        # Strip the leading "agentcheck-0.1.0/" component an sdist always has.
+        # Strip the generated top-level distribution-and-version directory.
         return [name.split("/", 1)[1] for name in archive.getnames() if "/" in name]
+
+
+def _metadata(path: pathlib.Path) -> tuple[str, str]:
+    if path.suffix == ".whl":
+        with zipfile.ZipFile(path) as archive:
+            names = [
+                name
+                for name in archive.namelist()
+                if re.fullmatch(r"[^/]+\.dist-info/METADATA", name)
+            ]
+            if len(names) != 1:
+                raise ValueError(f"expected one wheel METADATA file, found {len(names)}")
+            name = names[0]
+            return name, archive.read(name).decode("utf-8")
+
+    with tarfile.open(path) as archive:
+        members = [
+            member
+            for member in archive.getmembers()
+            if member.isfile()
+            and re.fullmatch(r"[^/]+/PKG-INFO", member.name)
+        ]
+        if len(members) != 1:
+            raise ValueError(f"expected one sdist PKG-INFO file, found {len(members)}")
+        member = members[0]
+        extracted = archive.extractfile(member)
+        if extracted is None:
+            raise ValueError(f"could not read {member.name}")
+        return member.name, extracted.read().decode("utf-8")
+
+
+def _is_absolute_or_same_page(destination: str) -> bool:
+    return destination.startswith("#") or ABSOLUTE_URI.match(destination) is not None
+
+
+def _long_description_link_violations(text: str) -> list[str]:
+    """Enforce AgentCheck's deliberately small README link syntax.
+
+    The public README uses inline Markdown links and images only. Reference-style
+    definitions are disallowed, as are relative raw-HTML destinations. Keeping
+    that authoring rule explicit avoids a dependency or a partial Markdown parser.
+    Link-shaped literals in README prose or code must use a different spelling.
+    """
+
+    violations: set[str] = set()
+    for match in MARKDOWN_INLINE_DESTINATION.finditer(text):
+        candidate = match.group("destination")
+        destination = (
+            candidate[1:-1]
+            if candidate.startswith("<") and candidate.endswith(">")
+            else candidate
+        )
+        if not _is_absolute_or_same_page(destination):
+            violations.add(f"relative Markdown destination {destination!r}")
+
+    if MARKDOWN_REFERENCE_DEFINITION.search(text) is not None:
+        violations.add(
+            "reference-style Markdown definitions are not allowed; "
+            "use inline absolute links"
+        )
+
+    for match in HTML_DESTINATION.finditer(text):
+        destination = next(group for group in match.groups() if group is not None)
+        if not _is_absolute_or_same_page(destination):
+            violations.add(f"relative HTML destination {destination!r}")
+
+    return sorted(violations)
 
 
 def main() -> int:
@@ -121,6 +204,16 @@ def main() -> int:
             if count != 1:
                 failures.append(
                     f"{artifact.name}: expected exactly one packaged {filename}, found {count}"
+                )
+
+        try:
+            metadata_name, metadata = _metadata(artifact)
+        except (OSError, UnicodeDecodeError, ValueError) as error:
+            failures.append(f"{artifact.name}: invalid distribution metadata ({error})")
+        else:
+            for violation in _long_description_link_violations(metadata):
+                failures.append(
+                    f"{artifact.name}: {metadata_name}: {violation}"
                 )
 
     if failures:

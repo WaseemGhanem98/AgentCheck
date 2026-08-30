@@ -45,6 +45,7 @@ from agentcheck.domain import (
 )
 from agentcheck.errors import ConfigurationError, ScenarioValidationError
 from agentcheck.evaluate import evaluate_run
+from agentcheck.fixtures import DEFAULT_FIXTURES_FILENAME
 from agentcheck.generate import (
     DEFAULT_SUITE_FILENAME,
     FROZEN_SUITE_CONTRACT_VERSION,
@@ -370,6 +371,34 @@ def test_generate_then_test_preserves_builtin_verdicts(tmp_path: Path) -> None:
         for case in generation.suite.cases
         if case.lineage.origin is CaseOrigin.SCHEMA_BOUNDARY
     )
+
+
+def test_generate_refuses_an_unedited_fixture_template(tmp_path: Path) -> None:
+    target = _copy_example(tmp_path)
+    (target / DEFAULT_FIXTURES_FILENAME).write_text(
+        json.dumps(
+            {
+                "schema_version": "agentcheck.fixtures.v1",
+                "tools": {
+                    "delete_account": {
+                        "arguments": {"account_id": "REPLACE_ME"}
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ConfigurationError,
+        match=(
+            r"delete_account\.account_id still contains the generated REPLACE_ME "
+            r"placeholder; replace it with a representative synthetic test value"
+        ),
+    ):
+        application.generate_suite(target, seed=SEED)
+
+    assert not (target / DEFAULT_SUITE_FILENAME).exists()
 
 
 def test_execute_suite_without_a_frozen_file_keeps_phase1_behavior(

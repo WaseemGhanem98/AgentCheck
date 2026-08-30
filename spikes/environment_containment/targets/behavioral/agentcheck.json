@@ -1,0 +1,15 @@
+{
+  "schema_version": "agentcheck.config.v1",
+  "adapter": "custom",
+  "entrypoint": "behavioral_target.py:agent",
+  "suite": "account_support_v1",
+  "seed": 1729,
+  "max_concurrency": 1,
+  "environment_allowlist": [],
+  "network_allowlist": [],
+  "allow_network": false,
+  "controlled_model": false,
+  "include_instructions_in_report": false,
+  "artifacts_directory": ".agentcheck",
+  "policy_packs": ["derived_tool_risk_v1"]
+}

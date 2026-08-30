@@ -51,7 +51,7 @@ def _weather_agent(agents: Any, *, instructions: str = "You report weather.") ->
 
 
 # --------------------------------------------------------------------------
-# Reproduction: identity currently depends on the absolute checkout location.
+# Regression: identity used to depend on the absolute checkout location.
 # --------------------------------------------------------------------------
 
 
@@ -135,6 +135,23 @@ def test_portable_identity_is_deterministic_across_repeated_inspections(
     ids = {inspect_target(target)[2].value.spec_id for _ in range(3)}
 
     assert len(ids) == 1
+
+
+def test_validation_evidence_describes_portable_identity() -> None:
+    documentation = (REPOSITORY_ROOT / "docs" / "validation-evidence.md").read_text(
+        encoding="utf-8"
+    )
+    prose = " ".join(documentation.split())
+
+    assert "identity are portable across checkout locations" in prose
+    assert "entrypoint relative to the target root" in prose
+    assert "identical complete generation inputs" in prose
+    assert "provider realization" in prose
+    assert (
+        "Artifacts created before portable target identity remain location-bound"
+        in prose
+    )
+    assert "## Fingerprints are per-location" not in documentation
 
 
 # --------------------------------------------------------------------------

@@ -28,6 +28,7 @@ from agentcheck.runner.orchestrator import (
 )
 from agentcheck.runner import orchestrator
 from agentcheck.runner.worker import execute_request
+from agentcheck.runner.worker_protocol import WorkerRuntimeConfig
 
 
 EXAMPLE = Path(__file__).parents[2] / "examples" / "evaluation" / "account_agent"
@@ -195,7 +196,9 @@ def test_inspect_worker_response_includes_preflight_report(tmp_path: Path) -> No
             "contract_version": WORKER_REQUEST_VERSION,
             "operation": "inspect",
             "root": str(root),
-            "config": config.model_dump(mode="json"),
+            "runtime_config": WorkerRuntimeConfig.from_config(config).model_dump(
+                mode="json"
+            ),
         },
     )
 
@@ -484,7 +487,9 @@ def test_valid_canonical_adapter_error_is_preserved_for_evaluation(
     now = utc_now()
     canonical_error = CanonicalRun(
         run_id="adapter-error-run",
-        scenario_id=scenario.scenario_id,
+        # The child uses the run ID as its transport-only case identity;
+        # the parent validates it before restoring the real Scenario ID.
+        scenario_id="adapter-error-run",
         target_id="target",
         started_at=now,
         ended_at=now,
@@ -537,6 +542,7 @@ def test_valid_canonical_adapter_error_is_preserved_for_evaluation(
     run = result.require_value()
     assert run.termination == RunTermination.ADAPTER_ERROR
     assert run.termination_reason == "Controlled adapter failure."
+    assert run.scenario_id == scenario.scenario_id
     assert result.infrastructure_error is None
 
 
@@ -724,7 +730,9 @@ def test_in_process_execute_request_restores_cwd(tmp_path: Path) -> None:
             "contract_version": WORKER_REQUEST_VERSION,
             "operation": "inspect",
             "root": str(root),
-            "config": config.model_dump(mode="json"),
+            "runtime_config": WorkerRuntimeConfig.from_config(config).model_dump(
+                mode="json"
+            ),
         },
     )
 
