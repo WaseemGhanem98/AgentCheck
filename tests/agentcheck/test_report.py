@@ -344,6 +344,94 @@ def _selection_plan(selected_id: str, excluded_id: str) -> SelectionPlan:
     )
 
 
+def test_legacy_invalid_scenario_artifacts_remain_bound_and_unique(
+    tmp_path: Path,
+) -> None:
+    """Keep historical-artifact validation after new runs stop producing these."""
+
+    root = tmp_path / "target"
+    root.mkdir()
+    valid, invalid, excluded = build_account_support_suite(seed=SEED)[:3]
+    directory = _write_run(
+        root,
+        "run-legacy-invalid",
+        scenario=valid,
+    )
+    selection = SelectionPlan(
+        max_cases=2,
+        selected_ids=(valid.scenario_id, invalid.scenario_id),
+        excluded_ids=(excluded.scenario_id,),
+        decisions=(
+            SelectionDecision(
+                scenario_id=valid.scenario_id,
+                selected=True,
+                reason="selected before lint",
+            ),
+            SelectionDecision(
+                scenario_id=invalid.scenario_id,
+                selected=True,
+                reason="selected before lint",
+            ),
+            SelectionDecision(
+                scenario_id=excluded.scenario_id,
+                selected=False,
+                reason="excluded before lint",
+            ),
+        ),
+    )
+    invalid_path = directory / "invalid-scenarios.json"
+    original_invalid = {
+        "schema_version": "agentcheck.invalid_scenarios.v1",
+        "items": [
+            {
+                "scenario": json.loads(invalid.model_dump_json()),
+                "issues": [
+                    {
+                        "code": "nonexistent_tool",
+                        "message": "the declared tool was not inspected",
+                        "severity": "error",
+                    }
+                ],
+            }
+        ],
+    }
+    invalid_path.write_text(json.dumps(original_invalid), encoding="utf-8")
+    summary_path = directory / "summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["invalid_scenarios"] = 1
+    summary["selection"] = selection.model_dump(mode="json")
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+
+    loaded = load_stored_run(root, run_id="run-legacy-invalid")
+    assert loaded.selection == selection
+    assert loaded.behavioral_coverage is not None
+    assert loaded.behavioral_coverage.scenario_count == 1
+    assert loaded.behavioral_coverage.reference_scenario_count == 1
+    assert (
+        loaded.behavioral_coverage.reference_scope
+        is BehavioralCoverageReferenceScope.AVAILABLE_SCENARIOS_ONLY
+    )
+    assert render_stored_run(
+        root,
+        run_id="run-legacy-invalid",
+    ).report_path.is_file()
+
+    duplicate_invalid = json.loads(json.dumps(original_invalid))
+    duplicate_invalid["items"].append(duplicate_invalid["items"][0])
+    invalid_path.write_text(json.dumps(duplicate_invalid), encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="scenario IDs must be unique"):
+        load_stored_run(root, run_id="run-legacy-invalid")
+
+    unexpected_invalid = json.loads(json.dumps(original_invalid))
+    unexpected_invalid["items"][0]["scenario"]["scenario_id"] = (
+        "unexpected-invalid-id"
+    )
+    unexpected_invalid["items"][0]["scenario"]["fingerprint"] = ""
+    invalid_path.write_text(json.dumps(unexpected_invalid), encoding="utf-8")
+    with pytest.raises(ConfigurationError, match="selection binding"):
+        load_stored_run(root, run_id="run-legacy-invalid")
+
+
 def test_old_summary_derives_behavioral_coverage_from_stored_artifacts(
     tmp_path: Path,
 ) -> None:
