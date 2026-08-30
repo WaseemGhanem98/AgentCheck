@@ -16,9 +16,9 @@ Progressive targets exposed progressively harder problems:
 **Targets #1 and #2** reached the evaluation boundary but were limited. A
 tool-less agent with a declared `output_type` produces one output-schema case;
 an agent whose tools are all read-only gives the trajectory oracles little to
-observe. Runs were deterministic — identical suite fingerprints across repeated
-runs — but a deterministic run of a target with nothing consequential to do is a
-weak signal, and was treated as one.
+observe. Suite generation was reproducible — repeated generation produced
+identical suite fingerprints — but a reproducibly generated suite for a target
+with nothing consequential to do is a weak signal, and was treated as one.
 
 **Target #3** was the first target that owns a state-changing action itself and
 whose own instructions document the rule that action should be judged against.
@@ -199,9 +199,11 @@ and none is quoted here or anywhere else.** The benchmark remains unfinished.
 
 Deterministic:
 
-- scenario generation, suite freezing, and fingerprinting — the same target
-  location, configuration, seed, and generator version freeze a byte-identical
-  suite;
+- scenario generation, suite freezing, and fingerprinting from identical
+  complete local generation inputs when provider realization is not used.
+  Those inputs include target identity, configuration, seed, generator
+  compatibility version, fixtures, declared policy packs, scenario requests,
+  and prerequisite outcomes; checkout location itself is excluded;
 - tool simulation, fixture and fault injection;
 - oracle evaluation and verdict assignment given the same recorded inputs;
 - offline evaluation through the controlled model, which is why the bundled
@@ -217,10 +219,18 @@ provider replay. It reproduces the inputs and the harness; it does not replay
 recorded model output as though the model were deterministic, and it should not
 be described as if it does.
 
-## Fingerprints are per-location
+## Target and suite identity are portable across checkout locations
 
-Suite fingerprints incorporate the target's absolute entrypoint path, so an
-identical target at a different path fingerprints differently. Fingerprints are
-therefore stable per machine and per location, not portable across them. This is
-pre-existing behaviour and worth knowing before treating a fingerprint as a
-global identity.
+Current target identity uses the entrypoint relative to the target root, not the
+absolute checkout path. An unchanged target therefore receives the same
+`spec_id` in a developer checkout and a CI checkout. Given identical complete
+generation inputs, its frozen suite fingerprints the same way too. If provider
+realization is enabled, identical recorded realization output is also required;
+a real provider can vary that output. A semantic change to the target, including
+a different relative entrypoint, still changes identity.
+
+Artifacts created before portable target identity remain location-bound. They
+are recognized only when an inspection at the original location reproduces
+their legacy absolute-path identity. Regenerating such an artifact from the
+current checkout produces a portable identity; AgentCheck does not infer that a
+legacy artifact from another location is equivalent.

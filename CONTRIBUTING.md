@@ -69,8 +69,10 @@ verdict logic. Do not widen an SDK version gate without evidence that the new
 minor version was tested. Dependency and workflow changes require owner review
 and are never auto-merged.
 
-Package and frozen-suite generator versions are currently coupled: the package
-version is recorded in suite provenance and participates in suite fingerprints.
-Until that contract is separated deliberately, version changes can re-identify
-newly generated otherwise-equivalent suites and must be reviewed as compatibility
-events.
+Package releases and frozen-suite generation compatibility use separate
+versions. The distribution release (`agentcheck.__version__`) records which
+build executed a run and does not participate in suite provenance or suite
+fingerprints. `GENERATOR_COMPATIBILITY_VERSION` is recorded in suite provenance
+and does participate in suite fingerprints; raise it only when changed
+generation semantics should re-identify otherwise-equivalent suites. A package
+release alone is not a suite compatibility event.
