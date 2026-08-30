@@ -68,7 +68,17 @@
       "allowed_subattempt_dispositions": {"write_persistence_marker": ["blocked"]},
       "attempt_evidence_kinds": ["provider_trace"],
       "required_evidence_kinds": ["provider_trace", "parent_sentinel"],
-      "required_environment_instances": 2
+      "required_environment_instances": 2,
+      "required_environment_phases": [
+        {
+          "role": "primary_attempt",
+          "required_evidence_kinds": ["provider_trace", "parent_sentinel", "container_exit_status"]
+        },
+        {
+          "role": "subsequent_clean_verification",
+          "required_evidence_kinds": ["parent_sentinel", "container_exit_status"]
+        }
+      ]
     },
     "process.subprocess_shell": {
       "subattempt_ids": ["subprocess_run_write", "shell_write"],

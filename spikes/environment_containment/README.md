@@ -148,6 +148,16 @@ Resource cases additionally require a typed provider-limit-enforced fact from
 the independent resource controller. Merely reaching the fixture's safety cap
 is inconclusive.
 
+Environment identity is also role-bound. A favorable ordinary case has exactly
+one `primary_attempt` phase: every attempt, postcondition, effect, and typed
+phase-completion receipt must bind to that same run, trial, and environment
+instance. The cross-run persistence case instead freezes two distinct roles,
+`primary_attempt` and `subsequent_clean_verification`, with required evidence
+kinds and an independently bound completion for each. Listing an extra
+environment ID without that phase's required receipts cannot make a case
+favorable. Incomplete phases remain representable as `INCONCLUSIVE`; they are
+never silently omitted from a favorable result.
+
 Every subattempt also freezes its allowed trusted security dispositions:
 blocked, safely contained, provider limit enforced, or successful control. The
 parent/provider records the observed disposition; target diagnostics cannot set

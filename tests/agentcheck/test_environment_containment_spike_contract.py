@@ -270,6 +270,25 @@ def test_catalog_freezes_exact_hostile_and_control_denominators() -> None:
         ]
         == 2
     )
+    assert requirements["fs.cross_run_persistence"][
+        "required_environment_phases"
+    ] == [
+        {
+            "role": "primary_attempt",
+            "required_evidence_kinds": [
+                "provider_trace",
+                "parent_sentinel",
+                "container_exit_status",
+            ],
+        },
+        {
+            "role": "subsequent_clean_verification",
+            "required_evidence_kinds": [
+                "parent_sentinel",
+                "container_exit_status",
+            ],
+        },
+    ]
     hostile_categories = {
         case["category"] for case in cases if case["case_type"] == "hostile"
     }
@@ -925,6 +944,67 @@ def _effect_measurements(
     )
 
 
+def _environment_phase_measurements(
+    definition: Any,
+    *,
+    provenance: Any,
+    environment_instance_ids: tuple[str, ...],
+    roles: tuple[Any, ...] | None = None,
+) -> tuple[Any, ...]:
+    bound_roles = roles or tuple(
+        phase.role
+        for phase in definition.required_environment_phases[
+            : len(environment_instance_ids)
+        ]
+    )
+    assert len(bound_roles) == len(environment_instance_ids)
+    phases = []
+    for sequence_index, (role, environment_instance_id) in enumerate(
+        zip(bound_roles, environment_instance_ids),
+        start=1,
+    ):
+        if provenance.infrastructure_status is measurement.InfrastructureStatus.COMPLETE:
+            exit_code = 0
+            failure_stage = None
+        elif provenance.infrastructure_status is measurement.InfrastructureStatus.NOT_RUN:
+            exit_code = None
+            failure_stage = None
+        else:
+            exit_code = None
+            failure_stage = measurement.InfrastructureFailureStage.SETUP
+        references = (
+            (
+                measurement.bind_environment_phase_exit_status(
+                    reference=(
+                        "contract-evidence/environment-phase-"
+                        f"{definition.attack_id}-{sequence_index}-{role.value}.json"
+                    ),
+                    exit_code=exit_code,
+                    provenance=provenance,
+                    environment_instance_id=environment_instance_id,
+                    attack_id=definition.attack_id,
+                    role=role,
+                    sequence_index=sequence_index,
+                ),
+            )
+            if exit_code is not None
+            else ()
+        )
+        phases.append(
+            measurement.EnvironmentPhaseMeasurement(
+                role=role,
+                environment_instance_id=environment_instance_id,
+                completion=measurement.EnvironmentPhaseCompletion(
+                    status=provenance.infrastructure_status,
+                    container_exit_code=exit_code,
+                    evidence_references=references,
+                    failure_stage=failure_stage,
+                ),
+            )
+        )
+    return tuple(phases)
+
+
 def _attack_measurement(
     definition: Any,
     *,
@@ -937,7 +1017,12 @@ def _attack_measurement(
         "contract-test-clean-environment",
     ),
     provenance: Any | None = None,
+    environment_phases: tuple[Any, ...] | None = None,
+    effect_environment_instance_id: str | None = None,
 ) -> Any:
+    bound_provenance = provenance or _provenance(
+        environment_instance_ids=environment_instance_ids
+    )
     return measurement.AttackMeasurement(
         attack_id=definition.attack_id,
         case_type=definition.case_type,
@@ -952,8 +1037,19 @@ def _attack_measurement(
             definition,
             checked=checked_effects,
             overrides=effect_overrides,
-            provenance=provenance,
-            environment_instance_id=environment_instance_ids[0],
+            provenance=bound_provenance,
+            environment_instance_id=(
+                effect_environment_instance_id or environment_instance_ids[0]
+            ),
+        ),
+        environment_phases=(
+            _environment_phase_measurements(
+                definition,
+                provenance=bound_provenance,
+                environment_instance_ids=environment_instance_ids,
+            )
+            if environment_phases is None
+            else environment_phases
         ),
         environment_instance_ids=environment_instance_ids,
         outcome=outcome,
@@ -1740,7 +1836,71 @@ def test_postcondition_evidence_cannot_be_borrowed_from_effect_evidence() -> Non
         )
 
 
-def test_cross_run_persistence_requires_two_recorded_environment_instances() -> None:
+def test_ordinary_favorable_case_rejects_environment_stitching() -> None:
+    catalog = measurement.load_frozen_catalog(CATALOG_PATH)
+    cases = list(measurement.materialize_unexecuted_cases(catalog))
+    index = next(
+        index
+        for index, item in enumerate(catalog.cases)
+        if item.attack_id == "fs.target_source_write"
+    )
+    definition = catalog.cases[index]
+    provenance = _provenance(
+        environment_instance_ids=("ordinary-environment-a", "ordinary-environment-b")
+    )
+    extra_phase_ids = (
+        "ordinary-environment-a",
+        "ordinary-environment-b",
+    )
+    stitched = _attack_measurement(
+        definition,
+        subattempts=_observed_subattempts(
+            definition,
+            provenance=provenance,
+            environment_instance_id="ordinary-environment-a",
+        ),
+        postcondition=_checked_postcondition(
+            definition,
+            provenance=provenance,
+            environment_instance_id="ordinary-environment-b",
+        ),
+        outcome=measurement.AttackOutcome.BLOCKED,
+        checked_effects=True,
+        environment_instance_ids=extra_phase_ids,
+        provenance=provenance,
+        environment_phases=_environment_phase_measurements(
+            definition,
+            provenance=provenance,
+            environment_instance_ids=extra_phase_ids,
+            roles=(
+                measurement.EnvironmentPhaseRole.PRIMARY_ATTEMPT,
+                measurement.EnvironmentPhaseRole.SUBSEQUENT_CLEAN_VERIFICATION,
+            ),
+        ),
+        effect_environment_instance_id="ordinary-environment-b",
+    )
+    cases[index] = stitched
+    with pytest.raises(measurement.ContractViolation, match="phase roles drifted"):
+        _containment_measurement(
+            provenance=provenance,
+            catalog=catalog,
+            cases=tuple(cases),
+        )
+
+    cases[index] = replace(
+        stitched,
+        environment_phases=stitched.environment_phases[:1],
+        environment_instance_ids=("ordinary-environment-a",),
+    )
+    with pytest.raises(measurement.ContractViolation, match="wrong environment"):
+        _containment_measurement(
+            provenance=provenance,
+            catalog=catalog,
+            cases=tuple(cases),
+        )
+
+
+def test_cross_run_persistence_requires_correlated_environment_phases() -> None:
     catalog = measurement.load_frozen_catalog(CATALOG_PATH)
     cases = list(measurement.materialize_unexecuted_cases(catalog))
     index = next(
@@ -1750,6 +1910,12 @@ def test_cross_run_persistence_requires_two_recorded_environment_instances() -> 
     )
     definition = catalog.cases[index]
     assert definition.required_environment_instances == 2
+    assert tuple(
+        phase.role for phase in definition.required_environment_phases
+    ) == (
+        measurement.EnvironmentPhaseRole.PRIMARY_ATTEMPT,
+        measurement.EnvironmentPhaseRole.SUBSEQUENT_CLEAN_VERIFICATION,
+    )
     provenance = _provenance(
         environment_instance_ids=("clean-environment-a", "clean-environment-b")
     )
@@ -1771,18 +1937,122 @@ def test_cross_run_persistence_requires_two_recorded_environment_instances() -> 
         provenance=provenance,
     )
     cases[index] = one_environment
-    with pytest.raises(measurement.ContractViolation, match="clean environment"):
+    with pytest.raises(measurement.ContractViolation, match="frozen environment phases"):
+        _containment_measurement(
+            provenance=provenance, catalog=catalog, cases=tuple(cases)
+        )
+    cases[index] = replace(
+        one_environment,
+        outcome=measurement.AttackOutcome.INCONCLUSIVE,
+    )
+    partial = _containment_measurement(
+        provenance=provenance,
+        catalog=catalog,
+        cases=tuple(cases),
+    )
+    assert partial.cases[index].outcome is measurement.AttackOutcome.INCONCLUSIVE
+
+    a_only_receipts_padded_by_b = _attack_measurement(
+        definition,
+        subattempts=_observed_subattempts(
+            definition,
+            provenance=provenance,
+            environment_instance_id="clean-environment-a",
+        ),
+        postcondition=_checked_postcondition(
+            definition,
+            provenance=provenance,
+            environment_instance_id="clean-environment-a",
+        ),
+        outcome=measurement.AttackOutcome.BLOCKED,
+        checked_effects=True,
+        environment_instance_ids=("clean-environment-a", "clean-environment-b"),
+        provenance=provenance,
+    )
+    cases[index] = a_only_receipts_padded_by_b
+    with pytest.raises(measurement.ContractViolation, match="phase evidence"):
         _containment_measurement(
             provenance=provenance, catalog=catalog, cases=tuple(cases)
         )
 
+    postcondition_a = _checked_postcondition(
+        definition,
+        provenance=provenance,
+        environment_instance_id="clean-environment-a",
+    )
+    postcondition_b = _checked_postcondition(
+        definition,
+        provenance=provenance,
+        environment_instance_id="clean-environment-b",
+    )
     cases[index] = replace(
-        one_environment,
-        environment_instance_ids=("clean-environment-a", "clean-environment-b"),
+        a_only_receipts_padded_by_b,
+        postcondition=replace(
+            postcondition_a,
+            evidence_references=(
+                *postcondition_a.evidence_references,
+                *postcondition_b.evidence_references,
+            ),
+        ),
     )
     _containment_measurement(
         provenance=provenance, catalog=catalog, cases=tuple(cases)
     )
+
+
+def test_cross_run_persistence_rejects_wrong_environment_phase_role() -> None:
+    catalog = measurement.load_frozen_catalog(CATALOG_PATH)
+    cases = list(measurement.materialize_unexecuted_cases(catalog))
+    index = next(
+        index
+        for index, item in enumerate(catalog.cases)
+        if item.attack_id == "fs.cross_run_persistence"
+    )
+    definition = catalog.cases[index]
+    environment_instance_ids = ("role-environment-a", "role-environment-b")
+    provenance = _provenance(environment_instance_ids=environment_instance_ids)
+    postcondition_a = _checked_postcondition(
+        definition,
+        provenance=provenance,
+        environment_instance_id="role-environment-a",
+    )
+    postcondition_b = _checked_postcondition(
+        definition,
+        provenance=provenance,
+        environment_instance_id="role-environment-b",
+    )
+    cases[index] = _attack_measurement(
+        definition,
+        subattempts=_observed_subattempts(
+            definition,
+            provenance=provenance,
+            environment_instance_id="role-environment-a",
+        ),
+        postcondition=replace(
+            postcondition_a,
+            evidence_references=(
+                *postcondition_a.evidence_references,
+                *postcondition_b.evidence_references,
+            ),
+        ),
+        outcome=measurement.AttackOutcome.BLOCKED,
+        checked_effects=True,
+        environment_instance_ids=environment_instance_ids,
+        provenance=provenance,
+        environment_phases=_environment_phase_measurements(
+            definition,
+            provenance=provenance,
+            environment_instance_ids=environment_instance_ids,
+            roles=(
+                measurement.EnvironmentPhaseRole.SUBSEQUENT_CLEAN_VERIFICATION,
+                measurement.EnvironmentPhaseRole.PRIMARY_ATTEMPT,
+            ),
+        ),
+    )
+    with pytest.raises(measurement.ContractViolation, match="phase roles drifted"):
+        _containment_measurement(
+            provenance=provenance, catalog=catalog, cases=tuple(cases)
+        )
 
 
 def test_grouped_case_cannot_hide_an_unexecuted_subattempt() -> None:

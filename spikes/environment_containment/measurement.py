@@ -33,13 +33,13 @@ GROUND_TRUTH_SCHEMA_VERSION = (
 FROZEN_CATALOG_ID = "agentcheck-environment-containment-v1"
 FROZEN_CATALOG_VERSION = "1.0.0"
 FROZEN_CATALOG_SHA256 = (
-    "2ca3e50abd294f63e85b85a843e8107f41bf6fe5b21cab33963bd17fcf8d3067"
+    "91b325906c663ad4e8fe59056bcd8ffdb29b6a55f37fa8a024273384a4188e7c"
 )
 FROZEN_GROUND_TRUTH_SHA256 = (
     "3f0e26bb7856712c4c3b565ac923c0ece130153bb2d5f2771840540559068572"
 )
 FROZEN_CATALOG_DEFINITION_FINGERPRINT = (
-    "sha256:598edf1c4e56878a48167d8b247c8669ff39e2a20701902bed038c40da5158ab"
+    "sha256:ccf02edf7a34eae945840e5f9f6521bb397829c7f62812d543633023849165d7"
 )
 FROZEN_GROUND_TRUTH_DEFINITION_FINGERPRINT = (
     "sha256:ad2ad68c64482e9d5fc53f3bd1c2decb4f39a6d102fc477fefc63c5211f6ed06"
@@ -120,6 +120,13 @@ class EvidenceScope(str, Enum):
     SINGLE_TRIAL = "single_trial"
 
 
+class EnvironmentPhaseRole(str, Enum):
+    """The frozen purpose of one case-scoped environment instance."""
+
+    PRIMARY_ATTEMPT = "primary_attempt"
+    SUBSEQUENT_CLEAN_VERIFICATION = "subsequent_clean_verification"
+
+
 class InfrastructureStatus(str, Enum):
     """Typed completion state for the trusted execution/observation boundary."""
 
@@ -147,6 +154,7 @@ class EvidenceSubjectType(str, Enum):
     ACTION = "action"
     PATH = "path"
     TRIAL_COMPLETION = "trial_completion"
+    ENVIRONMENT_PHASE_COMPLETION = "environment_phase_completion"
 
 
 class ConfirmationState(str, Enum):
@@ -687,6 +695,54 @@ def bind_container_exit_status(
     )
 
 
+def _environment_phase_exit_status_artifact(
+    *,
+    exit_code: int,
+    role: EnvironmentPhaseRole,
+) -> bytes:
+    return canonical_json(
+        {
+            "container_exit_code": exit_code,
+            "environment_phase_role": role.value,
+        }
+    ).encode("utf-8")
+
+
+def bind_environment_phase_exit_status(
+    *,
+    reference: str,
+    exit_code: int,
+    provenance: RunProvenance,
+    environment_instance_id: str,
+    attack_id: str,
+    role: EnvironmentPhaseRole,
+    sequence_index: int,
+) -> EvidenceReference:
+    """Bind a process exit to one exact case environment and frozen phase."""
+
+    if isinstance(exit_code, bool) or not isinstance(exit_code, int):
+        raise ContractViolation("environment phase exit code must be an integer")
+    if not isinstance(role, EnvironmentPhaseRole):
+        raise ContractViolation("environment phase role must be typed")
+    _require_nonempty(attack_id, "environment phase attack_id")
+    if sequence_index < 1:
+        raise ContractViolation("environment phase sequence_index must start at one")
+    return bind_evidence_bytes(
+        kind=TrustedEvidenceKind.CONTAINER_EXIT_STATUS,
+        reference=reference,
+        artifact=_environment_phase_exit_status_artifact(
+            exit_code=exit_code,
+            role=role,
+        ),
+        provenance=provenance,
+        environment_instance_id=environment_instance_id,
+        subject_type=EvidenceSubjectType.ENVIRONMENT_PHASE_COMPLETION,
+        scope_id=attack_id,
+        subject_id=role.value,
+        sequence_index=sequence_index,
+    )
+
+
 @dataclass(frozen=True)
 class TrialCompletion:
     """Typed host-side completion facts for exactly one frozen trial."""
@@ -791,6 +847,134 @@ def _validate_trial_completion(
 
 
 @dataclass(frozen=True)
+class EnvironmentPhaseCompletion:
+    """Typed completion facts for one exact case environment phase."""
+
+    status: InfrastructureStatus
+    container_exit_code: int | None
+    evidence_references: tuple[EvidenceReference, ...] = ()
+    failure_stage: InfrastructureFailureStage | None = None
+    limitations: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.status, InfrastructureStatus):
+            raise ContractViolation("environment phase completion status must be typed")
+        if self.failure_stage is not None and not isinstance(
+            self.failure_stage, InfrastructureFailureStage
+        ):
+            raise ContractViolation("environment phase failure stage must be typed")
+        if self.container_exit_code is not None and (
+            isinstance(self.container_exit_code, bool)
+            or not isinstance(self.container_exit_code, int)
+        ):
+            raise ContractViolation("environment phase exit code must be an integer")
+        if any(not item.strip() for item in self.limitations):
+            raise ContractViolation("environment phase limitations must be non-empty")
+        if any(
+            item.kind is not TrustedEvidenceKind.CONTAINER_EXIT_STATUS
+            for item in self.evidence_references
+        ):
+            raise ContractViolation(
+                "environment phase completion accepts only exit-status evidence"
+            )
+
+        if self.status is InfrastructureStatus.NOT_RUN:
+            if (
+                self.container_exit_code is not None
+                or self.evidence_references
+                or self.failure_stage is not None
+            ):
+                raise ContractViolation(
+                    "a not-run environment phase cannot claim completion evidence"
+                )
+            return
+
+        if self.status is InfrastructureStatus.COMPLETE:
+            if self.container_exit_code != 0:
+                raise ContractViolation(
+                    "a complete environment phase requires a successful exit"
+                )
+            if self.failure_stage is not None:
+                raise ContractViolation(
+                    "a complete environment phase cannot name a failure stage"
+                )
+        else:
+            if self.failure_stage is None:
+                raise ContractViolation(
+                    "an environment phase infrastructure error needs a failure stage"
+                )
+            if self.failure_stage in {
+                InfrastructureFailureStage.TARGET_CONFIGURATION,
+                InfrastructureFailureStage.TARGET_EXECUTION,
+            } and (self.container_exit_code is None or self.container_exit_code == 0):
+                raise ContractViolation(
+                    "a failed target environment phase needs a nonzero exit"
+                )
+
+        if self.container_exit_code is None:
+            if self.evidence_references:
+                raise ContractViolation(
+                    "an environment phase without an exit cannot carry exit evidence"
+                )
+        elif len(self.evidence_references) != 1:
+            raise ContractViolation(
+                "an environment phase exit requires exactly one bound receipt"
+            )
+
+
+@dataclass(frozen=True)
+class EnvironmentPhaseMeasurement:
+    """One typed phase bound to one exact environment instance."""
+
+    role: EnvironmentPhaseRole
+    environment_instance_id: str
+    completion: EnvironmentPhaseCompletion
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.role, EnvironmentPhaseRole):
+            raise ContractViolation("environment phase role must be typed")
+        _require_nonempty(
+            self.environment_instance_id,
+            "environment phase environment_instance_id",
+        )
+        if not isinstance(self.completion, EnvironmentPhaseCompletion):
+            raise ContractViolation("environment phase completion must be typed")
+
+
+def _validate_environment_phase_completion(
+    phase: EnvironmentPhaseMeasurement,
+    *,
+    provenance: RunProvenance,
+    attack_id: str,
+    sequence_index: int,
+) -> None:
+    completion = phase.completion
+    _validate_evidence_bindings(
+        completion.evidence_references,
+        provenance=provenance,
+        subject_type=EvidenceSubjectType.ENVIRONMENT_PHASE_COMPLETION,
+        scope_id=attack_id,
+        subject_id=phase.role.value,
+        sequence_index=sequence_index,
+        environment_instance_ids=(phase.environment_instance_id,),
+    )
+    if completion.container_exit_code is None:
+        return
+    expected = _environment_phase_exit_status_artifact(
+        exit_code=completion.container_exit_code,
+        role=phase.role,
+    )
+    reference = completion.evidence_references[0]
+    if (
+        reference.artifact_digest != hashlib.sha256(expected).hexdigest()
+        or reference.artifact_size_bytes != len(expected)
+    ):
+        raise ContractViolation(
+            "environment phase exit receipt does not match its typed completion"
+        )
+
+
+@dataclass(frozen=True)
 class StaticDiscovery:
     findings_discovered_at_least: int
     exhaustive: bool = False
@@ -823,6 +1007,33 @@ class CatalogEffectDefinition:
 
 
 @dataclass(frozen=True)
+class CatalogEnvironmentPhaseDefinition:
+    """Frozen evidence minimum for one typed environment role."""
+
+    role: EnvironmentPhaseRole
+    required_evidence_kinds: frozenset[TrustedEvidenceKind]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.role, EnvironmentPhaseRole):
+            raise ContractViolation("catalog environment phase role must be typed")
+        if not self.required_evidence_kinds:
+            raise ContractViolation(
+                "catalog environment phases need required trusted evidence"
+            )
+        if (
+            TrustedEvidenceKind.CONTAINER_EXIT_STATUS
+            not in self.required_evidence_kinds
+        ):
+            raise ContractViolation(
+                "catalog environment phases need typed completion evidence"
+            )
+        if self.required_evidence_kinds.isdisjoint(_POSTCONDITION_EVIDENCE):
+            raise ContractViolation(
+                "catalog environment phases need trusted postcondition evidence"
+            )
+
+
+@dataclass(frozen=True)
 class CatalogCaseDefinition:
     attack_id: str
     case_type: CaseType
@@ -839,6 +1050,7 @@ class CatalogCaseDefinition:
     effect_checks: tuple[CatalogEffectDefinition, ...]
     limitations: tuple[str, ...]
     required_environment_instances: int = 1
+    required_environment_phases: tuple[CatalogEnvironmentPhaseDefinition, ...] = ()
 
     def __post_init__(self) -> None:
         _require_nonempty(self.attack_id, "attack_id")
@@ -882,6 +1094,37 @@ class CatalogCaseDefinition:
             raise ContractViolation("catalog effect checks must be non-empty and unique")
         if self.required_environment_instances < 1:
             raise ContractViolation("required_environment_instances must be positive")
+        if not self.required_environment_phases:
+            raise ContractViolation("catalog cases need frozen environment phases")
+        if any(
+            not isinstance(item, CatalogEnvironmentPhaseDefinition)
+            for item in self.required_environment_phases
+        ):
+            raise ContractViolation("catalog environment phases must be typed")
+        phase_roles = tuple(item.role for item in self.required_environment_phases)
+        if len(phase_roles) != len(set(phase_roles)):
+            raise ContractViolation("catalog environment phase roles must be unique")
+        if phase_roles[0] is not EnvironmentPhaseRole.PRIMARY_ATTEMPT:
+            raise ContractViolation("catalog cases must start with the primary phase")
+        if len(self.required_environment_phases) != self.required_environment_instances:
+            raise ContractViolation(
+                "catalog environment phase denominator must match instance count"
+            )
+        primary_evidence = (
+            self.required_evidence_kinds
+            | frozenset(
+                kind
+                for effect in self.effect_checks
+                for kind in effect.required_evidence_kinds
+            )
+            | {TrustedEvidenceKind.CONTAINER_EXIT_STATUS}
+        )
+        if not primary_evidence <= self.required_environment_phases[
+            0
+        ].required_evidence_kinds:
+            raise ContractViolation(
+                "primary environment phase dropped frozen case evidence"
+            )
         if not self.limitations or not all(item.strip() for item in self.limitations):
             raise ContractViolation("catalog cases need non-empty limitations")
 
@@ -940,6 +1183,16 @@ def _catalog_definition_fingerprint(
                     "required_environment_instances": (
                         item.required_environment_instances
                     ),
+                    "required_environment_phases": [
+                        {
+                            "role": phase.role.value,
+                            "required_evidence_kinds": sorted(
+                                kind.value
+                                for kind in phase.required_evidence_kinds
+                            ),
+                        }
+                        for phase in item.required_environment_phases
+                    ],
                 }
                 for item in cases
             ],
@@ -1098,6 +1351,7 @@ class AttackMeasurement:
     subattempts: tuple[SubattemptMeasurement, ...]
     postcondition: TrustedPostcondition
     effects: tuple[EffectMeasurement, ...]
+    environment_phases: tuple[EnvironmentPhaseMeasurement, ...] = ()
     environment_instance_ids: tuple[str, ...] = ()
     outcome: AttackOutcome = AttackOutcome.UNEXECUTED
     limitations: tuple[str, ...] = ()
@@ -1117,6 +1371,23 @@ class AttackMeasurement:
             raise ContractViolation("case environment instance IDs must be unique")
         for environment_instance_id in self.environment_instance_ids:
             _require_nonempty(environment_instance_id, "case environment_instance_id")
+        if any(
+            not isinstance(phase, EnvironmentPhaseMeasurement)
+            for phase in self.environment_phases
+        ):
+            raise ContractViolation("case environment phases must be typed")
+        phase_environment_ids = tuple(
+            phase.environment_instance_id for phase in self.environment_phases
+        )
+        phase_roles = tuple(phase.role for phase in self.environment_phases)
+        if len(phase_environment_ids) != len(set(phase_environment_ids)):
+            raise ContractViolation("case environment phase IDs must be unique")
+        if len(phase_roles) != len(set(phase_roles)):
+            raise ContractViolation("case environment phase roles must be unique")
+        if phase_environment_ids != self.environment_instance_ids:
+            raise ContractViolation(
+                "case environment IDs must exactly match typed environment phases"
+            )
         if self.outcome is AttackOutcome.UNEXECUTED:
             if any(item.executed for item in self.subattempts):
                 raise ContractViolation("a partially executed case must be INCONCLUSIVE")
@@ -1126,10 +1397,14 @@ class AttackMeasurement:
                 raise ContractViolation("an unexecuted case cannot claim checked effects")
             if self.environment_instance_ids:
                 raise ContractViolation("an unexecuted case cannot claim an environment")
+            if self.environment_phases:
+                raise ContractViolation("an unexecuted case cannot claim a phase")
         elif not any(item.executed for item in self.subattempts):
             raise ContractViolation("a result outcome requires an executed subattempt")
         elif not self.environment_instance_ids:
             raise ContractViolation("an executed case needs its environment instance IDs")
+        elif not self.environment_phases:
+            raise ContractViolation("an executed case needs typed environment phases")
         if self.case_type is CaseType.HOSTILE and self.outcome in {
             AttackOutcome.CONTROL_SUCCEEDED,
             AttackOutcome.CONTROL_FAILED,
@@ -1307,6 +1582,11 @@ class ContainmentMeasurement:
                         for reference in (
                             *(
                                 receipt
+                                for phase in case.environment_phases
+                                for receipt in phase.completion.evidence_references
+                            ),
+                            *(
+                                receipt
                                 for subattempt in case.subattempts
                                 for receipt in subattempt.evidence_references
                             ),
@@ -1447,6 +1727,32 @@ class ContainmentMeasurement:
                 f"case environment is absent from run provenance for "
                 f"{definition.attack_id}"
             )
+        defined_phase_roles = tuple(
+            phase.role for phase in definition.required_environment_phases
+        )
+        measured_phase_roles = tuple(
+            phase.role for phase in measured.environment_phases
+        )
+        if measured_phase_roles != defined_phase_roles[: len(measured_phase_roles)]:
+            raise ContractViolation(
+                f"measured environment phase roles drifted for "
+                f"{definition.attack_id}"
+            )
+        for sequence_index, phase in enumerate(
+            measured.environment_phases,
+            start=1,
+        ):
+            _validate_environment_phase_completion(
+                phase,
+                provenance=self.provenance,
+                attack_id=definition.attack_id,
+                sequence_index=sequence_index,
+            )
+        primary_environment_ids = (
+            (measured.environment_phases[0].environment_instance_id,)
+            if measured.environment_phases
+            else ()
+        )
         for sequence_index, subattempt in enumerate(measured.subattempts, start=1):
             _validate_evidence_bindings(
                 subattempt.evidence_references,
@@ -1455,7 +1761,7 @@ class ContainmentMeasurement:
                 scope_id=definition.attack_id,
                 subject_id=subattempt.subattempt_id,
                 sequence_index=sequence_index,
-                environment_instance_ids=measured.environment_instance_ids,
+                environment_instance_ids=primary_environment_ids,
             )
             kinds = {item.kind for item in subattempt.evidence_references}
             if subattempt.observed and not definition.attempt_evidence_kinds <= kinds:
@@ -1482,7 +1788,7 @@ class ContainmentMeasurement:
                 scope_id=definition.attack_id,
                 subject_id=effect.kind.value,
                 sequence_index=sequence_index,
-                environment_instance_ids=measured.environment_instance_ids,
+                environment_instance_ids=primary_environment_ids,
             )
             effect_kinds = {item.kind for item in effect.evidence_references}
             if effect.occurred is not None and not (
@@ -1498,6 +1804,19 @@ class ContainmentMeasurement:
         )
         if not favorable:
             return
+        if measured_phase_roles != defined_phase_roles:
+            raise ContractViolation(
+                f"favorable outcome lacks frozen environment phases for "
+                f"{definition.attack_id}"
+            )
+        if any(
+            phase.completion.status is not InfrastructureStatus.COMPLETE
+            for phase in measured.environment_phases
+        ):
+            raise ContractViolation(
+                f"favorable outcome lacks complete environment phases for "
+                f"{definition.attack_id}"
+            )
         if not measured.executed or not measured.observed:
             raise ContractViolation(
                 f"favorable outcome requires every subattempt for {definition.attack_id}"
@@ -1549,13 +1868,46 @@ class ContainmentMeasurement:
                     f"favorable outcome needs the expected checked effect for "
                     f"{definition.attack_id}/{effect_definition.kind.value}"
                 )
-        if len(measured.environment_instance_ids) < (
-            definition.required_environment_instances
-        ):
-            raise ContractViolation(
-                f"favorable outcome lacks clean environment instances for "
-                f"{definition.attack_id}"
+        case_references = tuple(
+            (
+                *(
+                    reference
+                    for subattempt in measured.subattempts
+                    for reference in subattempt.evidence_references
+                ),
+                *measured.postcondition.evidence_references,
+                *(
+                    reference
+                    for effect in measured.effects
+                    for reference in effect.evidence_references
+                ),
             )
+        )
+        for phase_definition, phase in zip(
+            definition.required_environment_phases,
+            measured.environment_phases,
+        ):
+            phase_kinds = {
+                reference.kind
+                for reference in (
+                    *case_references,
+                    *phase.completion.evidence_references,
+                )
+                if reference.environment_instance_id
+                == phase.environment_instance_id
+            }
+            missing_phase_evidence = (
+                phase_definition.required_evidence_kinds - phase_kinds
+            )
+            if missing_phase_evidence:
+                missing_names = ", ".join(
+                    sorted(item.value for item in missing_phase_evidence)
+                )
+                raise ContractViolation(
+                    f"favorable outcome lacks phase evidence for "
+                    f"{definition.attack_id}/{phase_definition.role.value}: "
+                    f"{missing_names}"
+                )
 
     @property
     def catalog_case_ids(self) -> tuple[str, ...]:
@@ -2221,6 +2573,63 @@ def load_frozen_catalog(path: Path) -> FrozenCatalog:
             raise ContractViolation(
                 f"required_environment_instances is malformed for {attack_id}"
             )
+        raw_environment_phases = requirement.get("required_environment_phases")
+        environment_phases: tuple[CatalogEnvironmentPhaseDefinition, ...]
+        if raw_environment_phases is None:
+            if required_environment_instances != 1:
+                raise ContractViolation(
+                    f"multi-environment phases are not frozen for {attack_id}"
+                )
+            environment_phases = (
+                CatalogEnvironmentPhaseDefinition(
+                    role=EnvironmentPhaseRole.PRIMARY_ATTEMPT,
+                    required_evidence_kinds=(
+                        required_kinds
+                        | frozenset(
+                            kind
+                            for effect in effects
+                            for kind in effect.required_evidence_kinds
+                        )
+                        | frozenset(
+                            {TrustedEvidenceKind.CONTAINER_EXIT_STATUS}
+                        )
+                    ),
+                ),
+            )
+        else:
+            if not isinstance(raw_environment_phases, list) or not (
+                raw_environment_phases
+            ):
+                raise ContractViolation(
+                    f"required_environment_phases is malformed for {attack_id}"
+                )
+            parsed_environment_phases: list[CatalogEnvironmentPhaseDefinition] = []
+            try:
+                for raw_phase in raw_environment_phases:
+                    if not isinstance(raw_phase, dict):
+                        raise ContractViolation(
+                            f"required environment phase is malformed for {attack_id}"
+                        )
+                    parsed_environment_phases.append(
+                        CatalogEnvironmentPhaseDefinition(
+                            role=EnvironmentPhaseRole(raw_phase.get("role")),
+                            required_evidence_kinds=frozenset(
+                                TrustedEvidenceKind(item)
+                                for item in _parse_string_tuple(
+                                    raw_phase.get("required_evidence_kinds"),
+                                    (
+                                        f"{attack_id} environment phase "
+                                        "required_evidence_kinds"
+                                    ),
+                                )
+                            ),
+                        )
+                    )
+            except ValueError as exc:
+                raise ContractViolation(
+                    f"invalid environment phase enum value for {attack_id}"
+                ) from exc
+            environment_phases = tuple(parsed_environment_phases)
         definitions.append(
             CatalogCaseDefinition(
                 attack_id=attack_id,
@@ -2241,6 +2650,7 @@ def load_frozen_catalog(path: Path) -> FrozenCatalog:
                     f"{attack_id} limitations",
                 ),
                 required_environment_instances=required_environment_instances,
+                required_environment_phases=environment_phases,
             )
         )
     expected_counts = {
@@ -2481,6 +2891,7 @@ __all__ = [
     "CaseType",
     "CatalogCaseDefinition",
     "CatalogEffectDefinition",
+    "CatalogEnvironmentPhaseDefinition",
     "ConfirmationState",
     "ContainmentMeasurement",
     "ContainmentMetrics",
@@ -2489,6 +2900,9 @@ __all__ = [
     "EvidenceReference",
     "EvidenceScope",
     "EvidenceSubjectType",
+    "EnvironmentPhaseCompletion",
+    "EnvironmentPhaseMeasurement",
+    "EnvironmentPhaseRole",
     "EffectKind",
     "EffectMeasurement",
     "FrozenBehavioralGroundTruth",
@@ -2510,6 +2924,7 @@ __all__ = [
     "TrustedPostcondition",
     "UntrustedDiagnostic",
     "bind_container_exit_status",
+    "bind_environment_phase_exit_status",
     "bind_evidence_bytes",
     "bind_evidence_file",
     "canonical_json",
