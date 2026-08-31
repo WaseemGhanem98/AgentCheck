@@ -4,7 +4,7 @@
 [![Python 3.10–3.12](https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-3776AB?logo=python&logoColor=white)](https://github.com/WaseemGhanem98/AgentCheck/blob/main/pyproject.toml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-2ea44f.svg)](https://github.com/WaseemGhanem98/AgentCheck/blob/main/LICENSE)
 
-**Behavioral testing for AI agents.**
+**An evidence authority for AI-agent behavior.**
 
 You already test your code. AgentCheck tests the decisions your agent makes.
 
@@ -13,7 +13,7 @@ which tools they call, in what order, and how they respond to confirmations,
 failures, retries, and policy constraints. Declared tool actions are simulated;
 the original declared handlers are not executed during evaluation.
 
-[Demo](#demo) · [Install](#install) · [Quickstart](#quickstart) ·
+[Demo](#demo) · [Install](#install) · [Quickstart](#credential-free-quickstart) ·
 [Integrations](#supported-integrations) · [Safety](#safety-boundaries) ·
 [Documentation](#documentation)
 
@@ -24,7 +24,7 @@ https://github.com/user-attachments/assets/3ecdf66c-0aa7-45fe-a606-72cfb9d6d5bc
 ## Install
 
 ```bash
-pip install agentcheck-ai
+python -m pip install "agentcheck-ai==0.5.2"
 ```
 
 The distribution is `agentcheck-ai`; the Python import and CLI are both
@@ -33,14 +33,38 @@ The distribution is `agentcheck-ai`; the Python import and CLI are both
 Install a native SDK adapter when you need one:
 
 ```bash
-pip install "agentcheck-ai[openai-agents]"
+python -m pip install "agentcheck-ai[openai-agents]==0.5.2"
 # or
-pip install "agentcheck-ai[pydantic-ai]"
+python -m pip install "agentcheck-ai[pydantic-ai]==0.5.2"
 ```
 
 Custom Python agents use the base package.
 
-## Quickstart
+## Credential-free quickstart
+
+The versioned bundled example uses a local scripted model and raising tripwire
+handlers. It needs no model key, makes no provider request, and fails if an
+original declared handler is reached. These commands install AgentCheck from
+PyPI; the repository checkout supplies only the example target:
+
+```bash
+git clone --branch v0.5.2 --depth 1 https://github.com/WaseemGhanem98/AgentCheck.git
+cd AgentCheck
+python -m venv .venv
+. .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
+python -m pip install "agentcheck-ai[openai-agents]==0.5.2"
+
+agentcheck --version
+agentcheck inspect examples/evaluation/account_agent
+agentcheck generate examples/evaluation/account_agent --force
+agentcheck test examples/evaluation/account_agent --no-store
+```
+
+`agentcheck --version` should print `agentcheck 0.5.2`. The example is designed
+to produce behavioral findings; a non-zero test result is evidence to inspect,
+not an installation failure.
+
+## Use AgentCheck on your agent
 
 For an existing OpenAI Agents SDK target exported as `agent` from `agent.py`:
 
@@ -66,6 +90,57 @@ It runs the frozen suite, compares the result against a trusted baseline, and
 returns a single status: `0` allow, `1` a behavioral failure is new, `2` the run
 was not certifiable, `3` the suite could not decide. Failures a baseline already
 accepts do not block. See [the CI gate](https://github.com/WaseemGhanem98/AgentCheck/blob/main/docs/ci-gate.md).
+
+A minimal GitHub Actions job is credential-free when the committed target uses
+a local scripted or controlled model and simulated declared tools:
+
+```yaml
+permissions:
+  contents: read
+
+jobs:
+  agentcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install "agentcheck-ai[openai-agents]==0.5.2"
+      - run: agentcheck gate path/to/target --baseline agentcheck-baseline.json --json
+```
+
+Commit the reviewed `agentcheck.json`, frozen suite, fixture data, and trusted
+baseline that the gate consumes. Use the PydanticAI extra instead for a
+PydanticAI target; custom targets need only the base package. The
+[copyable workflow](https://github.com/WaseemGhanem98/AgentCheck/blob/main/.github/workflows/agentcheck-example.yml)
+pins action SHAs and documents the fuller trust model.
+
+### Gate exits and 0.5.2 fail-closed behavior
+
+| Exit | Meaning | CI action |
+|---|---|---|
+| `0` | The current run was certifiable and no new authoritative failure was found. Without a trusted baseline, this is the weaker “every executed case passed” answer. | Allow |
+| `1` | A behavioral failure is new against the baseline, or a run without a baseline contains a failure. | Block |
+| `2` | The run is not certifiable: setup, infrastructure, fixture, source, suite, replay, or stored-evidence validation failed. | Block |
+| `3` | Required evidence was inconclusive. | Block |
+
+Version 0.5.2 deliberately rejects more incomplete evidence. An unedited
+fixture placeholder or partially invalid frozen suite is refused; incomplete or
+duplicate stored execution structure is not loadable; source drift and missing
+or inconsistent replay evidence prevent a fresh run from being trusted; and a
+trusted baseline can no longer upgrade a current `INCONCLUSIVE` result to
+`PASS`. Missing or ambiguous action-path evidence is reported as unmeasured,
+not credited as exercised. Fix the evidence problem and rerun—do not remap exit
+`2` or `3` to success.
+
+The controlled offline model can validate harness and schema behavior without a
+provider, but it may decline every intended action. A green gate with zero
+action paths exercised is evidence only for the cases that actually ran, not an
+end-to-end compatibility or policy claim. Review the coverage and action-path
+sections of the report before relying on the exit code.
 
 The target directory must already exist. `generate` and `test` may inspect the
 target again because each command independently validates current source instead
@@ -196,6 +271,12 @@ denied by default. These are containment controls for **trusted local code**.
 Network denial is not a general operating-system sandbox. Target imports execute,
 and direct filesystem writes, subprocess execution, or direct database access
 from arbitrary Python orchestration are outside the declared-tool guarantee.
+
+AgentCheck 0.5.2 does **not** guarantee hostile-code containment, full answer-key
+isolation from every execution surface, or deterministic model execution.
+Replay verifies source/configuration/scenario bindings and re-executes the same
+harness inputs; it does not capture stochastic provider output or turn a model
+call into deterministic replay.
 
 Read [SECURITY.md](https://github.com/WaseemGhanem98/AgentCheck/blob/main/SECURITY.md) before evaluating a new target.
 
