@@ -12,10 +12,20 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
-## Unreleased
+## 0.5.2 (2026-08-31)
+
+An evidence-integrity patch that makes incomplete, inconsistent, or drifting
+execution evidence fail closed instead of looking complete. It does not add a
+framework integration or expand AgentCheck's containment guarantee.
 
 ### Fixed
 
+- **Action-path reporting now uses the complete scenario denominator.** A path
+  is counted as exercised only when one canonical run and one non-infrastructure
+  evaluation bind to the case and the intended action tool was actually
+  attempted. Missing, duplicate, ambiguous, and infrastructure evidence is
+  reported as unmeasured rather than disappearing or being credited to an
+  unrelated tool call.
 - **A trusted baseline could turn an inconclusive gate run into `PASS`.** The
   baseline comparator correctly treats missing evidence as a non-regression,
   but the one-command release gate accidentally reused that result as its own
@@ -23,10 +33,58 @@ identity**.
   but the current suite remains `INCONCLUSIVE`, `agentcheck gate` now blocks
   with exit code 3. A baseline can accept known failures; it can never supply
   evidence the current run did not observe.
+- **Generated fixture placeholders can no longer enter a suite.** An unedited
+  `REPLACE_ME` value is rejected with a regeneration action before the suite is
+  written, rather than becoming apparent representative input.
+- **A partially invalid frozen suite can no longer improve its own
+  denominator.** If any persisted case fails integrity or lint validation, the
+  whole frozen suite is refused before selection and before scenario-execution
+  workers start. Invalid cases are not silently dropped while valid-looking
+  survivors continue.
+- **Stored reports now require a non-vacuous internally consistent execution
+  binding.** Every suite scenario has exactly one evaluation; canonical runs
+  are unique and required for non-infrastructure evaluations, while an
+  infrastructure evaluation may legitimately have no run. Empty denominators
+  and duplicate IDs are rejected. This validates the stored execution
+  structure, not whether a recorded verdict was derived correctly.
+- **Execution, replay, and shrink now bind to one bounded source snapshot.**
+  Relevant source is captured before target import and rechecked at the
+  execution phase boundaries; replay and shrink carry the initially verified
+  snapshot forward instead of trusting a later endpoint-only comparison.
+- **A successful fresh execution now requires complete replay evidence before
+  trusted artifacts are written.** Replay omission, case mismatch, or write
+  failure refuses the execution and leaves no loadable partial stored run.
+
+### Defense in depth
+
+- **Scenario workers receive a narrower execution request.** Evaluator-only
+  assertions and unrelated configuration no longer cross the worker request
+  boundary, reducing direct answer-key exposure while preserving the existing
+  parent-side evaluation contract.
+
+### Packaging and documentation
+
+- Published README links are absolute or same-page links, so documentation
+  destinations work on PyPI as well as GitHub. Distribution auditing now
+  enforces that policy on built metadata.
+- Documentation now distinguishes portable suite identity from release
+  version, reproducible suite generation from deterministic model execution,
+  and trusted-code process controls from hostile-code containment.
+
+**Compatibility:** invalid or incomplete fixture, frozen-suite, gate, stored-
+report, source, and replay states are now refused or classified more strictly.
+Valid completed execution paths keep their existing generated-suite semantics.
+
+**Boundaries:** this release does not prove hostile-code containment, full
+answer-key isolation, immutable execution media or ABA resistance, or any
+provider-level guarantee. The environment-containment work in `spikes/` remains
+repository-only research and is excluded from distributions. The further
+immutable-media work sometimes described as Slice 3 is not included.
 
 **Suite identity:** `GENERATOR_COMPATIBILITY_VERSION` stays `1`. This correction
-changes only the gate's aggregate CI decision; it does not change generated
-scenarios, stored run evidence, or serialized artifact identity.
+set changes validation, evidence binding, transport, reporting, and artifact
+commit rules; it does not change valid scenario-generation semantics or
+re-identify an otherwise equivalent frozen suite.
 
 ## 0.5.1 (2026-08-29)
 
