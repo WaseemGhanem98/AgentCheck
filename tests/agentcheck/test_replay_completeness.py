@@ -78,7 +78,7 @@ def _require_replay(
     *,
     run_id: str = "complete-replay",
 ) -> Path:
-    return application._require_complete_replay_manifest(
+    return application._emit_replay_manifest(
         root=root,
         config=AgentCheckConfig(),
         spec=_stub_spec(),  # type: ignore[arg-type]
@@ -199,13 +199,12 @@ def test_forced_replay_write_failure_leaves_no_loadable_or_baselineable_run(
 
     run_path = target / ".agentcheck" / "runs" / run_id
     replay_path = target / ".agentcheck" / "replay" / f"{run_id}.json"
-    assert run_path.is_dir()
-    assert tuple(run_path.iterdir()) == ()
+    assert run_path.exists() is False
     assert replay_path.exists() is False
     assert persisted is False
-    with pytest.raises(ConfigurationError, match="missing required artifact"):
+    with pytest.raises(ConfigurationError, match="run artifacts were not found"):
         load_stored_run(target, run_id=run_id, latest=False)
-    with pytest.raises(ConfigurationError, match="missing required artifact"):
+    with pytest.raises(ConfigurationError, match="run artifacts were not found"):
         create_baseline(target, run_id=run_id)
     assert not (target / "agentcheck-baseline.json").exists()
 
