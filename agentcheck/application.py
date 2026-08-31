@@ -81,14 +81,17 @@ from agentcheck.report import render_report
 from agentcheck.replay import (
     ReplayManifest,
     build_replay_manifest,
-    collect_source_file_set,
-    entrypoint_digest,
     git_revision,
     load_replay_manifest,
     secret_shaped_reason,
     verify_replay_source_bindings,
     verify_replay_spec_bindings,
     write_replay_manifest,
+)
+from agentcheck.replay.bind import (
+    SourceSnapshot,
+    capture_source_snapshot,
+    verify_source_snapshot,
 )
 from agentcheck.replay.manifest import replay_manifest_relative_path
 from agentcheck.shrink import (
@@ -158,6 +161,7 @@ class SuiteExecution:
     run_id: str
     seed: int
     git_revision: str | None
+    source_snapshot: SourceSnapshot
     spec: AgentSpec
     frozen_suite: FrozenSuite | None
     scenarios: tuple[Scenario, ...]
@@ -357,8 +361,11 @@ def execute_suite(
     # target is imported, so a malformed file never reaches model or tool code.
     configured = configured_frozen_suite(root, config)
     suite_run_id = run_id or new_run_id()
-    # Freeze repository identity before importing or executing target code.
-    revision = _git_revision(root)
+    # Capture bounded source bytes and named-commit eligibility before the first
+    # target import. Later endpoint comparisons are ordinary trusted-code
+    # controls, not hostile filesystem immutability or ABA protection.
+    source_snapshot = capture_source_snapshot(root, config)
+    revision = source_snapshot.git_revision
     inspection = inspect_in_subprocess(root, config)
     packs = resolve_policy_packs(
         root, config, spec=_require_supported_spec(inspection)
@@ -491,6 +498,7 @@ def execute_suite(
         suite_run_id=suite_run_id,
         effective_seed=effective_seed,
         revision=revision,
+        source_snapshot=source_snapshot,
         valid=tuple(valid),
         invalid=tuple(invalid),
         reference_scenarios=reference_scenarios,
@@ -519,9 +527,19 @@ def replay_suite(
     # Untrusted manifest is parsed before the target is imported.
     manifest = load_replay_manifest(root, manifest_path)
     suite_run_id = run_id or new_run_id()
-    revision = _git_revision(root)
-    verify_replay_source_bindings(manifest, root=root, config=config)
+    source_snapshot = verify_replay_source_bindings(
+        manifest,
+        root=root,
+        config=config,
+    )
     _warn_legacy_source_binding(manifest)
+    verify_source_snapshot(
+        source_snapshot,
+        root=root,
+        config=config,
+        phase="before replay target inspection",
+    )
+    revision = source_snapshot.git_revision
     inspection = inspect_in_subprocess(root, config)
     packs = resolve_policy_packs(root, config, spec=inspection.require_value())
     spec = attach_declared_policies(inspection.require_value(), packs)
@@ -559,6 +577,7 @@ def replay_suite(
         suite_run_id=suite_run_id,
         effective_seed=manifest.seed,
         revision=revision,
+        source_snapshot=source_snapshot,
         valid=tuple(valid),
         invalid=(),
         reference_scenarios=tuple(valid),
@@ -605,14 +624,30 @@ def shrink_suite(
             "refusing to overwrite the source replay manifest; pass a different --run-id"
         )
 
-    verify_replay_source_bindings(source_manifest, root=root, config=config)
+    source_snapshot = verify_replay_source_bindings(
+        source_manifest,
+        root=root,
+        config=config,
+    )
     _warn_legacy_source_binding(source_manifest)
+    verify_source_snapshot(
+        source_snapshot,
+        root=root,
+        config=config,
+        phase="before shrink target inspection",
+    )
     inspection = inspect_in_subprocess(root, config)
     packs = resolve_policy_packs(root, config)
     spec = attach_declared_policies(inspection.require_value(), packs)
     pack_ids = tuple(pack.pack_id for pack in packs)
     verify_replay_spec_bindings(
         source_manifest, spec=spec, policy_pack_ids=pack_ids
+    )
+    verify_source_snapshot(
+        source_snapshot,
+        root=root,
+        config=config,
+        phase="after shrink target inspection",
     )
 
     original, original_evaluation = _select_shrink_target(
@@ -642,6 +677,12 @@ def shrink_suite(
         execute=execute_candidate,
         max_candidates=max_candidates,
         max_rounds=max_rounds,
+    )
+    verify_source_snapshot(
+        source_snapshot,
+        root=root,
+        config=config,
+        phase="after shrink scenario workers",
     )
     minimized = _annotate_minimized(outcome.scenario, original)
     if secret_shaped_reason(minimized) is not None:
@@ -817,6 +858,7 @@ def _execute_valid_scenarios(
     suite_run_id: str,
     effective_seed: int,
     revision: str | None,
+    source_snapshot: SourceSnapshot,
     valid: tuple[Scenario, ...],
     invalid: tuple[InvalidScenario, ...],
     reference_scenarios: tuple[Scenario, ...],
@@ -827,6 +869,12 @@ def _execute_valid_scenarios(
     persist_store: bool,
     policy_pack_ids: tuple[str, ...],
 ) -> SuiteExecution:
+    verify_source_snapshot(
+        source_snapshot,
+        root=root,
+        config=config,
+        phase="after inspection and preparation, before scenario workers",
+    )
     valid_scenarios = tuple(valid)
     behavioral_coverage = analyze_behavioral_coverage(
         spec,
@@ -885,6 +933,12 @@ def _execute_valid_scenarios(
     ordered = tuple(indexed_results[index] for index in range(len(valid)))
     runs = tuple(case_run for case_run, _ in ordered if case_run is not None)
     evaluations = tuple(evaluation for _, evaluation in ordered)
+    verify_source_snapshot(
+        source_snapshot,
+        root=root,
+        config=config,
+        phase="after scenario workers",
+    )
     findings = analyze_failures(valid_scenarios, evaluations)
     artifacts = ArtifactStore(root, config.artifacts_directory, suite_run_id)
     artifacts.write_json("agent-spec.json", spec)
@@ -957,7 +1011,7 @@ def _execute_valid_scenarios(
         run_id=suite_run_id,
         seed=effective_seed,
         scenarios=valid_scenarios,
-        revision=revision,
+        source_snapshot=source_snapshot,
         policy_pack_ids=policy_pack_ids,
     )
     execution = SuiteExecution(
@@ -966,6 +1020,7 @@ def _execute_valid_scenarios(
         run_id=suite_run_id,
         seed=effective_seed,
         git_revision=revision,
+        source_snapshot=source_snapshot,
         spec=spec,
         frozen_suite=frozen,
         scenarios=valid_scenarios,
@@ -992,24 +1047,22 @@ def _emit_replay_manifest(
     run_id: str,
     seed: int,
     scenarios: tuple[Scenario, ...],
-    revision: str | None,
+    source_snapshot: SourceSnapshot,
     policy_pack_ids: tuple[str, ...],
 ) -> Path | None:
     """Write a pre-redaction replay manifest. Failures never change a verdict."""
 
     try:
-        digest = entrypoint_digest(root, config.entrypoint)
-        file_set = collect_source_file_set(root)
         manifest, omitted = build_replay_manifest(
             run_id=run_id,
             seed=seed,
             spec=spec,
             config=config,
             scenarios=scenarios,
-            git_revision=revision,
-            entrypoint_digest=digest,
+            git_revision=source_snapshot.git_revision,
+            entrypoint_digest=source_snapshot.entrypoint_digest,
             policy_pack_ids=policy_pack_ids,
-            file_set=file_set,
+            file_set=source_snapshot.file_set,
         )
         if manifest is None:
             print(

@@ -12,7 +12,13 @@ from agentcheck.domain import AgentSpec
 from agentcheck.errors import ConfigurationError
 from agentcheck.identity import identity_mismatch_hint, spec_identity_matches
 
-from .fileset import collect_source_file_set, describe_file_set_mismatch, git_command_env
+from .fileset import (
+    SourceSnapshot,
+    build_source_snapshot,
+    describe_file_set_mismatch,
+    describe_source_snapshot_mismatch,
+    git_command_env,
+)
 from .manifest import ReplayManifest
 
 
@@ -80,13 +86,66 @@ def entrypoint_digest(root: Path, entrypoint: str) -> str:
     return f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
 
+def capture_source_snapshot(
+    root: Path,
+    config: AgentCheckConfig,
+) -> SourceSnapshot:
+    """Capture bounded source identity before target import or execution.
+
+    The revision is checked on both sides of collection. This proves ordinary
+    endpoint equality, not hostile filesystem immutability or ABA resistance.
+    """
+
+    revision_before = git_revision(root)
+    source, _attribute = resolve_entrypoint(root, config.entrypoint)
+    try:
+        entrypoint_path = source.relative_to(root.resolve()).as_posix()
+    except ValueError as exc:  # defensive; resolve_entrypoint already contains it
+        raise ConfigurationError(
+            "entrypoint must remain inside the source snapshot root"
+        ) from exc
+    digest = entrypoint_digest(root, config.entrypoint)
+    snapshot = build_source_snapshot(
+        root,
+        git_revision=revision_before,
+        entrypoint_path=entrypoint_path,
+        entrypoint_digest=digest,
+    )
+    revision_after = git_revision(root)
+    if revision_after != revision_before:
+        raise ConfigurationError(
+            "git revision changed while the initial source snapshot was captured"
+        )
+    return snapshot
+
+
+def verify_source_snapshot(
+    bound: SourceSnapshot,
+    *,
+    root: Path,
+    config: AgentCheckConfig,
+    phase: str,
+) -> None:
+    """Refuse when an endpoint capture differs from the initial source snapshot."""
+
+    live = capture_source_snapshot(root, config)
+    reason = describe_source_snapshot_mismatch(bound, live)
+    if reason:
+        raise ConfigurationError(f"source snapshot mismatch {phase}: {reason}")
+
+
 def verify_replay_source_bindings(
     manifest: ReplayManifest,
     *,
     root: Path,
     config: AgentCheckConfig,
-) -> None:
-    """Refuse replay when source/config identity differs. Does not import the target."""
+) -> SourceSnapshot:
+    """Return the exact captured source after proving its replay bindings.
+
+    The returned snapshot is the same object compared with the input manifest;
+    callers must execute from this capture rather than recollecting a new
+    replay baseline. This does not import the target.
+    """
 
     binding = manifest.spec_binding
     if config.adapter != binding.adapter:
@@ -101,11 +160,6 @@ def verify_replay_source_bindings(
         )
 
     source = manifest.source_binding
-    live_digest = entrypoint_digest(root, config.entrypoint)
-    if live_digest != source.entrypoint_digest:
-        raise ConfigurationError(
-            "entrypoint source digest does not match the replay manifest"
-        )
     if source.git_revision is not None:
         live_revision = git_revision(root)
         if live_revision != source.git_revision:
@@ -116,6 +170,19 @@ def verify_replay_source_bindings(
             raise ConfigurationError(
                 "target git worktree is dirty; replay refuses a dirty tree"
             )
+
+    snapshot = capture_source_snapshot(root, config)
+    if snapshot.entrypoint_digest != source.entrypoint_digest:
+        raise ConfigurationError(
+            "entrypoint source digest does not match the replay manifest"
+        )
+    if (
+        source.git_revision is not None
+        and snapshot.git_revision != source.git_revision
+    ):
+        raise ConfigurationError(
+            "git revision does not match the replay manifest"
+        )
 
     required = manifest.environment_requirements.names
     live_allowlist = tuple(sorted(config.environment_allowlist))
@@ -131,11 +198,11 @@ def verify_replay_source_bindings(
         )
 
     if source.file_set is None:
-        return
-    live_files = collect_source_file_set(root)
-    reason = describe_file_set_mismatch(source.file_set, live_files)
+        return snapshot
+    reason = describe_file_set_mismatch(source.file_set, snapshot.file_set)
     if reason:
         raise ConfigurationError(reason)
+    return snapshot
 
 
 def verify_replay_spec_bindings(
@@ -187,10 +254,13 @@ def verify_replay_bindings(
 
 
 __all__ = [
+    "SourceSnapshot",
+    "capture_source_snapshot",
     "entrypoint_digest",
     "git_revision",
     "git_worktree_is_dirty",
     "verify_replay_bindings",
     "verify_replay_source_bindings",
     "verify_replay_spec_bindings",
+    "verify_source_snapshot",
 ]

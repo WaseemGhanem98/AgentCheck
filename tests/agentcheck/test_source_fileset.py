@@ -10,7 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from agentcheck.application import execute_suite, replay_suite, shrink_suite
-from agentcheck.config import AgentCheckConfig
+from agentcheck.config import AgentCheckConfig, load_config
 from agentcheck.errors import ConfigurationError
 from agentcheck.generate.templates import build_account_support_suite
 from agentcheck.replay import (
@@ -24,6 +24,7 @@ from agentcheck.replay import (
     load_replay_manifest,
 )
 from agentcheck.replay.fileset import MAX_WALK_DEPTH, SourceFileEntry, git_command_env
+from agentcheck.replay.bind import capture_source_snapshot
 from agentcheck.replay.manifest import ReplayManifest
 
 
@@ -666,6 +667,26 @@ def test_an_arbitrarily_named_gitignored_virtualenv_is_excluded_in_git_mode(
     paths = {item.path for item in inventory.files}
     assert "agent.py" in paths
     assert not any(".test-venv" in path for path in paths)
+    root, config = load_config(target)
+    snapshot = capture_source_snapshot(root, config)
+    assert snapshot.git_revision is None
+    assert snapshot.commit_bindable is False
+    assert snapshot.file_set == inventory
+
+
+def test_arbitrarily_named_venv_cannot_reclassify_commit_certified_paths(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "repo"
+    target.mkdir()
+    (target / "agent.py").write_text("VALUE = 1\n", encoding="utf-8")
+    _git_init(target)
+    (target / ".gitignore").write_text(".test-venv/\n", encoding="utf-8")
+    _git_track(target, "agent.py", ".gitignore")
+    _write_virtualenv(target, ".test-venv")
+
+    with pytest.raises(ConfigurationError, match="not a safe relative path"):
+        collect_source_file_set(target)
 
 
 def test_a_dot_prefixed_directory_that_is_not_a_virtualenv_still_fails_closed(
