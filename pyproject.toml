@@ -18,7 +18,7 @@ name = "agentcheck-ai"
 # `agentcheck.generate.GENERATOR_COMPATIBILITY_VERSION`, so bumping this line
 # does not move scenario fingerprints or re-identify equivalent suites.
 # `tests/agentcheck/test_version_decoupling.py` holds that guarantee.
-version = "0.5.1"
+version = "0.5.2"
 description = "Behavioral testing for AI agents"
 readme = "README.md"
 license = "Apache-2.0"
