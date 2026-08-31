@@ -41,11 +41,12 @@ framework integration or expand AgentCheck's containment guarantee.
   whole frozen suite is refused before selection and before scenario-execution
   workers start. Invalid cases are not silently dropped while valid-looking
   survivors continue.
-- **Stored reports now require a non-vacuous one-to-one execution binding.**
-  Scenario, canonical-run, and evaluation identities and cardinalities must
-  agree; empty denominators and duplicate IDs are rejected. This validates the
-  stored execution structure, not whether a recorded verdict was derived
-  correctly.
+- **Stored reports now require a non-vacuous internally consistent execution
+  binding.** Every suite scenario has exactly one evaluation; canonical runs
+  are unique and required for non-infrastructure evaluations, while an
+  infrastructure evaluation may legitimately have no run. Empty denominators
+  and duplicate IDs are rejected. This validates the stored execution
+  structure, not whether a recorded verdict was derived correctly.
 - **Execution, replay, and shrink now bind to one bounded source snapshot.**
   Relevant source is captured before target import and rechecked at the
   execution phase boundaries; replay and shrink carry the initially verified
