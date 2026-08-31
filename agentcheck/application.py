@@ -883,6 +883,9 @@ def _execute_valid_scenarios(
         reference_scope=reference_scope,
         suite_fingerprint=frozen.fingerprint if frozen is not None else None,
     )
+    # Reserve the run ID before scenario workers so a collision cannot replace
+    # an existing replay or begin a second execution under the same identity.
+    artifacts = ArtifactStore(root, config.artifacts_directory, suite_run_id)
     indexed_results: dict[int, tuple[CanonicalRun | None, CaseEvaluation]] = {}
     with ThreadPoolExecutor(
         max_workers=min(config.max_concurrency, max(1, len(valid))),
@@ -933,14 +936,27 @@ def _execute_valid_scenarios(
     ordered = tuple(indexed_results[index] for index in range(len(valid)))
     runs = tuple(case_run for case_run, _ in ordered if case_run is not None)
     evaluations = tuple(evaluation for _, evaluation in ordered)
-    verify_source_snapshot(
-        source_snapshot,
-        root=root,
-        config=config,
-        phase="after scenario workers",
-    )
-    findings = analyze_failures(valid_scenarios, evaluations)
-    artifacts = ArtifactStore(root, config.artifacts_directory, suite_run_id)
+    try:
+        verify_source_snapshot(
+            source_snapshot,
+            root=root,
+            config=config,
+            phase="after scenario workers",
+        )
+        findings = analyze_failures(valid_scenarios, evaluations)
+        replay_path = _emit_replay_manifest(
+            root=root,
+            config=config,
+            spec=spec,
+            run_id=suite_run_id,
+            seed=effective_seed,
+            scenarios=valid_scenarios,
+            source_snapshot=source_snapshot,
+            policy_pack_ids=policy_pack_ids,
+        )
+    except BaseException:
+        _remove_empty_run_reservation(artifacts.root)
+        raise
     artifacts.write_json("agent-spec.json", spec)
     artifacts.write_json(
         "suite.json",
@@ -1004,16 +1020,6 @@ def _execute_valid_scenarios(
         _coverage_reference_scenarios=reference_scenarios,
     )
     report_path = artifacts.write_text("report.html", report)
-    replay_path = _emit_replay_manifest(
-        root=root,
-        config=config,
-        spec=spec,
-        run_id=suite_run_id,
-        seed=effective_seed,
-        scenarios=valid_scenarios,
-        source_snapshot=source_snapshot,
-        policy_pack_ids=policy_pack_ids,
-    )
     execution = SuiteExecution(
         target_root=root,
         config=config,
@@ -1049,8 +1055,8 @@ def _emit_replay_manifest(
     scenarios: tuple[Scenario, ...],
     source_snapshot: SourceSnapshot,
     policy_pack_ids: tuple[str, ...],
-) -> Path | None:
-    """Write a pre-redaction replay manifest. Failures never change a verdict."""
+) -> Path:
+    """Write one replay case per executed scenario or fail the execution."""
 
     try:
         manifest, omitted = build_replay_manifest(
@@ -1064,30 +1070,40 @@ def _emit_replay_manifest(
             policy_pack_ids=policy_pack_ids,
             file_set=source_snapshot.file_set,
         )
-        if manifest is None:
-            print(
-                "AgentCheck warning: replay manifest omitted because every case "
-                "failed secret screening",
-                file=sys.stderr,
+        if manifest is None or omitted or manifest.omitted:
+            omitted_count = max(
+                len(omitted),
+                len(manifest.omitted) if manifest is not None else 0,
             )
-            return None
-        path = write_replay_manifest(root, config, manifest)
-        if omitted:
-            print(
-                "AgentCheck warning: "
-                f"{len(omitted)} scenario(s) omitted from the replay manifest",
-                file=sys.stderr,
+            raise ConfigurationError(
+                "complete replay manifest required: "
+                f"{omitted_count or len(scenarios)} of {len(scenarios)} "
+                "scenario(s) could not be serialized safely"
             )
-        return path
+        if tuple(manifest.cases) != scenarios:
+            raise ConfigurationError(
+                "complete replay manifest required: replay cases do not match "
+                "each executed scenario exactly once"
+            )
+        return write_replay_manifest(root, config, manifest)
     except (KeyboardInterrupt, SystemExit):
         raise
+    except ConfigurationError:
+        raise
     except Exception as exc:
-        print(
-            "AgentCheck warning: replay manifest failed: "
-            + redact_log_text(str(exc)),
-            file=sys.stderr,
-        )
-        return None
+        message = redact_log_text(str(exc)) or type(exc).__name__
+        raise ConfigurationError(
+            f"unable to produce complete replay manifest: {message}"
+        ) from exc
+
+
+def _remove_empty_run_reservation(path: Path) -> None:
+    """Remove only an empty failed-run reservation; never clean recursively."""
+
+    try:
+        path.rmdir()
+    except OSError:
+        pass
 
 
 def _warn_legacy_source_binding(manifest: ReplayManifest) -> None:
