@@ -684,6 +684,294 @@ def test_clean_execution_replay_uses_initial_snapshot_and_outputs_do_not_drift(
     )
 
 
+def test_replay_refuses_ignored_source_change_after_manifest_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target, helper = _copy_committed_target(
+        tmp_path,
+        import_helper=True,
+        ignore_helper=True,
+        create_helper_before_commit=False,
+    )
+    _install_fast_execution(monkeypatch)
+    first = application.execute_suite(
+        target,
+        run_id="ignored-source-before-replay",
+        persist_store=False,
+    )
+    assert first.replay_manifest_path is not None
+    manifest_path = first.replay_manifest_path.relative_to(target).as_posix()
+    original_verify = application.verify_replay_source_bindings
+    original_inspect = application.inspect_in_subprocess
+    verified_snapshots: list[object] = []
+    verification_calls: list[str] = []
+    inspection_calls: list[str] = []
+    worker_calls: list[str] = []
+
+    def verify_then_mutate(*args: object, **kwargs: object) -> object:
+        snapshot = original_verify(*args, **kwargs)  # type: ignore[arg-type]
+        verified_snapshots.append(snapshot)
+        verification_calls.append("verified")
+        helper.write_text(
+            "VALUE = 'changed-after-manifest-verification'\n",
+            encoding="utf-8",
+        )
+        return snapshot
+
+    def inspected(*args: object, **kwargs: object) -> object:
+        inspection_calls.append("inspected")
+        return original_inspect(*args, **kwargs)
+
+    def forbidden_worker(*_args: object, **_kwargs: object) -> None:
+        worker_calls.append("worker")
+        raise AssertionError("replay source drift must refuse before scenario workers")
+
+    monkeypatch.setattr(
+        application,
+        "verify_replay_source_bindings",
+        verify_then_mutate,
+    )
+    monkeypatch.setattr(application, "inspect_in_subprocess", inspected)
+    monkeypatch.setattr(application, "run_scenario_in_subprocess", forbidden_worker)
+
+    with pytest.raises(ConfigurationError, match="source snapshot mismatch"):
+        application.replay_suite(
+            target,
+            manifest_path,
+            run_id="ignored-source-after-verification",
+            persist_store=False,
+        )
+
+    assert verification_calls == ["verified"]
+    assert inspection_calls == []
+    assert worker_calls == []
+    assert verified_snapshots == [first.source_snapshot]
+    assert helper.read_text(encoding="utf-8") == (
+        "VALUE = 'changed-after-manifest-verification'\n"
+    )
+
+
+def test_replay_refuses_non_git_source_change_after_manifest_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "local-target"
+    shutil.copytree(EXAMPLE, target, symlinks=False)
+    _install_fast_execution(monkeypatch)
+    first = application.execute_suite(
+        target,
+        run_id="non-git-source-before-replay",
+        persist_store=False,
+    )
+    assert first.source_snapshot.git_revision is None
+    assert first.replay_manifest_path is not None
+    manifest_path = first.replay_manifest_path.relative_to(target).as_posix()
+    entrypoint = target / "agent.py"
+    original_verify = application.verify_replay_source_bindings
+    original_inspect = application.inspect_in_subprocess
+    verified_snapshots: list[object] = []
+    verification_calls: list[str] = []
+    inspection_calls: list[str] = []
+    worker_calls: list[str] = []
+
+    def verify_then_mutate(*args: object, **kwargs: object) -> object:
+        snapshot = original_verify(*args, **kwargs)  # type: ignore[arg-type]
+        verified_snapshots.append(snapshot)
+        verification_calls.append("verified")
+        entrypoint.write_text(
+            entrypoint.read_text(encoding="utf-8")
+            + "\n# changed after manifest verification\n",
+            encoding="utf-8",
+        )
+        return snapshot
+
+    def inspected(*args: object, **kwargs: object) -> object:
+        inspection_calls.append("inspected")
+        return original_inspect(*args, **kwargs)
+
+    def forbidden_worker(*_args: object, **_kwargs: object) -> None:
+        worker_calls.append("worker")
+        raise AssertionError("replay source drift must refuse before scenario workers")
+
+    monkeypatch.setattr(
+        application,
+        "verify_replay_source_bindings",
+        verify_then_mutate,
+    )
+    monkeypatch.setattr(application, "inspect_in_subprocess", inspected)
+    monkeypatch.setattr(application, "run_scenario_in_subprocess", forbidden_worker)
+
+    with pytest.raises(ConfigurationError, match="source snapshot mismatch"):
+        application.replay_suite(
+            target,
+            manifest_path,
+            run_id="non-git-source-after-verification",
+            persist_store=False,
+        )
+
+    assert verification_calls == ["verified"]
+    assert inspection_calls == []
+    assert worker_calls == []
+    assert verified_snapshots == [first.source_snapshot]
+    assert entrypoint.read_text(encoding="utf-8").endswith(
+        "# changed after manifest verification\n"
+    )
+
+
+@pytest.mark.parametrize(
+    "source_mode",
+    ["tracked-git", "ignored-git", "non-git"],
+    ids=["tracked-git-source", "ignored-git-source", "non-git-source"],
+)
+def test_shrink_refuses_source_change_after_manifest_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_mode: str,
+) -> None:
+    if source_mode == "tracked-git":
+        target, changed_path = _copy_committed_target(
+            tmp_path,
+            import_helper=True,
+        )
+        (target / ".gitignore").write_text(".agentcheck/\n", encoding="utf-8")
+        _git(target, "add", ".gitignore")
+        _git(
+            target,
+            "-c",
+            "user.email=test@example.com",
+            "-c",
+            "user.name=AgentCheck Test",
+            "commit",
+            "-q",
+            "-m",
+            "ignore local artifacts",
+        )
+        changed_bytes = "VALUE = 'changed-after-shrink-verification'\n"
+    elif source_mode == "ignored-git":
+        target, changed_path = _copy_committed_target(
+            tmp_path,
+            import_helper=True,
+            ignore_helper=True,
+            create_helper_before_commit=False,
+        )
+        changed_bytes = "VALUE = 'changed-after-shrink-verification'\n"
+    else:
+        target = tmp_path / "local-target"
+        shutil.copytree(EXAMPLE, target, symlinks=False)
+        changed_path = target / "agent.py"
+        changed_bytes = (
+            changed_path.read_text(encoding="utf-8")
+            + "\n# changed after shrink verification\n"
+        )
+    _install_fast_execution(monkeypatch)
+    first = application.execute_suite(
+        target,
+        run_id=f"{source_mode}-before-shrink",
+        persist_store=False,
+    )
+    assert first.replay_manifest_path is not None
+    manifest_path = first.replay_manifest_path.relative_to(target).as_posix()
+    original_verify = application.verify_replay_source_bindings
+    original_inspect = application.inspect_in_subprocess
+    verified_snapshots: list[object] = []
+    verification_calls: list[str] = []
+    inspection_calls: list[str] = []
+    selection_calls: list[str] = []
+
+    def verify_then_mutate(*args: object, **kwargs: object) -> object:
+        snapshot = original_verify(*args, **kwargs)  # type: ignore[arg-type]
+        verified_snapshots.append(snapshot)
+        verification_calls.append("verified")
+        changed_path.write_text(changed_bytes, encoding="utf-8")
+        return snapshot
+
+    def inspected(*args: object, **kwargs: object) -> object:
+        inspection_calls.append("inspected")
+        return original_inspect(*args, **kwargs)
+
+    def forbidden_selection(*_args: object, **_kwargs: object) -> None:
+        selection_calls.append("selection")
+        raise AssertionError("shrink source drift must refuse before source workers")
+
+    monkeypatch.setattr(
+        application,
+        "verify_replay_source_bindings",
+        verify_then_mutate,
+    )
+    monkeypatch.setattr(application, "inspect_in_subprocess", inspected)
+    monkeypatch.setattr(application, "_select_shrink_target", forbidden_selection)
+
+    with pytest.raises(
+        ConfigurationError,
+        match="source snapshot mismatch|tracked source bytes differ|worktree is dirty",
+    ):
+        application.shrink_suite(
+            target,
+            manifest_path,
+            run_id=f"{source_mode}-after-verification",
+            persist_store=False,
+        )
+
+    assert verification_calls == ["verified"]
+    assert inspection_calls == []
+    assert selection_calls == []
+    assert verified_snapshots == [first.source_snapshot]
+    assert changed_path.read_text(encoding="utf-8") == changed_bytes
+
+
+def test_shrink_refuses_source_change_after_candidate_workers_before_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target, helper = _copy_committed_target(
+        tmp_path,
+        import_helper=True,
+        ignore_helper=True,
+        create_helper_before_commit=False,
+    )
+    _install_fast_execution(monkeypatch)
+    first = application.execute_suite(
+        target,
+        run_id="source-before-shrink-workers",
+        persist_store=False,
+    )
+    assert first.replay_manifest_path is not None
+    manifest_path = first.replay_manifest_path.relative_to(target).as_posix()
+    shrink_calls: list[str] = []
+    artifact_calls: list[str] = []
+
+    monkeypatch.setattr(
+        application,
+        "_select_shrink_target",
+        lambda *_args, **_kwargs: (first.scenarios[0], first.evaluations[0]),
+    )
+
+    def mutating_shrink(*_args: object, **_kwargs: object) -> object:
+        shrink_calls.append("shrink")
+        helper.write_text("VALUE = 'changed-during-shrink-workers'\n", encoding="utf-8")
+        return object()
+
+    def forbidden_artifact(*_args: object, **_kwargs: object) -> None:
+        artifact_calls.append("artifact")
+        raise AssertionError("shrink source drift must refuse before artifacts")
+
+    monkeypatch.setattr(application, "shrink_scenario", mutating_shrink)
+    monkeypatch.setattr(application, "write_replay_manifest", forbidden_artifact)
+    monkeypatch.setattr(application, "write_shrink_result", forbidden_artifact)
+
+    with pytest.raises(ConfigurationError, match="source snapshot mismatch"):
+        application.shrink_suite(
+            target,
+            manifest_path,
+            run_id="source-after-shrink-workers",
+            persist_store=False,
+        )
+
+    assert shrink_calls == ["shrink"]
+    assert artifact_calls == []
+    assert helper.read_text(encoding="utf-8") == (
+        "VALUE = 'changed-during-shrink-workers'\n"
+    )
+
+
 def test_source_snapshot_contract_rejects_tampering_and_unknown_versions(
     tmp_path: Path,
 ) -> None:

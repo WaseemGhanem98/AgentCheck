@@ -527,9 +527,18 @@ def replay_suite(
     # Untrusted manifest is parsed before the target is imported.
     manifest = load_replay_manifest(root, manifest_path)
     suite_run_id = run_id or new_run_id()
-    verify_replay_source_bindings(manifest, root=root, config=config)
+    source_snapshot = verify_replay_source_bindings(
+        manifest,
+        root=root,
+        config=config,
+    )
     _warn_legacy_source_binding(manifest)
-    source_snapshot = capture_source_snapshot(root, config)
+    verify_source_snapshot(
+        source_snapshot,
+        root=root,
+        config=config,
+        phase="before replay target inspection",
+    )
     revision = source_snapshot.git_revision
     inspection = inspect_in_subprocess(root, config)
     packs = resolve_policy_packs(root, config, spec=inspection.require_value())
@@ -615,14 +624,30 @@ def shrink_suite(
             "refusing to overwrite the source replay manifest; pass a different --run-id"
         )
 
-    verify_replay_source_bindings(source_manifest, root=root, config=config)
+    source_snapshot = verify_replay_source_bindings(
+        source_manifest,
+        root=root,
+        config=config,
+    )
     _warn_legacy_source_binding(source_manifest)
+    verify_source_snapshot(
+        source_snapshot,
+        root=root,
+        config=config,
+        phase="before shrink target inspection",
+    )
     inspection = inspect_in_subprocess(root, config)
     packs = resolve_policy_packs(root, config)
     spec = attach_declared_policies(inspection.require_value(), packs)
     pack_ids = tuple(pack.pack_id for pack in packs)
     verify_replay_spec_bindings(
         source_manifest, spec=spec, policy_pack_ids=pack_ids
+    )
+    verify_source_snapshot(
+        source_snapshot,
+        root=root,
+        config=config,
+        phase="after shrink target inspection",
     )
 
     original, original_evaluation = _select_shrink_target(
@@ -652,6 +677,12 @@ def shrink_suite(
         execute=execute_candidate,
         max_candidates=max_candidates,
         max_rounds=max_rounds,
+    )
+    verify_source_snapshot(
+        source_snapshot,
+        root=root,
+        config=config,
+        phase="after shrink scenario workers",
     )
     minimized = _annotate_minimized(outcome.scenario, original)
     if secret_shaped_reason(minimized) is not None:

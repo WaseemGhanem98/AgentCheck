@@ -15,7 +15,6 @@ from agentcheck.identity import identity_mismatch_hint, spec_identity_matches
 from .fileset import (
     SourceSnapshot,
     build_source_snapshot,
-    collect_source_file_set,
     describe_file_set_mismatch,
     describe_source_snapshot_mismatch,
     git_command_env,
@@ -140,8 +139,13 @@ def verify_replay_source_bindings(
     *,
     root: Path,
     config: AgentCheckConfig,
-) -> None:
-    """Refuse replay when source/config identity differs. Does not import the target."""
+) -> SourceSnapshot:
+    """Return the exact captured source after proving its replay bindings.
+
+    The returned snapshot is the same object compared with the input manifest;
+    callers must execute from this capture rather than recollecting a new
+    replay baseline. This does not import the target.
+    """
 
     binding = manifest.spec_binding
     if config.adapter != binding.adapter:
@@ -156,11 +160,6 @@ def verify_replay_source_bindings(
         )
 
     source = manifest.source_binding
-    live_digest = entrypoint_digest(root, config.entrypoint)
-    if live_digest != source.entrypoint_digest:
-        raise ConfigurationError(
-            "entrypoint source digest does not match the replay manifest"
-        )
     if source.git_revision is not None:
         live_revision = git_revision(root)
         if live_revision != source.git_revision:
@@ -171,6 +170,19 @@ def verify_replay_source_bindings(
             raise ConfigurationError(
                 "target git worktree is dirty; replay refuses a dirty tree"
             )
+
+    snapshot = capture_source_snapshot(root, config)
+    if snapshot.entrypoint_digest != source.entrypoint_digest:
+        raise ConfigurationError(
+            "entrypoint source digest does not match the replay manifest"
+        )
+    if (
+        source.git_revision is not None
+        and snapshot.git_revision != source.git_revision
+    ):
+        raise ConfigurationError(
+            "git revision does not match the replay manifest"
+        )
 
     required = manifest.environment_requirements.names
     live_allowlist = tuple(sorted(config.environment_allowlist))
@@ -186,11 +198,11 @@ def verify_replay_source_bindings(
         )
 
     if source.file_set is None:
-        return
-    live_files = collect_source_file_set(root)
-    reason = describe_file_set_mismatch(source.file_set, live_files)
+        return snapshot
+    reason = describe_file_set_mismatch(source.file_set, snapshot.file_set)
     if reason:
         raise ConfigurationError(reason)
+    return snapshot
 
 
 def verify_replay_spec_bindings(
