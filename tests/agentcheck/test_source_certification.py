@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -85,6 +86,35 @@ def _copy_committed_target(
     if not create_helper_before_commit:
         helper.write_text("VALUE = 'outside-commit'\n", encoding="utf-8")
     return target, helper
+
+
+def _copy_committed_package_target(tmp_path: Path) -> tuple[Path, Path]:
+    target = tmp_path / "target"
+    package = target / "pkg"
+    package.mkdir(parents=True)
+    (target / "agent.py").write_text(
+        "from pkg import helper\nagent = helper.VALUE\n", encoding="utf-8"
+    )
+    (target / "agentcheck.json").write_text(
+        '{"schema_version":"agentcheck.config.v1","entrypoint":"agent.py:agent"}\n',
+        encoding="utf-8",
+    )
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "helper.py").write_text("VALUE = 'committed'\n", encoding="utf-8")
+    _git(target, "init", "-q")
+    _git(target, "add", ".")
+    _git(
+        target,
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=AgentCheck Test",
+        "commit",
+        "-q",
+        "-m",
+        "fixture",
+    )
+    return target, package
 
 
 def _example_spec() -> object:
@@ -227,6 +257,194 @@ def test_nonignored_untracked_import_refuses_before_target_inspection(
 
     assert calls == []
     assert not (target / ".agentcheck" / "runs" / "untracked-source").exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="directory symlink probe")
+@pytest.mark.parametrize(
+    "with_venv_marker", [False, True], ids=["plain", "venv-marker"]
+)
+def test_outbound_intermediate_directory_symlink_refuses_before_inspection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_venv_marker: bool,
+) -> None:
+    target, package = _copy_committed_package_target(tmp_path)
+    outside = tmp_path / "outside-package"
+    package.rename(outside)
+    if with_venv_marker:
+        (outside / "helper.py").write_text(
+            "VALUE = 'outside-and-different'\n", encoding="utf-8"
+        )
+        (outside / "pyvenv.cfg").write_text("version = 3.12\n", encoding="utf-8")
+    os.symlink(outside, package, target_is_directory=True)
+    calls: list[str] = []
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        calls.append("inspect")
+        raise AssertionError("outbound source symlink must refuse before inspection")
+
+    monkeypatch.setattr(application, "inspect_in_subprocess", forbidden)
+    monkeypatch.setattr(application, "run_scenario_in_subprocess", forbidden)
+
+    with pytest.raises(ConfigurationError, match="symlink|outside|contain"):
+        application.execute_suite(
+            target,
+            run_id=f"outbound-directory-symlink-{with_venv_marker}",
+            persist_store=False,
+        )
+
+    assert calls == []
+
+
+def test_untracked_venv_marker_cannot_hide_tracked_source_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target, package = _copy_committed_package_target(tmp_path)
+    (package / "helper.py").write_text(
+        "VALUE = 'modified-and-executed'\n", encoding="utf-8"
+    )
+    (package / "pyvenv.cfg").write_text("version = 3.12\n", encoding="utf-8")
+    calls: list[str] = []
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        calls.append("inspect")
+        raise AssertionError("tracked source mismatch must refuse before inspection")
+
+    monkeypatch.setattr(application, "inspect_in_subprocess", forbidden)
+    monkeypatch.setattr(application, "run_scenario_in_subprocess", forbidden)
+
+    with pytest.raises(ConfigurationError, match="tracked source bytes differ"):
+        application.execute_suite(
+            target,
+            run_id="untracked-venv-marker",
+            persist_store=False,
+        )
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "tracked_package_init", [True, False], ids=["regular-package", "namespace-package"]
+)
+def test_venv_marker_cannot_hide_ignored_relevant_source(
+    tmp_path: Path, tracked_package_init: bool
+) -> None:
+    target = tmp_path / "target"
+    package = target / "pkg"
+    package.mkdir(parents=True)
+    (target / "agent.py").write_text(
+        "from pkg import ignored_runtime\nagent = ignored_runtime.VALUE\n",
+        encoding="utf-8",
+    )
+    (target / "agentcheck.json").write_text(
+        '{"schema_version":"agentcheck.config.v1","entrypoint":"agent.py:agent"}\n',
+        encoding="utf-8",
+    )
+    (target / ".gitignore").write_text("pkg/ignored_runtime.py\n", encoding="utf-8")
+    if tracked_package_init:
+        (package / "__init__.py").write_text("", encoding="utf-8")
+    _git(target, "init", "-q")
+    _git(target, "add", ".")
+    _git(
+        target,
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=AgentCheck Test",
+        "commit",
+        "-q",
+        "-m",
+        "fixture",
+    )
+    ignored = package / "ignored_runtime.py"
+    ignored.write_text("VALUE = 'ignored-runtime-source'\n", encoding="utf-8")
+    (package / "pyvenv.cfg").write_text("version = 3.12\n", encoding="utf-8")
+    assert _git(target, "check-ignore", "pkg/ignored_runtime.py").stdout.strip()
+
+    root, config = load_config(target)
+    snapshot = replay_bind.capture_source_snapshot(root, config)
+    entries = {item.path: item.digest for item in snapshot.file_set.files}
+
+    assert entries["pkg/ignored_runtime.py"] == (
+        "sha256:" + hashlib.sha256(ignored.read_bytes()).hexdigest()
+    )
+    assert snapshot.commit_bindable is False
+    assert snapshot.commit_unbound_paths == ("pkg/ignored_runtime.py",)
+
+
+def test_live_gitignore_cannot_hide_untracked_namespace_source(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    package = target / "pkg"
+    package.mkdir(parents=True)
+    (target / "agent.py").write_text(
+        "from pkg import ignored_runtime\nagent = ignored_runtime.VALUE\n",
+        encoding="utf-8",
+    )
+    (target / "agentcheck.json").write_text(
+        '{"schema_version":"agentcheck.config.v1","entrypoint":"agent.py:agent"}\n',
+        encoding="utf-8",
+    )
+    gitignore = target / ".gitignore"
+    gitignore.write_text("# committed ignore policy\n", encoding="utf-8")
+    _git(target, "init", "-q")
+    _git(target, "add", ".")
+    _git(
+        target,
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=AgentCheck Test",
+        "commit",
+        "-q",
+        "-m",
+        "fixture",
+    )
+    gitignore.write_text("pkg/\n", encoding="utf-8")
+    ignored = package / "ignored_runtime.py"
+    ignored.write_text("VALUE = 'live-ignore-source'\n", encoding="utf-8")
+    (package / "pyvenv.cfg").write_text("version = 3.12\n", encoding="utf-8")
+    assert _git(target, "check-ignore", "pkg/ignored_runtime.py").stdout.strip()
+
+    root, config = load_config(target)
+    snapshot = replay_bind.capture_source_snapshot(root, config)
+    entries = {item.path: item.digest for item in snapshot.file_set.files}
+
+    assert entries["pkg/ignored_runtime.py"] == (
+        "sha256:" + hashlib.sha256(ignored.read_bytes()).hexdigest()
+    )
+    assert snapshot.commit_bindable is False
+    assert snapshot.commit_unbound_paths == ("pkg/ignored_runtime.py",)
+
+
+def test_git_replace_ref_cannot_redefine_named_revision_bytes(tmp_path: Path) -> None:
+    target, package = _copy_committed_package_target(tmp_path)
+    original_revision = _git(target, "rev-parse", "HEAD").stdout.strip()
+    (package / "helper.py").write_text(
+        "VALUE = 'replacement-object'\n", encoding="utf-8"
+    )
+    _git(target, "add", "pkg/helper.py")
+    _git(
+        target,
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "user.name=AgentCheck Test",
+        "commit",
+        "-q",
+        "-m",
+        "replacement",
+    )
+    replacement_revision = _git(target, "rev-parse", "HEAD").stdout.strip()
+    _git(target, "checkout", "-q", "--detach", original_revision)
+    (package / "helper.py").write_text(
+        "VALUE = 'replacement-object'\n", encoding="utf-8"
+    )
+    _git(target, "replace", original_revision, replacement_revision)
+    assert _git(target, "replace", "-l").stdout.strip() == original_revision
+
+    root, config = load_config(target)
+    with pytest.raises(ConfigurationError, match="tracked source bytes differ"):
+        replay_bind.capture_source_snapshot(root, config)
 
 
 def test_ignored_relevant_source_is_exactly_bound_but_not_commit_bindable(

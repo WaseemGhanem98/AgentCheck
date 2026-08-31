@@ -13,6 +13,7 @@ import hashlib
 import hmac
 import os
 import re
+import stat
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,13 +29,15 @@ _GIT_ENV_PREFIX = "GIT_"
 
 
 def git_command_env() -> dict[str, str]:
-    """Environment for git plumbing. Drops GIT_* so GIT_DIR cannot retarget us."""
+    """Environment for exact Git plumbing without caller or replacement overrides."""
 
-    return {
+    environment = {
         key: value
         for key, value in os.environ.items()
         if not key.startswith(_GIT_ENV_PREFIX)
     }
+    environment["GIT_NO_REPLACE_OBJECTS"] = "1"
+    return environment
 
 
 SOURCE_FILE_SET_CONTRACT_VERSION: Literal["agentcheck.source_file_set.v1"] = (
@@ -236,8 +239,18 @@ def collect_source_file_set(root: Path) -> SourceFileSet:
             raise ConfigurationError(
                 "unable to inventory ignored source files for replay binding"
             )
-        git_candidates = _unique_paths(tracked + ignored)
-        git_relevant = _select_relevant_paths(git_candidates, root=resolved)
+        tracked_relevant = _select_relevant_paths(tracked, root=resolved)
+        # Preserve PR #52's no-commit local fallback, but never let a mutable
+        # marker suppress Git-reported paths once tracked source makes the
+        # inventory eligible for commit certification.
+        ignored_relevant = _select_relevant_paths(
+            ignored,
+            root=resolved,
+            allow_virtualenv_exclusion=not tracked_relevant,
+        )
+        git_relevant = list(
+            _unique_paths(tuple(tracked_relevant) + tuple(ignored_relevant))
+        )
         if git_relevant:
             relevant = git_relevant
             mode: Literal["git_tracked", "local_files"] = "git_tracked"
@@ -278,7 +291,11 @@ def build_source_snapshot(
     """
 
     resolved = root.resolve()
-    git_paths = _git_source_paths(resolved, git_revision=git_revision)
+    git_paths = (
+        _git_source_paths(resolved, git_revision=git_revision)
+        if git_revision is not None
+        else None
+    )
     if git_revision is not None:
         if git_paths is None:
             raise ConfigurationError(
@@ -414,8 +431,8 @@ def _is_virtualenv_root(directory: Path) -> bool:
         return False
 
 
-def _excluded_by_location(relative: str, *, root: Path) -> bool:
-    """Exclude build, cache, and tool-reserved directories from source inventory.
+def _excluded_by_static_location(relative: str) -> bool:
+    """Whether a path is outside source policy without consulting live bytes.
 
     .github/, .vscode/, .idea/, .vs/, .claude/ are reserved for GitHub, IDE, and
     coding-assistant tooling (Claude Code's own project settings and subagent
@@ -435,11 +452,6 @@ def _excluded_by_location(relative: str, *, root: Path) -> bool:
     parts = relative.split("/")
     if any(part in _EXCLUDED_DIR_NAMES or part.endswith(".egg-info") for part in parts[:-1]):
         return True
-    accumulated = root
-    for part in parts[:-1]:
-        accumulated = accumulated / part
-        if _is_virtualenv_root(accumulated):
-            return True
     name = parts[-1] if parts else ""
     if name in _EXCLUDED_FILE_NAMES or name.startswith(".env"):
         return True
@@ -451,8 +463,20 @@ def _has_included_suffix(relative: str) -> bool:
     return any(name.endswith(suffix) for suffix in _INCLUDED_SUFFIXES)
 
 
+def _excluded_by_virtualenv(relative: str, *, root: Path) -> bool:
+    accumulated = root
+    for part in relative.split("/")[:-1]:
+        accumulated = accumulated / part
+        if _is_virtualenv_root(accumulated):
+            return True
+    return False
+
+
 def _select_relevant_paths(
-    paths: tuple[str, ...] | list[str], *, root: Path
+    paths: tuple[str, ...] | list[str],
+    *,
+    root: Path,
+    allow_virtualenv_exclusion: bool = False,
 ) -> list[str]:
     selected: list[str] = []
     seen: set[str] = set()
@@ -460,7 +484,10 @@ def _select_relevant_paths(
         relative = _normalize_relative(raw)
         if not relative or relative in seen:
             continue
-        if _excluded_by_location(relative, root=root) or not _has_included_suffix(relative):
+        if _excluded_by_static_location(relative) or not _has_included_suffix(relative):
+            continue
+        _reject_symlink_components(root, relative)
+        if allow_virtualenv_exclusion and _excluded_by_virtualenv(relative, root=root):
             continue
         if not _is_safe_relative_path(relative):
             raise ConfigurationError(
@@ -471,6 +498,35 @@ def _select_relevant_paths(
         seen.add(relative)
         selected.append(relative)
     return selected
+
+
+def _reject_symlink_components(root: Path, relative: str) -> None:
+    """Reject a live file path with any symlink component below ``root``."""
+
+    parts = relative.split("/")
+    if (
+        relative.startswith("/")
+        or "\\" in relative
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        raise ConfigurationError(
+            f"source file path is not a contained relative path: {relative}"
+        )
+    candidate = root
+    for part in parts:
+        candidate = candidate / part
+        try:
+            metadata = candidate.lstat()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            raise ConfigurationError(
+                f"unable to inspect source path {relative} for symlinks: {exc}"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            raise ConfigurationError(
+                f"refusing to follow source symlink component at {relative}"
+            )
 
 
 def _unique_paths(paths: tuple[str, ...]) -> tuple[str, ...]:
@@ -593,20 +649,24 @@ def _local_paths(root: Path) -> tuple[str, ...]:
             raise ConfigurationError(
                 f"source file-set walk exceeded the {MAX_WALK_DEPTH} directory depth bound"
             )
-        dirnames[:] = sorted(
+        candidate_dirnames = sorted(
             name
             for name in dirnames
             if name not in _EXCLUDED_DIR_NAMES
             and not name.endswith(".egg-info")
             and not name.startswith(".")
-            and not _is_virtualenv_root(current / name)
         )
-        for name in dirnames:
+        for name in candidate_dirnames:
             child = current / name
             if child.is_symlink():
                 raise ConfigurationError(
                     f"refusing to follow source directory symlink {child}"
                 )
+        dirnames[:] = [
+            name
+            for name in candidate_dirnames
+            if not _is_virtualenv_root(current / name)
+        ]
         for name in sorted(filenames):
             child = current / name
             if relative_dir == Path("."):
@@ -620,6 +680,7 @@ def _local_paths(root: Path) -> tuple[str, ...]:
 def _hash_contained_file(root: Path, relative: str) -> str:
     if not _is_safe_relative_path(relative):
         raise ConfigurationError(f"source file path is not a safe relative path: {relative}")
+    _reject_symlink_components(root, relative)
     candidate = root / Path(*relative.split("/"))
     if candidate.is_symlink():
         raise ConfigurationError(
