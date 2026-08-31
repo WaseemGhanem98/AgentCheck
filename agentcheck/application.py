@@ -869,6 +869,11 @@ def _execute_valid_scenarios(
     persist_store: bool,
     policy_pack_ids: tuple[str, ...],
 ) -> SuiteExecution:
+    # Reserve the run ID before scenario workers so a collision cannot replace
+    # an existing replay or begin a second execution under the same identity.
+    # The empty directory is deliberately not a trusted stored run: the loader
+    # requires the complete artifact set written only after replay succeeds.
+    artifacts = ArtifactStore(root, config.artifacts_directory, suite_run_id)
     verify_source_snapshot(
         source_snapshot,
         root=root,
@@ -940,7 +945,16 @@ def _execute_valid_scenarios(
         phase="after scenario workers",
     )
     findings = analyze_failures(valid_scenarios, evaluations)
-    artifacts = ArtifactStore(root, config.artifacts_directory, suite_run_id)
+    replay_path = _require_complete_replay_manifest(
+        root=root,
+        config=config,
+        spec=spec,
+        run_id=suite_run_id,
+        seed=effective_seed,
+        scenarios=valid_scenarios,
+        source_snapshot=source_snapshot,
+        policy_pack_ids=policy_pack_ids,
+    )
     artifacts.write_json("agent-spec.json", spec)
     artifacts.write_json(
         "suite.json",
@@ -1004,16 +1018,6 @@ def _execute_valid_scenarios(
         _coverage_reference_scenarios=reference_scenarios,
     )
     report_path = artifacts.write_text("report.html", report)
-    replay_path = _emit_replay_manifest(
-        root=root,
-        config=config,
-        spec=spec,
-        run_id=suite_run_id,
-        seed=effective_seed,
-        scenarios=valid_scenarios,
-        source_snapshot=source_snapshot,
-        policy_pack_ids=policy_pack_ids,
-    )
     execution = SuiteExecution(
         target_root=root,
         config=config,
@@ -1039,7 +1043,7 @@ def _execute_valid_scenarios(
     return execution
 
 
-def _emit_replay_manifest(
+def _require_complete_replay_manifest(
     *,
     root: Path,
     config: AgentCheckConfig,
@@ -1049,8 +1053,8 @@ def _emit_replay_manifest(
     scenarios: tuple[Scenario, ...],
     source_snapshot: SourceSnapshot,
     policy_pack_ids: tuple[str, ...],
-) -> Path | None:
-    """Write a pre-redaction replay manifest. Failures never change a verdict."""
+) -> Path:
+    """Write one replay case per executed scenario or fail the execution."""
 
     try:
         manifest, omitted = build_replay_manifest(
@@ -1064,30 +1068,31 @@ def _emit_replay_manifest(
             policy_pack_ids=policy_pack_ids,
             file_set=source_snapshot.file_set,
         )
-        if manifest is None:
-            print(
-                "AgentCheck warning: replay manifest omitted because every case "
-                "failed secret screening",
-                file=sys.stderr,
+        if manifest is None or omitted or manifest.omitted:
+            omitted_count = max(
+                len(omitted),
+                len(manifest.omitted) if manifest is not None else 0,
             )
-            return None
-        path = write_replay_manifest(root, config, manifest)
-        if omitted:
-            print(
-                "AgentCheck warning: "
-                f"{len(omitted)} scenario(s) omitted from the replay manifest",
-                file=sys.stderr,
+            raise ConfigurationError(
+                "complete replay manifest required: "
+                f"{omitted_count or len(scenarios)} of {len(scenarios)} "
+                "scenario(s) could not be serialized safely"
             )
-        return path
+        if tuple(manifest.cases) != scenarios:
+            raise ConfigurationError(
+                "complete replay manifest required: replay cases do not match "
+                "each executed scenario exactly once"
+            )
+        return write_replay_manifest(root, config, manifest)
     except (KeyboardInterrupt, SystemExit):
         raise
+    except ConfigurationError:
+        raise
     except Exception as exc:
-        print(
-            "AgentCheck warning: replay manifest failed: "
-            + redact_log_text(str(exc)),
-            file=sys.stderr,
-        )
-        return None
+        message = redact_log_text(str(exc)) or type(exc).__name__
+        raise ConfigurationError(
+            f"unable to produce complete replay manifest: {message}"
+        ) from exc
 
 
 def _warn_legacy_source_binding(manifest: ReplayManifest) -> None:

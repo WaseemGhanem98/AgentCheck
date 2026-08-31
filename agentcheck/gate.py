@@ -105,13 +105,12 @@ class GateResult:
 
 
 def gate_error_result(message: str) -> GateResult:
-    """A gate answer for a run that never started.
+    """A gate answer when execution produced no certifiable result.
 
-    A suite that failed to load or a target that no longer matches it stops
-    before any scenario executes, so there is no run and no report. That is
-    still an answer to the release question -- the strongest one available is
-    "not certifiable" -- and a caller reading `--json` needs it as a document
-    rather than as an empty stdout it has to parse.
+    The failure may occur before workers or after they finish but before the
+    required evidence is complete. Either way there is no trusted run or
+    report. The strongest answer available is "not certifiable", and a caller
+    reading `--json` needs it as a document rather than as empty stdout.
 
     `counts` is deliberately empty rather than zeroed. Zeros would read as
     "nothing failed", which is a claim this run is in no position to make.
@@ -122,7 +121,7 @@ def gate_error_result(message: str) -> GateResult:
         exit_code=EXIT_NOT_CERTIFIABLE,
         reason=message,
         detail=(
-            "the suite did not execute, so no behavioural claim is made",
+            "no certifiable result was produced, so no behavioural claim is made",
             "this is not recorded as a behavioural regression",
         ),
         summary_block="",
