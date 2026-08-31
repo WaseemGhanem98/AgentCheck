@@ -14,6 +14,7 @@ import hmac
 import os
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -39,10 +40,14 @@ def git_command_env() -> dict[str, str]:
 SOURCE_FILE_SET_CONTRACT_VERSION: Literal["agentcheck.source_file_set.v1"] = (
     "agentcheck.source_file_set.v1"
 )
+SOURCE_SNAPSHOT_CONTRACT_VERSION: Literal["agentcheck.source_snapshot.v1"] = (
+    "agentcheck.source_snapshot.v1"
+)
 MAX_SOURCE_FILES = 256
 MAX_SOURCE_FILE_BYTES = 1 * 1024 * 1024
 MAX_WALK_DEPTH = 8
 _SAFE_RELATIVE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9._/-]*$")
+_GIT_REVISION_RE = re.compile(r"^[0-9a-f]{40,64}$")
 _INCLUDED_SUFFIXES = (".py", ".json", ".toml", ".yaml", ".yml")
 _EXCLUDED_DIR_NAMES = frozenset(
     {
@@ -140,6 +145,74 @@ class SourceFileSet(ContractModel):
         return self
 
 
+class SourceSnapshot(ContractModel):
+    """One bounded source identity and its separate commit eligibility.
+
+    The file-set fingerprint describes exact captured bytes. ``commit_bindable``
+    answers the narrower, independent question of whether every one of those
+    bytes is present identically in ``git_revision``. It is false for non-Git
+    targets and for allowed ignored source that is outside the named commit.
+    """
+
+    schema_version: Literal["agentcheck.source_snapshot.v1"] = (
+        SOURCE_SNAPSHOT_CONTRACT_VERSION
+    )
+    git_revision: str | None = Field(default=None, max_length=64)
+    entrypoint_path: str = Field(min_length=1, max_length=500)
+    entrypoint_digest: str = Field(min_length=8, max_length=80)
+    file_set: SourceFileSet
+    commit_bindable: bool
+    commit_unbound_paths: tuple[str, ...] = Field(max_length=MAX_SOURCE_FILES)
+    fingerprint: str = ""
+
+    def expected_fingerprint(self) -> str:
+        return canonical_hash(self.model_dump(mode="json", exclude={"fingerprint"}))
+
+    @model_validator(mode="after")
+    def validate_snapshot(self) -> "SourceSnapshot":
+        if (
+            self.git_revision is not None
+            and _GIT_REVISION_RE.fullmatch(self.git_revision) is None
+        ):
+            raise ValueError("git_revision must be a full lowercase hex object name")
+        if not _is_safe_relative_path(self.entrypoint_path):
+            raise ValueError("entrypoint_path must be a safe relative source path")
+        if not self.entrypoint_digest.startswith("sha256:"):
+            raise ValueError("entrypoint_digest must be a sha256 digest")
+        entries = {item.path: item.digest for item in self.file_set.files}
+        if entries.get(self.entrypoint_path) != self.entrypoint_digest:
+            raise ValueError(
+                "entrypoint digest must match the captured source file-set entry"
+            )
+        if tuple(sorted(self.commit_unbound_paths)) != self.commit_unbound_paths:
+            raise ValueError("commit-unbound source paths must be sorted")
+        if len(self.commit_unbound_paths) != len(set(self.commit_unbound_paths)):
+            raise ValueError("commit-unbound source paths must be unique")
+        if any(path not in entries for path in self.commit_unbound_paths):
+            raise ValueError("commit-unbound paths must belong to the source file-set")
+        expected_bindable = (
+            self.git_revision is not None and not self.commit_unbound_paths
+        )
+        if self.commit_bindable != expected_bindable:
+            raise ValueError(
+                "commit_bindable must reflect the revision and commit-unbound paths"
+            )
+        expected = self.expected_fingerprint()
+        if self.fingerprint and not _digest_equal(self.fingerprint, expected):
+            raise ValueError("source snapshot fingerprint does not match its contents")
+        if not self.fingerprint:
+            object.__setattr__(self, "fingerprint", expected)
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class _GitSourcePaths:
+    committed: tuple[str, ...]
+    tracked: tuple[str, ...]
+    untracked: tuple[str, ...]
+    ignored: tuple[str, ...]
+
+
 def collect_source_file_set(root: Path) -> SourceFileSet:
     """Inventory relevant files under ``root`` without importing the target.
 
@@ -190,6 +263,80 @@ def collect_source_file_set(root: Path) -> SourceFileSet:
     return SourceFileSet(mode=mode, complete=True, files=entries)
 
 
+def build_source_snapshot(
+    root: Path,
+    *,
+    git_revision: str | None,
+    entrypoint_path: str,
+    entrypoint_digest: str,
+) -> SourceSnapshot:
+    """Capture source bytes and prove their separate named-commit eligibility.
+
+    This is an endpoint check for ordinary trusted-code operation. It does not
+    claim an immutable filesystem or detect a transient/ABA change between
+    captures.
+    """
+
+    resolved = root.resolve()
+    git_paths = _git_source_paths(resolved, git_revision=git_revision)
+    if git_revision is not None:
+        if git_paths is None:
+            raise ConfigurationError(
+                "unable to bind the source snapshot to the named git revision"
+            )
+        if git_paths.untracked:
+            raise ConfigurationError(
+                "relevant non-ignored untracked source is not commit-bound: "
+                f"{git_paths.untracked[0]}"
+            )
+
+    file_set = collect_source_file_set(resolved)
+    entries = {item.path: item.digest for item in file_set.files}
+    if entries.get(entrypoint_path) != entrypoint_digest:
+        raise ConfigurationError(
+            "entrypoint source changed while the initial snapshot was captured"
+        )
+
+    if git_revision is None:
+        commit_unbound_paths = tuple(item.path for item in file_set.files)
+    else:
+        assert git_paths is not None
+        committed_paths = set(git_paths.committed)
+        staged_additions = sorted(set(git_paths.tracked) - committed_paths)
+        if staged_additions:
+            raise ConfigurationError(
+                "tracked source is absent from git revision "
+                f"{git_revision}: {staged_additions[0]}"
+            )
+        for path in git_paths.committed:
+            live_digest = entries.get(path)
+            if live_digest is None:
+                raise ConfigurationError(
+                    "committed source is absent from the bounded working file-set: "
+                    f"{path}"
+                )
+            committed_digest = _git_blob_digest(resolved, git_revision, path)
+            if committed_digest is None:
+                raise ConfigurationError(
+                    f"tracked source is absent from git revision {git_revision}: {path}"
+                )
+            if not _digest_equal(live_digest, committed_digest):
+                raise ConfigurationError(
+                    "tracked source bytes differ from git revision "
+                    f"{git_revision}: {path}"
+                )
+        commit_unbound_paths = git_paths.ignored
+
+    return SourceSnapshot(
+        git_revision=git_revision,
+        entrypoint_path=entrypoint_path,
+        entrypoint_digest=entrypoint_digest,
+        file_set=file_set,
+        commit_bindable=git_revision is not None and not commit_unbound_paths,
+        commit_unbound_paths=commit_unbound_paths,
+    )
+
+
 def describe_file_set_mismatch(bound: SourceFileSet, live: SourceFileSet) -> str:
     """Return a fail-closed reason when two inventories are not identical."""
 
@@ -215,6 +362,27 @@ def describe_file_set_mismatch(bound: SourceFileSet, live: SourceFileSet) -> str
             f"source inventory mode {live.mode} does not match bound mode {bound.mode}"
         )
     return "source file-set fingerprint does not match the replay manifest"
+
+
+def describe_source_snapshot_mismatch(
+    bound: SourceSnapshot, live: SourceSnapshot
+) -> str:
+    """Return a bounded reason when two endpoint snapshots are not identical."""
+
+    if _digest_equal(bound.fingerprint, live.fingerprint):
+        return ""
+    if bound.git_revision != live.git_revision:
+        return "git revision changed since the initial source snapshot"
+    reason = describe_file_set_mismatch(bound.file_set, live.file_set)
+    if reason:
+        return reason
+    if bound.entrypoint_digest != live.entrypoint_digest:
+        return "entrypoint source changed since the initial source snapshot"
+    if bound.commit_bindable != live.commit_bindable:
+        return "source commit bindability changed since the initial snapshot"
+    if bound.commit_unbound_paths != live.commit_unbound_paths:
+        return "commit-unbound source paths changed since the initial snapshot"
+    return "source snapshot fingerprint does not match the initial capture"
 
 
 def _normalize_relative(relative: str) -> str:
@@ -370,6 +538,45 @@ def _git_z_paths(root: Path, extra_args: list[str]) -> tuple[str, ...] | None:
     return tuple(paths)
 
 
+def _git_source_paths(
+    root: Path, *, git_revision: str | None
+) -> _GitSourcePaths | None:
+    """Classify relevant Git paths without hashing or importing target code."""
+
+    tracked = _git_z_paths(root, ["ls-files", "-z", "--", "."])
+    if tracked is None:
+        return None
+    untracked = _git_z_paths(
+        root,
+        ["ls-files", "-z", "--others", "--exclude-standard", "--", "."],
+    )
+    ignored = _git_z_paths(
+        root,
+        ["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--", "."],
+    )
+    if untracked is None or ignored is None:
+        raise ConfigurationError(
+            "unable to classify tracked, untracked, and ignored source files"
+        )
+    committed: tuple[str, ...] = ()
+    if git_revision is not None:
+        committed_raw = _git_z_paths(
+            root,
+            ["ls-tree", "-r", "-z", "--name-only", git_revision, "--", "."],
+        )
+        if committed_raw is None:
+            raise ConfigurationError(
+                "unable to inventory source paths from the named git revision"
+            )
+        committed = tuple(sorted(_select_relevant_paths(committed_raw, root=root)))
+    return _GitSourcePaths(
+        committed=committed,
+        tracked=tuple(sorted(_select_relevant_paths(tracked, root=root))),
+        untracked=tuple(sorted(_select_relevant_paths(untracked, root=root))),
+        ignored=tuple(sorted(_select_relevant_paths(ignored, root=root))),
+    )
+
+
 def _local_paths(root: Path) -> tuple[str, ...]:
     collected: list[str] = []
     root_resolved = root.resolve()
@@ -445,6 +652,61 @@ def _hash_contained_file(root: Path, relative: str) -> str:
     return f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
 
+def _git_blob_digest(root: Path, revision: str, relative: str) -> str | None:
+    """Hash one exact commit blob, bounded independently from working bytes."""
+
+    if _GIT_REVISION_RE.fullmatch(revision) is None:
+        raise ConfigurationError("git revision is not a full lowercase hex object name")
+    if not _is_safe_relative_path(relative):
+        raise ConfigurationError(
+            f"source file path is not a safe relative path: {relative}"
+        )
+    object_name = f"{revision}:./{relative}"
+    try:
+        size_result = subprocess.run(
+            ["git", "-C", str(root), "cat-file", "-s", object_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=git_command_env(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ConfigurationError(
+            f"unable to inspect committed source file {relative}: {exc}"
+        ) from exc
+    if size_result.returncode != 0:
+        return None
+    try:
+        size = int(size_result.stdout.strip())
+    except ValueError as exc:
+        raise ConfigurationError(
+            f"git returned an invalid size for committed source file {relative}"
+        ) from exc
+    if size > MAX_SOURCE_FILE_BYTES:
+        raise ConfigurationError(
+            f"committed source file {relative} exceeds the "
+            f"{MAX_SOURCE_FILE_BYTES} byte bound"
+        )
+    try:
+        blob_result = subprocess.run(
+            ["git", "-C", str(root), "cat-file", "blob", object_name],
+            check=False,
+            capture_output=True,
+            timeout=5,
+            env=git_command_env(),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ConfigurationError(
+            f"unable to read committed source file {relative}: {exc}"
+        ) from exc
+    if blob_result.returncode != 0 or len(blob_result.stdout) != size:
+        raise ConfigurationError(
+            f"unable to read the complete committed source file {relative}"
+        )
+    return f"sha256:{hashlib.sha256(blob_result.stdout).hexdigest()}"
+
+
 def omit_absent_file_set(data: dict[str, Any]) -> dict[str, Any]:
     """Drop a missing file-set so Slice 1 manifests keep their fingerprints."""
 
@@ -467,10 +729,14 @@ __all__ = [
     "MAX_SOURCE_FILES",
     "MAX_WALK_DEPTH",
     "SOURCE_FILE_SET_CONTRACT_VERSION",
+    "SOURCE_SNAPSHOT_CONTRACT_VERSION",
     "SourceFileEntry",
     "SourceFileSet",
+    "SourceSnapshot",
+    "build_source_snapshot",
     "collect_source_file_set",
     "describe_file_set_mismatch",
+    "describe_source_snapshot_mismatch",
     "git_command_env",
     "omit_absent_file_set",
 ]
