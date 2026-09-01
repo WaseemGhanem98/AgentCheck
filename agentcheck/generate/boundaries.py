@@ -51,6 +51,7 @@ from agentcheck.inspect.capabilities import (
     JsonSchemaType,
     extract_capabilities,
 )
+from agentcheck.privacy import redact_log_text
 from agentcheck.schema_safety import offline_validator
 
 
@@ -747,7 +748,17 @@ def _positive_request(tool: ToolDefinition, arguments: JsonObject) -> str:
     only way the resulting trajectory says anything about the agent.
     """
 
-    action = (tool.description or "").strip() or f"Please {_humanise(tool.name)}."
+    description = (tool.description or "").strip()
+    # A declared description can contain credential-shaped text even when the
+    # tool schema itself is safe. Copying that text into a generated request
+    # makes the artifact boundary reject the entire suite. Never redact in
+    # place (that would change the declaration's meaning and fingerprint);
+    # omit the lossy description and use the existing tool-name fallback.
+    action = (
+        description
+        if description and redact_log_text(description) == description
+        else f"Please {_humanise(tool.name)}."
+    )
     if not action.endswith((".", "!", "?")):
         action = f"{action}."
     if not arguments:

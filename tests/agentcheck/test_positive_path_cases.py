@@ -23,6 +23,7 @@ from agentcheck.adapters import OpenAIAgentsAdapter
 from agentcheck.config import AgentCheckConfig
 from agentcheck.generate.boundaries import build_positive_path_cases
 from agentcheck.generate.suite import CaseOrigin, build_frozen_suite
+from agentcheck.privacy import redact_log_text
 from agentcheck.schema_safety import offline_validator
 
 
@@ -104,6 +105,39 @@ def test_the_request_asks_for_the_action_without_naming_the_tool_call() -> None:
     # Supplies the values rather than commanding a call.
     assert "confirmation_number is" in content
     assert "Use the update_seat tool with exactly these arguments" not in content
+
+
+def test_credential_shaped_tool_description_falls_back_without_weakening_redaction() -> None:
+    """A lossy declaration must not make an otherwise safe suite unfreezable."""
+
+    @function_tool
+    def add_emoji_reaction(emoji_name: str) -> str:
+        """Add an emoji reaction.
+
+        Login/password: key, lock, closed_lock_with_key
+        """
+        raise AssertionError("original handler must never run")
+
+    literal = "Login/password: key, lock, closed_lock_with_key"
+
+    # The redaction boundary remains conservative for both the public-repo
+    # collision and an unmistakable credential assignment.
+    assert redact_log_text(literal) == (
+        "Login/password: [REDACTED], lock, closed_lock_with_key"
+    )
+    assert redact_log_text("password=actual-secret-value") == "password=[REDACTED]"
+
+    suite = build_frozen_suite(
+        _spec(add_emoji_reaction), AgentCheckConfig(), seed=1729
+    )
+    positive = next(
+        case for case in suite.cases if case.lineage.origin is CaseOrigin.POSITIVE_PATH
+    )
+
+    assert positive.scenario.conversation_turns[0].content.startswith(
+        "Please add emoji reaction."
+    )
+    assert literal not in positive.scenario.conversation_turns[0].content
 
 
 def test_declining_to_call_is_not_a_defect() -> None:
