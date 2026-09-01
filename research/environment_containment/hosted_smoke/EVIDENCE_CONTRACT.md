@@ -72,10 +72,14 @@ and the reviewer must also retain the GitHub `Set up job` runner-image block:
    exact `/proc/<pid>/exe` path, and a SHA-512 matching one frozen gVisor
    executable;
 7. no bind mount, `network=none`, read-only root, non-privileged state, benign
-   fixed stdout, and container exit code zero;
+   fixed stdout, exact numeric `Config.User=65532:65532`, exact applied
+   `CapDrop=["ALL"]` and `SecurityOpt=["no-new-privileges"]`, a private `/tmp`
+   tmpfs writable only by that UID:GID, and container exit code zero;
 8. automatic container removal, zero remaining frozen-gVisor processes,
-   runtime unregistration, image removal, frozen gVisor file removal, temporary
-   download/extraction directory removal, and unchanged sentinel SHA-256.
+   runtime unregistration, byte/owner/mode restoration of the prior Docker
+   daemon config and its backup (including prior absence), truthful final image
+   presence, frozen gVisor file removal, temporary download/extraction directory
+   removal, and unchanged sentinel SHA-256.
 
 In-container `dmesg` is neither invoked nor accepted as runtime identity.
 Target stdout would be untrusted in M2; here the fixed benign stdout is only a
@@ -85,11 +89,14 @@ liveness receipt and never substitutes for host-side runtime proof.
 
 Any download, key, signature, metadata, package, version, archive, sidecar,
 runtime registration, `systrap`, OCI identity, container, host-process,
-sentinel, exit, removal, residual-process, runtime-unregistration, or image-
-cleanup mismatch makes the job fail. This includes a remaining temporary
-download/extraction directory. Cleanup runs on every exit and cannot turn an
-earlier error into success. There is no retry through another runtime, no
-standalone runsc execution mode, and no trusted-subprocess path.
+numeric user, applied capability/security option, private-tmpfs, sentinel,
+exit, removal, residual-process, runtime-unregistration, daemon-config/backup
+restoration, or owned-image cleanup mismatch makes the job fail. A pre-existing
+image fails before execution, remains untouched, and is truthfully receipted as
+present rather than misreported as cleaned. A remaining temporary download/
+extraction directory also fails cleanup. Cleanup runs on every exit and cannot
+turn an earlier error into success. There is no retry through another runtime,
+no standalone runsc execution mode, and no trusted-subprocess path.
 
 ## Interpretation
 

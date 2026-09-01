@@ -106,6 +106,8 @@
     "config_digest": "sha256:4a7066d275a270e82ae35c51c7beed7167a9e23713d8b95ea5a5dc5c229d60aa",
     "os": "linux",
     "architecture": "amd64",
+    "execution_user": "65532:65532",
+    "private_tmpfs": "/tmp:rw,nosuid,nodev,noexec,size=16m,uid=65532,gid=65532,mode=0700",
     "descriptive_version": "3.12.14-slim-bookworm",
     "source_revision": "f2c5d1b8a6adecb5b00b3c9331d4f863beade6b3"
   }

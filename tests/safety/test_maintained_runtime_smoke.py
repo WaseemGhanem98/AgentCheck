@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -46,6 +47,12 @@ def _smoke_script(workflow: dict[Any, Any]) -> str:
     script = steps[0]["run"]
     assert isinstance(script, str)
     return script
+
+
+def _bash_function(script: str, name: str) -> str:
+    match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{\n.*?^\}}\n", script)
+    assert match is not None, f"missing Bash function {name}"
+    return match.group(0)
 
 
 def test_workflow_is_manual_tokenless_and_actionless() -> None:
@@ -169,6 +176,8 @@ def test_workflow_matches_every_frozen_input() -> None:
     assert env["OCI_CONFIG_DIGEST"] == oci["config_digest"]
     assert oci["os"] == "linux"
     assert oci["architecture"] == "amd64"
+    assert env["CONTAINER_USER"] == oci["execution_user"] == "65532:65532"
+    assert env["CONTAINER_TMPFS"] == oci["private_tmpfs"]
 
 
 def test_script_is_syntactically_valid_and_has_no_fallback_path() -> None:
@@ -183,7 +192,7 @@ def test_script_is_syntactically_valid_and_has_no_fallback_path() -> None:
     )
     assert result.returncode == 0, result.stderr
     python_blocks = re.findall(r"<<'PY'\n(.*?)\nPY", script, re.DOTALL)
-    assert len(python_blocks) == 5
+    assert len(python_blocks) == 6
     for index, block in enumerate(python_blocks, start=1):
         compile(block, f"maintained-runtime-smoke-heredoc-{index}.py", "exec")
     assert script.startswith("set -Eeuo pipefail\n")
@@ -203,8 +212,12 @@ def test_script_is_syntactically_valid_and_has_no_fallback_path() -> None:
     assert 'docker pull --platform linux/amd64 "$OCI_IMAGE"' in script
     assert "--network none" in script
     assert "--read-only" in script
+    assert '--user "$CONTAINER_USER"' in script
     assert "--cap-drop ALL" in script
     assert "--security-opt no-new-privileges" in script
+    assert '--tmpfs "$CONTAINER_TMPFS"' in script
+    assert "os.getuid(), os.getgid()" in script
+    assert 'tempfile.mkstemp(dir="/tmp")' in script
     assert "--mount" not in script
     assert "--volume" not in script
     assert "dmesg" not in script
@@ -258,6 +271,8 @@ def test_evidence_and_cleanup_contract_are_complete_and_bounded() -> None:
         "docker_runtime_name",
         "docker_runtime_path",
         "docker_runtime_platform",
+        "daemon_config_before_state",
+        "daemon_backup_before_state",
         "oci_manifest_digest",
         "oci_config_digest",
         "oci_platform",
@@ -266,6 +281,10 @@ def test_evidence_and_cleanup_contract_are_complete_and_bounded() -> None:
         "container_host_executable",
         "container_host_executable_sha512",
         "live_gvisor_processes",
+        "container_user",
+        "container_cap_drop",
+        "container_security_opt",
+        "container_tmpfs",
         "container_exit",
         "container_removed",
         "post_container_gvisor_processes",
@@ -275,6 +294,8 @@ def test_evidence_and_cleanup_contract_are_complete_and_bounded() -> None:
         "cleanup_container_absent",
         "cleanup_residual_gvisor_processes",
         "cleanup_runtime_absent",
+        "cleanup_daemon_config_restored",
+        "cleanup_daemon_backup_restored",
         "cleanup_image_absent",
         "cleanup_gvisor_files_absent",
         "cleanup_work_dir_absent",
@@ -304,3 +325,116 @@ def test_evidence_and_cleanup_contract_are_complete_and_bounded() -> None:
         "all hosted/runtime outcomes are **NOT PROVEN**",
     ):
         assert limitation in normalized_contract
+
+
+def test_preexisting_image_failure_receipt_is_false_and_job_stays_failed(
+    tmp_path: pathlib.Path,
+) -> None:
+    script = _smoke_script(_load_workflow())
+    prefix, separator, _ = script.partition("trap cleanup EXIT\n")
+    assert separator
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(
+        """#!/usr/bin/env bash
+set -Eeuo pipefail
+if [[ "$1 $2" == "container inspect" ]]; then
+  exit 1
+fi
+if [[ "$1" == "info" ]]; then
+  printf '%s\\n' '{"runc":{}}'
+  exit 0
+fi
+if [[ "$1 $2" == "image inspect" ]]; then
+  exit 0
+fi
+printf 'unexpected fake docker invocation: %s\\n' "$*" >&2
+exit 97
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    harness = (
+        prefix
+        + separator
+        + "count_gvisor_processes() { printf '0\\n'; }\n"
+        + 'if docker image inspect "$OCI_IMAGE" >/dev/null 2>&1; then\n'
+        + '  fail "frozen OCI image unexpectedly exists before the smoke"\n'
+        + "fi\n"
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_RUN_ID": "1",
+            "GITHUB_RUN_ATTEMPT": "1",
+            "RUNTIME_NAME": "ac-smoke-runsc",
+            "OCI_IMAGE": "docker.io/library/python@sha256:" + "a" * 64,
+        }
+    )
+    result = subprocess.run(
+        ["bash"],
+        input=harness,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "AC_SMOKE_EVIDENCE_V1\tcleanup_image_absent\tfalse" in result.stdout
+    assert "AC_SMOKE_EVIDENCE_V1\tsmoke_original_exit\t1" in result.stdout
+    assert "AC_SMOKE_EVIDENCE_V1\tsmoke_cleanup_exit\t0" in result.stdout
+    assert not list(tmp_path.glob("ac-maintained-runtime-smoke.*"))
+
+
+def test_daemon_state_restore_helper_preserves_prior_or_absent_state(
+    tmp_path: pathlib.Path,
+) -> None:
+    script = _smoke_script(_load_workflow())
+    state_function = _bash_function(script, "daemon_path_state")
+    restore_function = _bash_function(script, "restore_daemon_path")
+    config = tmp_path / "daemon.json"
+    snapshot = tmp_path / "daemon.json.before"
+    backup = tmp_path / "daemon.json~"
+    snapshot.write_text('{"prior":true}\n', encoding="utf-8")
+    snapshot.chmod(0o640)
+    config.write_text('{"mutated":true}\n', encoding="utf-8")
+    backup.write_text('{"run-created":true}\n', encoding="utf-8")
+
+    harness = f"""set -Eeuo pipefail
+sudo() {{ "$@"; }}
+{state_function}
+{restore_function}
+expected="$(daemon_path_state {snapshot})"
+restore_daemon_path {config} {snapshot} "$expected"
+[[ "$(daemon_path_state {config})" == "$expected" ]]
+restore_daemon_path {backup} {tmp_path / "unused"} absent
+[[ ! -e {backup} ]]
+"""
+    result = subprocess.run(
+        ["bash"],
+        input=harness,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+    cleanup = _bash_function(script, "cleanup")
+    assert cleanup.index("runsc uninstall --runtime") < cleanup.index(
+        "restore_daemon_path"
+    )
+    assert "$DOCKER_DAEMON_BACKUP" in cleanup
+    assert "daemon_config_restored=true" in cleanup
+    assert "daemon_backup_restored=true" in cleanup
+    for required in (
+        'daemon_config_before_state="$(daemon_path_state',
+        'daemon_backup_before_state="$(daemon_path_state',
+        '"$WORK_DIR/daemon.json.before"',
+        '"$WORK_DIR/daemon.json-backup.before"',
+        "daemon_state_captured=1",
+    ):
+        assert required in script

@@ -46,6 +46,8 @@ jobs:
       OCI_IMAGE: docker.io/library/python@sha256:4427763a1ba36f5aa8f656a03e5d00f3b8d61f5dd950c73df6c14f8c7640f8ab
       OCI_MANIFEST_DIGEST: sha256:4427763a1ba36f5aa8f656a03e5d00f3b8d61f5dd950c73df6c14f8c7640f8ab
       OCI_CONFIG_DIGEST: sha256:4a7066d275a270e82ae35c51c7beed7167a9e23713d8b95ea5a5dc5c229d60aa
+      CONTAINER_USER: "65532:65532"
+      CONTAINER_TMPFS: /tmp:rw,nosuid,nodev,noexec,size=16m,uid=65532,gid=65532,mode=0700
 
     steps:
       - name: Verify, run, and tear down the frozen harmless smoke
@@ -58,12 +60,17 @@ jobs:
           EVIDENCE="$WORK_DIR/evidence.tsv"
           SENTINEL="$RUNNER_TEMP/ac-host-sentinel-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           CONTAINER_NAME="ac-harmless-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          DOCKER_DAEMON_CONFIG=/etc/docker/daemon.json
+          DOCKER_DAEMON_BACKUP=/etc/docker/daemon.json~
           runtime_registered=0
           gvisor_installed=0
           image_pulled=0
           container_owned=0
           sentinel_owned=0
           sentinel_before=missing
+          daemon_state_captured=0
+          daemon_config_before_state=not-captured
+          daemon_backup_before_state=not-captured
 
           emit() {
             local key="$1"
@@ -108,6 +115,31 @@ jobs:
             [[ "$actual" == "$expected" ]] || fail "SHA-512 mismatch for $path"
           }
 
+          daemon_path_state() {
+            local path="$1"
+            local digest metadata
+            if ! sudo test -e "$path"; then
+              printf '%s\n' absent
+              return 0
+            fi
+            digest="$(sudo sha256sum "$path" | awk '{print $1}')"
+            metadata="$(sudo stat --format='%u:%g:%a' "$path")"
+            printf 'sha256=%s,uid-gid-mode=%s\n' "$digest" "$metadata"
+          }
+
+          restore_daemon_path() {
+            local path="$1"
+            local snapshot="$2"
+            local expected_state="$3"
+            if [[ "$expected_state" == "absent" ]]; then
+              sudo rm -f -- "$path" || return 1
+            else
+              sudo rm -f -- "$path" || return 1
+              sudo cp --archive --no-dereference "$snapshot" "$path" || return 1
+            fi
+            [[ "$(daemon_path_state "$path")" == "$expected_state" ]]
+          }
+
           count_gvisor_processes() {
             local count=0
             local link target
@@ -134,6 +166,8 @@ jobs:
             local image_absent=false
             local gvisor_files_absent=false
             local work_dir_absent=false
+            local daemon_config_restored=not-captured
+            local daemon_backup_restored=not-captured
             trap - EXIT
             set +e
 
@@ -153,6 +187,28 @@ jobs:
               if ! sudo /usr/local/bin/runsc uninstall --runtime "$RUNTIME_NAME"; then
                 cleanup_rc=1
               fi
+            fi
+            if [[ "$daemon_state_captured" == "1" ]]; then
+              daemon_config_restored=false
+              daemon_backup_restored=false
+              if restore_daemon_path \
+                  "$DOCKER_DAEMON_CONFIG" \
+                  "$WORK_DIR/daemon.json.before" \
+                  "$daemon_config_before_state"; then
+                daemon_config_restored=true
+              else
+                cleanup_rc=1
+              fi
+              if restore_daemon_path \
+                  "$DOCKER_DAEMON_BACKUP" \
+                  "$WORK_DIR/daemon.json-backup.before" \
+                  "$daemon_backup_before_state"; then
+                daemon_backup_restored=true
+              else
+                cleanup_rc=1
+              fi
+            fi
+            if [[ "$runtime_registered" == "1" ]]; then
               if ! sudo systemctl reload docker.service; then
                 cleanup_rc=1
               fi
@@ -181,12 +237,8 @@ jobs:
                   cleanup_rc=1
                 fi
               fi
-              if docker image inspect "$OCI_IMAGE" >/dev/null 2>&1; then
-                cleanup_rc=1
-              else
-                image_absent=true
-              fi
-            else
+            fi
+            if ! docker image inspect "$OCI_IMAGE" >/dev/null 2>&1; then
               image_absent=true
             fi
 
@@ -227,6 +279,8 @@ jobs:
             emit cleanup_container_absent "$container_absent"
             emit cleanup_residual_gvisor_processes "$remaining"
             emit cleanup_runtime_absent "$runtime_absent"
+            emit cleanup_daemon_config_restored "$daemon_config_restored"
+            emit cleanup_daemon_backup_restored "$daemon_backup_restored"
             emit cleanup_image_absent "$image_absent"
             emit cleanup_gvisor_files_absent "$gvisor_files_absent"
             emit cleanup_sentinel_sha256 "$after_hash"
@@ -474,6 +528,14 @@ jobs:
           runsc_version="$(/usr/local/bin/runsc --version)"
           [[ "$runsc_version" == $'runsc version release-20260817.0\nspec: 1.2.1' ]] \
             || fail "runsc version output mismatch"
+          for path in "$DOCKER_DAEMON_CONFIG" "$DOCKER_DAEMON_BACKUP"; do
+            if sudo test -L "$path"; then
+              fail "Docker daemon state path is a symlink: $path"
+            fi
+            if sudo test -e "$path" && ! sudo test -f "$path"; then
+              fail "Docker daemon state path is not a regular file: $path"
+            fi
+          done
           python3 - "$RUNTIME_NAME" <<'PY'
           import json
           import pathlib
@@ -485,6 +547,25 @@ jobs:
           if runtime_name in (config.get("runtimes") or {}):
               raise SystemExit(f"runtime name already exists: {runtime_name}")
           PY
+          daemon_config_before_state="$(daemon_path_state "$DOCKER_DAEMON_CONFIG")"
+          daemon_backup_before_state="$(daemon_path_state "$DOCKER_DAEMON_BACKUP")"
+          if [[ "$daemon_config_before_state" != "absent" ]]; then
+            sudo cp --archive --no-dereference \
+              "$DOCKER_DAEMON_CONFIG" "$WORK_DIR/daemon.json.before"
+            [[ "$(daemon_path_state "$WORK_DIR/daemon.json.before")" \
+              == "$daemon_config_before_state" ]] \
+              || fail "Docker daemon config snapshot mismatch"
+          fi
+          if [[ "$daemon_backup_before_state" != "absent" ]]; then
+            sudo cp --archive --no-dereference \
+              "$DOCKER_DAEMON_BACKUP" "$WORK_DIR/daemon.json-backup.before"
+            [[ "$(daemon_path_state "$WORK_DIR/daemon.json-backup.before")" \
+              == "$daemon_backup_before_state" ]] \
+              || fail "Docker daemon backup snapshot mismatch"
+          fi
+          daemon_state_captured=1
+          emit daemon_config_before_state "$daemon_config_before_state"
+          emit daemon_backup_before_state "$daemon_backup_before_state"
           runtime_registered=1
           sudo /usr/local/bin/runsc install \
             --runtime "$RUNTIME_NAME" \
@@ -586,14 +667,15 @@ jobs:
               --runtime "$RUNTIME_NAME" \
               --network none \
               --read-only \
+              --user "$CONTAINER_USER" \
               --cap-drop ALL \
               --security-opt no-new-privileges \
               --pids-limit 32 \
               --memory 192m \
               --cpus 1 \
-              --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m \
+              --tmpfs "$CONTAINER_TMPFS" \
               "$OCI_IMAGE" \
-              python -B -c 'import time; print("harmless-runtime-smoke-ready", flush=True); time.sleep(20)'
+              python -B -c 'import os, tempfile, time; assert (os.getuid(), os.getgid()) == (65532, 65532); handle, path = tempfile.mkstemp(dir="/tmp"); os.write(handle, b"ok"); os.close(handle); os.unlink(path); print("harmless-runtime-smoke-ready", flush=True); time.sleep(20)'
           )"
           container_owned=1
           [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || fail "invalid container ID"
@@ -619,6 +701,30 @@ jobs:
           [[ "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$CONTAINER_NAME")" == "none" ]]
           [[ "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$CONTAINER_NAME")" == "true" ]]
           [[ "$(docker inspect --format '{{.HostConfig.Privileged}}' "$CONTAINER_NAME")" == "false" ]]
+          container_user="$(docker inspect --format '{{.Config.User}}' "$CONTAINER_NAME")"
+          container_cap_drop="$(docker inspect --format '{{json .HostConfig.CapDrop}}' "$CONTAINER_NAME")"
+          container_security_opt="$(docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$CONTAINER_NAME")"
+          container_tmpfs="$(docker inspect --format '{{json .HostConfig.Tmpfs}}' "$CONTAINER_NAME")"
+          [[ "$container_user" == "$CONTAINER_USER" ]] \
+            || fail "container numeric user mismatch"
+          python3 - \
+            "$container_cap_drop" \
+            "$container_security_opt" \
+            "$container_tmpfs" <<'PY'
+          import json
+          import sys
+
+          cap_drop, security_opt, tmpfs = map(json.loads, sys.argv[1:])
+          if cap_drop != ["ALL"]:
+              raise SystemExit(f"container CapDrop mismatch: {cap_drop!r}")
+          if security_opt != ["no-new-privileges"]:
+              raise SystemExit(f"container SecurityOpt mismatch: {security_opt!r}")
+          expected_tmpfs = (
+              "rw,nosuid,nodev,noexec,size=16m,uid=65532,gid=65532,mode=0700"
+          )
+          if tmpfs != {"/tmp": expected_tmpfs}:
+              raise SystemExit(f"container tmpfs mismatch: {tmpfs!r}")
+          PY
 
           host_pid="$(docker inspect --format '{{.State.Pid}}' "$CONTAINER_NAME")"
           [[ "$host_pid" =~ ^[1-9][0-9]*$ ]] || fail "Docker host PID is invalid"
@@ -663,6 +769,10 @@ jobs:
           emit container_network none
           emit container_root_read_only true
           emit container_privileged false
+          emit container_user "$container_user"
+          emit container_cap_drop "$container_cap_drop"
+          emit container_security_opt "$container_security_opt"
+          emit container_tmpfs "$container_tmpfs"
           emit container_stdout "$container_logs"
 
           container_exit="$(docker wait "$CONTAINER_NAME")"
