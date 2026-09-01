@@ -23,7 +23,7 @@ from agentcheck.adapters import OpenAIAgentsAdapter
 from agentcheck.config import AgentCheckConfig
 from agentcheck.generate.boundaries import build_positive_path_cases
 from agentcheck.generate.suite import CaseOrigin, build_frozen_suite
-from agentcheck.inspect.capabilities import extract_capabilities
+from agentcheck.inspect.capabilities import JsonSchemaType, extract_capabilities
 from agentcheck.schema_safety import offline_validator
 
 
@@ -192,15 +192,30 @@ def test_schema_union_matrix_preserves_known_types_and_unknowns() -> None:
         for tool in (scalar, nullable_scalar, array, nullable_array, unsupported_union)
     ]
     case_counts = [len(_positive(spec)) for spec in specs]
-    types_known = [
+    parameter_types = [
         extract_capabilities([spec.tools.items[0].value])[0]
         .arguments.parameters[0]
-        .types_known
+        .types
         for spec in specs
     ]
+    nullable_array_definition = specs[3].tools.items[0].value
+    nullable_array_arguments = _positive(specs[3])[0].allowed_tool_behavior[
+        0
+    ].arguments_match
 
     assert case_counts == [1, 1, 1, 1, 0]
-    assert types_known == [True, True, True, True, False]
+    assert parameter_types == [
+        (JsonSchemaType.STRING,),
+        (JsonSchemaType.NULL, JsonSchemaType.STRING),
+        (JsonSchemaType.ARRAY,),
+        (JsonSchemaType.ARRAY, JsonSchemaType.NULL),
+        (),
+    ]
+    assert nullable_array_arguments == {"value": []}
+    assert isinstance(nullable_array_arguments["value"], list)
+    assert offline_validator(nullable_array_definition.input_schema).is_valid(
+        dict(nullable_array_arguments)
+    )
 
 
 def test_a_zero_parameter_tool_has_a_constructible_baseline() -> None:
