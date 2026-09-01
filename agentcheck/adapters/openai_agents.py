@@ -2492,21 +2492,33 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
                 )
             )
         if type(target) is not Agent:
+            target_type = type(target)
+            is_sdk_sandbox_agent = (
+                target_type.__module__ == "agents.sandbox.sandbox_agent"
+                and target_type.__name__ == "SandboxAgent"
+            )
             guess = guess_other_adapter(target)
             suggestion = (
-                f" The configured entrypoint resolved to {type(target).__module__}."
-                f"{type(target).__name__}, which looks like a {guess!r} target; "
+                f" The configured entrypoint resolved to {target_type.__module__}."
+                f"{target_type.__name__}, which looks like a {guess!r} target; "
                 f'set "adapter": {guess!r} in agentcheck.json instead.'
                 if guess is not None and guess != FRAMEWORK_NAME
                 else ""
             )
+            message = "Phase 1 requires an exact agents.Agent instance." + suggestion
+            if is_sdk_sandbox_agent:
+                message = (
+                    "Behavioral execution is not authorized for SDK SandboxAgent "
+                    "targets because their runtime-materialized sandbox capability "
+                    "surface is outside this adapter's safely replaceable and observed "
+                    "exact FunctionTool contract. Use an exact ordinary agents.Agent "
+                    "target with exact FunctionTool tools."
+                )
             issues.append(
                 SupportIssue(
                     code="unsupported_agent_type",
-                    message=(
-                        "Phase 1 requires an exact agents.Agent instance." + suggestion
-                    ),
-                    location=type(target).__name__,
+                    message=message,
+                    location=target_type.__name__,
                 )
             )
             return PreflightReport(framework=FRAMEWORK_NAME, issues=tuple(issues))

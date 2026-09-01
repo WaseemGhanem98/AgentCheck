@@ -12,6 +12,7 @@ from agents.handoffs import Handoff
 from agents.items import ModelResponse, TResponseInputItem, TResponseStreamEvent
 from agents.model_settings import ModelSettings
 from agents.models.interface import ModelTracing
+from agents.sandbox import SandboxAgent
 from agents.tool import Tool
 from agents.usage import Usage
 from openai.types.responses import (
@@ -435,6 +436,70 @@ def test_unsupported_tool_fails_preflight_before_model_execution() -> None:
     with pytest.raises(UnsupportedTargetError):
         adapter.prepare(agent, RecordingGateway())
     assert model.calls == 0
+
+
+def test_sandbox_agent_is_refused_at_the_replaceable_tool_boundary() -> None:
+    tripwire = {"called": False}
+
+    @function_tool
+    def declared_write(value: str) -> str:
+        """Write one value."""
+
+        tripwire["called"] = True
+        raise AssertionError("the original live handler was invoked")
+
+    sandbox_model = ScriptedModel([[_message("must not run")]])
+    sandbox_agent = SandboxAgent(
+        name="Sandbox target",
+        instructions="Write one value.",
+        tools=[declared_write],
+        model=sandbox_model,
+    )
+    adapter = OpenAIAgentsAdapter()
+
+    report = adapter.preflight(sandbox_agent)
+
+    assert report.supported is False
+    issue = next(issue for issue in report.issues if issue.code == "unsupported_agent_type")
+    assert issue.location == "SandboxAgent"
+    assert "Behavioral execution is not authorized for SDK SandboxAgent" in issue.message
+    assert "runtime-materialized sandbox capability surface" in issue.message
+    assert "safely replaceable and observed exact FunctionTool contract" in issue.message
+    with pytest.raises(UnsupportedTargetError) as exc_info:
+        adapter.prepare(sandbox_agent, RecordingGateway())
+    assert tuple(exc_info.value.issues) == report.issues
+    assert sandbox_model.calls == 0
+    assert tripwire["called"] is False
+
+    ordinary_model = ScriptedModel(
+        [
+            [_tool_call("declared_write", {"value": "simulated"}, "call-1")],
+            [_message("done")],
+        ]
+    )
+    ordinary_agent = Agent(
+        name="Ordinary target",
+        instructions="Write one value.",
+        tools=[declared_write],
+        model=ordinary_model,
+    )
+    gateway = RecordingGateway(result={"simulated": True})
+
+    assert adapter.preflight(ordinary_agent).supported is True
+    prepared = adapter.prepare(ordinary_agent, gateway)
+    run = asyncio.run(
+        adapter.run(
+            prepared,
+            "Write one value.",
+            run_id="ordinary-control",
+            max_turns=3,
+        )
+    )
+
+    assert gateway.calls == [("declared_write", {"value": "simulated"}, None)]
+    assert run.termination is RunTermination.COMPLETED
+    assert ordinary_model.calls == 2
+    assert tripwire["called"] is False
 
 
 def test_an_unsupported_sdk_version_is_named() -> None:

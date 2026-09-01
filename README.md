@@ -250,11 +250,17 @@ closed as `INFRA_ERROR`; AgentCheck does not invent a plausible tool result.
 | PydanticAI | `agentcheck-ai[pydantic-ai]` | [Setup and offline evaluation](https://github.com/WaseemGhanem98/AgentCheck/blob/main/docs/pydantic-ai.md) |
 | Custom Python agents | `agentcheck-ai` | [Integration contract](https://github.com/WaseemGhanem98/AgentCheck/blob/main/docs/custom-agents.md) |
 
-The native adapters are pinned to verified SDK minor versions and reject
-unsupported versions rather than guessing. Custom Python support is a lightweight
-integration contract: the target declares inert tools and routes declared calls
-through the AgentCheck-supplied `ToolRuntime`. It is not universal framework
-support.
+The OpenAI Agents SDK native adapter supports SDK 0.20–0.22 only for exact
+ordinary `agents.Agent` targets whose exact `FunctionTool` tools can be safely
+replaced and observed through `ToolGateway`. SDK 0.22 `SandboxAgent` targets are
+refused for behavioral evaluation: their runtime-materialized sandbox capability
+surface is outside that replaceable/observed contract. The refusal happens at the
+agent-type boundary; AgentCheck does not enumerate those capabilities.
+
+The native adapters reject unsupported SDK versions rather than guessing. Custom
+Python support is a lightweight integration contract: the target declares inert
+tools and routes declared calls through the AgentCheck-supplied `ToolRuntime`. It
+is not universal framework support.
 
 ## Safety boundaries
 
