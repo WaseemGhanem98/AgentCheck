@@ -324,7 +324,7 @@ jobs:
           runtime_map_absent() {
             local runtime_map="$1"
             python3 -c \
-              'import json, os, sys; raise SystemExit(os.environ["RUNTIME_NAME"] in json.load(sys.stdin))' \
+              'import json, os, sys; value = json.load(sys.stdin); raise SystemExit(not isinstance(value, dict) or os.environ["RUNTIME_NAME"] in value)' \
               <<< "$runtime_map"
           }
 

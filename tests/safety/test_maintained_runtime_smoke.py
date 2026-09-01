@@ -507,6 +507,8 @@ def _runtime_cleanup_result(
     reload_succeeds: bool = True,
     restart_succeeds: bool = True,
     service_active: bool = True,
+    runtime_payload: str | None = None,
+    docker_info_succeeds: bool = True,
 ) -> subprocess.CompletedProcess[str]:
     script = _smoke_script(_load_workflow())
     fake_bin = tmp_path / "bin"
@@ -519,6 +521,11 @@ def _runtime_cleanup_result(
         """#!/usr/bin/env bash
 set -Eeuo pipefail
 [[ "$1" == "info" ]]
+[[ "$FAKE_DOCKER_INFO_SUCCEEDS" == "1" ]] || exit 6
+if [[ "$FAKE_RUNTIME_PAYLOAD_MODE" == "fixed" ]]; then
+  printf '%s\\n' "$FAKE_RUNTIME_PAYLOAD"
+  exit 0
+fi
 if [[ "$(< "$FAKE_RUNTIME_STATE")" == "present" ]]; then
   printf '%s\\n' '{"ac-smoke-runsc":{"path":"/usr/local/bin/runsc"},"runc":{}}'
 else
@@ -583,6 +590,11 @@ esac
             "FAKE_RELOAD_SUCCEEDS": "1" if reload_succeeds else "0",
             "FAKE_RESTART_SUCCEEDS": "1" if restart_succeeds else "0",
             "FAKE_SERVICE_ACTIVE": "1" if service_active else "0",
+            "FAKE_RUNTIME_PAYLOAD_MODE": (
+                "fixed" if runtime_payload is not None else "state"
+            ),
+            "FAKE_RUNTIME_PAYLOAD": runtime_payload or "",
+            "FAKE_DOCKER_INFO_SUCCEEDS": "1" if docker_info_succeeds else "0",
         }
     )
     return subprocess.run(
@@ -665,6 +677,47 @@ def test_cleanup_runtime_state_restarts_after_stale_reload_and_fails_closed(
     assert unhealthy.returncode == 1
     assert "cleanup_docker_service_state\tinactive" in unhealthy.stdout
     assert "cleanup_docker_service_active\tfalse" in unhealthy.stdout
+
+
+def test_cleanup_runtime_map_rejects_non_objects_invalid_unavailable_and_present(
+    tmp_path: pathlib.Path,
+) -> None:
+    adverse_cases = {
+        "array": ("[]", True, "[]"),
+        "string": ('"runc"', True, '"runc"'),
+        "null": ("null", True, "null"),
+        "invalid-json": ("{invalid", True, "{invalid"),
+        "unavailable": (None, False, "unavailable"),
+        "still-present": (
+            '{"ac-smoke-runsc":{"path":"/usr/local/bin/runsc"},"runc":{}}',
+            True,
+            '{"ac-smoke-runsc"',
+        ),
+    }
+
+    for name, (payload, info_succeeds, expected_map) in adverse_cases.items():
+        result = _runtime_cleanup_result(
+            tmp_path / name,
+            reload_clears=False,
+            restart_clears=False,
+            runtime_payload=payload,
+            docker_info_succeeds=info_succeeds,
+        )
+        assert result.returncode == 1, name + "\n" + result.stdout + result.stderr
+        for receipt in (
+            "cleanup_runtime_after_reload_absent\tfalse",
+            "cleanup_runtime_after_reload_attempts\t5",
+            "cleanup_docker_restart_used\ttrue",
+            "cleanup_runtime_final_absent\tfalse",
+            "cleanup_runtime_final_attempts\t5",
+        ):
+            assert receipt in result.stdout, name + "\n" + result.stdout
+        assert f"cleanup_runtime_after_reload_map\t{expected_map}" in result.stdout, (
+            name + "\n" + result.stdout
+        )
+        assert f"cleanup_runtime_final_map\t{expected_map}" in result.stdout, (
+            name + "\n" + result.stdout
+        )
 
 
 def _synthetic_inrelease(
