@@ -14,7 +14,7 @@ import yaml
 
 WORKFLOW_DIRECTORY = Path(".github/workflows")
 FULL_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
-HOSTED_RUNNERS = frozenset({"ubuntu-latest"})
+HOSTED_RUNNERS = frozenset({"ubuntu-latest", "ubuntu-24.04"})
 FORBIDDEN_WORKFLOW_REFERENCE = re.compile(r"self-hosted|agentcheck-local", re.I)
 
 
@@ -38,6 +38,10 @@ def _triggers(workflow: Mapping[Any, Any]) -> set[str]:
 
 def _hosted_runner(runs_on: Any) -> bool:
     return isinstance(runs_on, str) and runs_on in HOSTED_RUNNERS
+
+
+def _safe_top_level_permissions(value: Any) -> bool:
+    return value in ({}, {"contents": "read"})
 
 
 def _iter_steps(workflow: Mapping[Any, Any]) -> Iterator[tuple[str, str, Mapping[str, Any]]]:
@@ -72,9 +76,10 @@ def main() -> int:
 
         if "pull_request_target" in triggers:
             failures.append(f"{path.name}: pull_request_target is forbidden")
-        if workflow.get("permissions") != {"contents": "read"}:
+        if not _safe_top_level_permissions(workflow.get("permissions")):
             failures.append(
-                f"{path.name}: top-level permissions must be exactly contents: read"
+                f"{path.name}: top-level permissions must be empty or exactly "
+                "contents: read"
             )
         if re.search(r"\$\{\{\s*secrets\.", text) or "PYPI_API_TOKEN" in text:
             failures.append(f"{path.name}: workflow references a long-lived secret")

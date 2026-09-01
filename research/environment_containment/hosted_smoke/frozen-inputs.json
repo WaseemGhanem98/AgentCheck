@@ -1,0 +1,117 @@
+{
+  "schema_version": 1,
+  "status": "review-only-unexecuted-candidate",
+  "resolved_at": "2026-09-01T00:32:21-04:00",
+  "agentcheck_base_commit": "124cbc59232e5532130dd93a92856aec11d1d1d4",
+  "agentcheck_base_tree": "4089365742529b1cd41dae4a215a08540fcb5e56",
+  "runner": {
+    "label": "ubuntu-24.04",
+    "os": "Linux",
+    "architecture": "X64",
+    "image_os": "ubuntu24"
+  },
+  "docker": {
+    "signing_key": {
+      "url": "https://download.docker.com/linux/ubuntu/gpg",
+      "sha256": "1500c1f56fa9e26b9b8f42452a553675796ade0807cdce11975eb98170b3a570",
+      "primary_fingerprint": "9DC858229FC7DD38854AE2D88D81803C0EBFCD88",
+      "signing_subkey_fingerprint": "D3306A018370199E527AE7997EA0A9C3F273FCD8"
+    },
+    "signed_metadata": {
+      "inrelease_url": "https://download.docker.com/linux/ubuntu/dists/noble/InRelease",
+      "suite": "noble",
+      "architecture": "amd64",
+      "packages_path": "stable/binary-amd64/Packages.gz",
+      "packages_url": "https://download.docker.com/linux/ubuntu/dists/noble/stable/binary-amd64/Packages.gz",
+      "packages_size": 77410,
+      "packages_sha256": "a22aaf0fdf661041647ae600107851fc8c4e5c5bb507013d03a4220d09884aed"
+    },
+    "packages": [
+      {
+        "package": "containerd.io",
+        "version": "2.1.5-1~ubuntu.24.04~noble",
+        "architecture": "amd64",
+        "url": "https://download.docker.com/linux/ubuntu/dists/noble/pool/stable/amd64/containerd.io_2.1.5-1~ubuntu.24.04~noble_amd64.deb",
+        "size": 22421448,
+        "sha256": "42abab84165c35f6db6a141a02546d2396d8b9ef2c1923e2d6e4ec46cc5c6d47"
+      },
+      {
+        "package": "docker-ce-cli",
+        "version": "5:29.7.2-1~ubuntu.24.04~noble",
+        "architecture": "amd64",
+        "url": "https://download.docker.com/linux/ubuntu/dists/noble/pool/stable/amd64/docker-ce-cli_29.7.2-1~ubuntu.24.04~noble_amd64.deb",
+        "size": 16984968,
+        "sha256": "920a5fa031f33f2dd5b56b4a9bc4c725bc9549d6007004a6610a469873ec69fe"
+      },
+      {
+        "package": "docker-ce",
+        "version": "5:29.7.2-1~ubuntu.24.04~noble",
+        "architecture": "amd64",
+        "url": "https://download.docker.com/linux/ubuntu/dists/noble/pool/stable/amd64/docker-ce_29.7.2-1~ubuntu.24.04~noble_amd64.deb",
+        "size": 24039440,
+        "sha256": "8243f97d569a0fa33ea32417e399e9f524e7d75d3898fa9d24e0eadaa486af68"
+      }
+    ],
+    "required_client_version": "29.7.2",
+    "required_server_version": "29.7.2"
+  },
+  "gvisor": {
+    "release": "release-20260817.0",
+    "annotated_tag_object": "c46e5e46d3e6c01640e2237756a9099f6f917699",
+    "commit": "50e1502a95d36ad2faf2c7ef33b8bf21fe975293",
+    "archive_url": "https://storage.googleapis.com/gvisor/releases/release/20260817.0/x86_64/gvisor.tar.bz2",
+    "github_asset_url": "https://github.com/google/gvisor/releases/download/release-20260817.0/gvisor-x86_64.tar.bz2",
+    "archive_size": 164966070,
+    "archive_sha256": "ae345a8c1466586b3a163fb534301913da663a97b8ed446bc711b2e1963a32c5",
+    "archive_sha512": "bd8271a7742f90e53373b2a8613f37f3ae2c765ff5e2e611a75a47167a323cab7519b149c50273307743491713525a14ad1b3e398651c93b16f3e248dfeff3dd",
+    "checksum_url": "https://storage.googleapis.com/gvisor/releases/release/20260817.0/x86_64/gvisor.tar.bz2.sha512",
+    "checksum_file_sha256": "05730cd00318dff9e618e33566d6fa246cbd3ac141bb5799355ca039ff0556ee",
+    "version_output": [
+      "runsc version release-20260817.0",
+      "spec: 1.2.1"
+    ],
+    "members": [
+      {
+        "path": "containerd-shim-runsc-v1",
+        "sha512": "b60d1c418b841ab046951cc7a91f490a221198fbe81ec55dc364432578fddd44e97063793ce6651be397af2f64ec47170dff77a45db277819c3fb08fec9f3ced"
+      },
+      {
+        "path": "runsc",
+        "sha512": "84936438d583ec976800f464e75a83e1515f0890b451b9b4db219c4472b54ca9b106a6772ee683f1e64cce2128871d7637b14d800591f8451b8137f6c39fb2ef"
+      },
+      {
+        "path": "gvisor-bin/checkpointgofer",
+        "sha512": "8aff47fbad7c1ec5e5d156a1bb566e5f5d75db0f9bec5abf7d14bbf74e2a09c60a6692bafd2cefe4c1ed9aa0b46cdc701f09fef34f229ed74c27d068903c79f3"
+      },
+      {
+        "path": "gvisor-bin/gvisor-sentry-prewarmer",
+        "sha512": "f0c131766303ca4733a4e42bd171d8ddf42a0a0087564605b3207b0f4c148d9ff355bad25e27d388c7c9cf06265160b3a02047ec195c035d9e8f428d8f608ce6"
+      },
+      {
+        "path": "gvisor-bin/gvisor_sentry",
+        "sha512": "09eef70d5d14e42bdc5f9e55ca9710a14e157d67cc1ce92df5f4322df1ba5ee67a598161c4854e206ecbfdff85d69418814bdcd45e4f6273eeaf0196b0d3adb3"
+      },
+      {
+        "path": "gvisor-bin/runsc-metric-server",
+        "sha512": "d47c33c105419c5c3c28b8894fad6cb917c3897c5376f3ffb955275af6bf744039f4e9f7bb2a0313d84fb296b643d3d4b66e7a4247e1e5cb568f8b69ac6a29ab"
+      }
+    ],
+    "runtime_name": "ac-smoke-runsc",
+    "platform": "systrap",
+    "download_sidecars": "NEVER",
+    "require_sidecars": "ALWAYS"
+  },
+  "oci_image": {
+    "reference": "docker.io/library/python@sha256:4427763a1ba36f5aa8f656a03e5d00f3b8d61f5dd950c73df6c14f8c7640f8ab",
+    "manifest_media_type": "application/vnd.oci.image.manifest.v1+json",
+    "manifest_digest": "sha256:4427763a1ba36f5aa8f656a03e5d00f3b8d61f5dd950c73df6c14f8c7640f8ab",
+    "manifest_size": 1752,
+    "config_digest": "sha256:4a7066d275a270e82ae35c51c7beed7167a9e23713d8b95ea5a5dc5c229d60aa",
+    "os": "linux",
+    "architecture": "amd64",
+    "execution_user": "65532:65532",
+    "private_tmpfs": "/tmp:rw,nosuid,nodev,noexec,size=16m,uid=65532,gid=65532,mode=0700",
+    "descriptive_version": "3.12.14-slim-bookworm",
+    "source_revision": "f2c5d1b8a6adecb5b00b3c9331d4f863beade6b3"
+  }
+}
