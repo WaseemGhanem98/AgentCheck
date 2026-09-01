@@ -1,0 +1,27 @@
+# Inert registration candidate only. If independently reviewed and later
+# accepted on the default branch, this path enables workflow_dispatch to select
+# a separately reviewed full workflow revision by exact ref. This bootstrap
+# itself never performs the smoke.
+
+name: Maintained runtime harmless smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  registration-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    permissions:
+      contents: none
+    steps:
+      - name: Refuse execution of the inert bootstrap
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          echo "This inert default-branch registration does not run the smoke." >&2
+          echo "Select a separately reviewed full workflow revision by exact ref." >&2
+          exit 1
