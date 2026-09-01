@@ -18,9 +18,12 @@ jobs:
       DOCKER_KEY_PRIMARY_FINGERPRINT: 9DC858229FC7DD38854AE2D88D81803C0EBFCD88
       DOCKER_KEY_SIGNING_FINGERPRINT: D3306A018370199E527AE7997EA0A9C3F273FCD8
       DOCKER_INRELEASE_URL: https://download.docker.com/linux/ubuntu/dists/noble/InRelease
-      DOCKER_INRELEASE_SHA256: f243e58e075e76419642c40effca8f72f2f0b67bebc80f1bfb40f0a87f2df3ae
+      DOCKER_RELEASE_SUITE: noble
+      DOCKER_RELEASE_ARCHITECTURE: amd64
+      DOCKER_PACKAGES_PATH: stable/binary-amd64/Packages.gz
       DOCKER_PACKAGES_URL: https://download.docker.com/linux/ubuntu/dists/noble/stable/binary-amd64/Packages.gz
       DOCKER_PACKAGES_SHA256: a22aaf0fdf661041647ae600107851fc8c4e5c5bb507013d03a4220d09884aed
+      DOCKER_PACKAGES_SIZE: "77410"
       DOCKER_CE_VERSION: 5:29.7.2-1~ubuntu.24.04~noble
       DOCKER_CE_URL: https://download.docker.com/linux/ubuntu/dists/noble/pool/stable/amd64/docker-ce_29.7.2-1~ubuntu.24.04~noble_amd64.deb
       DOCKER_CE_SHA256: 8243f97d569a0fa33ea32417e399e9f524e7d75d3898fa9d24e0eadaa486af68
@@ -102,17 +105,179 @@ jobs:
           require_sha256() {
             local expected="$1"
             local path="$2"
+            local evidence_key="$3"
             local actual
             actual="$(sha256sum "$path" | awk '{print $1}')"
+            emit "${evidence_key}_sha256_expected" "$expected"
+            emit "${evidence_key}_sha256_actual" "$actual"
             [[ "$actual" == "$expected" ]] || fail "SHA-256 mismatch for $path"
           }
 
           require_sha512() {
             local expected="$1"
             local path="$2"
+            local evidence_key="$3"
             local actual
             actual="$(sha512sum "$path" | awk '{print $1}')"
+            emit "${evidence_key}_sha512_expected" "$expected"
+            emit "${evidence_key}_sha512_actual" "$actual"
             [[ "$actual" == "$expected" ]] || fail "SHA-512 mismatch for $path"
+          }
+
+          require_size() {
+            local expected="$1"
+            local path="$2"
+            local evidence_key="$3"
+            local actual
+            actual="$(stat --format=%s "$path")"
+            emit "${evidence_key}_size_expected" "$expected"
+            emit "${evidence_key}_size_actual" "$actual"
+            [[ "$actual" == "$expected" ]] || fail "size mismatch for $path"
+          }
+
+          verify_deb() {
+            local path="$1"
+            local expected_sha256="$2"
+            local expected_size="$3"
+            local expected_package="$4"
+            local expected_version="$5"
+            local evidence_key="$6"
+            local actual_package actual_version actual_architecture
+
+            require_sha256 "$expected_sha256" "$path" "$evidence_key"
+            require_size "$expected_size" "$path" "$evidence_key"
+            actual_package="$(dpkg-deb --field "$path" Package)"
+            actual_version="$(dpkg-deb --field "$path" Version)"
+            actual_architecture="$(dpkg-deb --field "$path" Architecture)"
+            emit "${evidence_key}_control_package_expected" "$expected_package"
+            emit "${evidence_key}_control_package_actual" "$actual_package"
+            emit "${evidence_key}_control_version_expected" "$expected_version"
+            emit "${evidence_key}_control_version_actual" "$actual_version"
+            emit "${evidence_key}_control_architecture_expected" amd64
+            emit "${evidence_key}_control_architecture_actual" "$actual_architecture"
+            [[ "$actual_package" == "$expected_package" ]] \
+              || fail "package control name mismatch for $path"
+            [[ "$actual_version" == "$expected_version" ]] \
+              || fail "package control version mismatch for $path"
+            [[ "$actual_architecture" == "amd64" ]] \
+              || fail "package control architecture mismatch for $path"
+          }
+
+          verify_docker_repository_metadata() {
+            local docker_key="$1"
+            local docker_inrelease="$2"
+            local docker_packages="$3"
+            local release_values release_suite release_architectures
+            local signed_sha256 signed_size signed_path actual_architecture
+
+            require_sha256 "$DOCKER_KEY_SHA256" "$docker_key" docker_key
+            mapfile -t docker_fingerprints < <(
+              gpg --batch --show-keys --with-colons "$docker_key" \
+                | awk -F: '$1 == "fpr" {print $10}'
+            )
+            [[ "${#docker_fingerprints[@]}" == "2" ]] \
+              || fail "unexpected Docker key fingerprint count"
+            emit docker_key_primary_fingerprint_expected "$DOCKER_KEY_PRIMARY_FINGERPRINT"
+            emit docker_key_primary_fingerprint_actual "${docker_fingerprints[0]}"
+            emit docker_key_signing_fingerprint_expected "$DOCKER_KEY_SIGNING_FINGERPRINT"
+            emit docker_key_signing_fingerprint_actual "${docker_fingerprints[1]}"
+            [[ "${docker_fingerprints[0]}" == "$DOCKER_KEY_PRIMARY_FINGERPRINT" ]] \
+              || fail "Docker primary key fingerprint mismatch"
+            [[ "${docker_fingerprints[1]}" == "$DOCKER_KEY_SIGNING_FINGERPRINT" ]] \
+              || fail "Docker signing subkey fingerprint mismatch"
+            gpg --batch --yes --dearmor --output "$WORK_DIR/docker.gpg" "$docker_key"
+            gpgv --keyring "$WORK_DIR/docker.gpg" "$docker_inrelease"
+            emit docker_inrelease_signature verified
+            emit docker_inrelease_sha256_actual \
+              "$(sha256sum "$docker_inrelease" | awk '{print $1}')"
+            emit docker_inrelease_size_actual "$(stat --format=%s "$docker_inrelease")"
+
+            # Parse the clear-signed payload only after gpgv succeeds. Aggregate
+            # Release fields may move; the exact suite, target architecture,
+            # path, signed SHA-256, and signed size relationship may not.
+            release_values="$(python3 - "$docker_inrelease" "$DOCKER_PACKAGES_PATH" <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          lines = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines()
+          target_path = sys.argv[2]
+          try:
+              signed = lines.index("-----BEGIN PGP SIGNED MESSAGE-----")
+              payload_start = lines.index("", signed + 1) + 1
+              signature_start = lines.index("-----BEGIN PGP SIGNATURE-----", payload_start)
+          except ValueError as exc:
+              raise SystemExit(f"malformed clear-signed InRelease: {exc}") from exc
+          payload = [
+              line[2:] if line.startswith("- ") else line
+              for line in lines[payload_start:signature_start]
+          ]
+
+          fields = {}
+          for line in payload:
+              match = re.fullmatch(r"([A-Za-z][A-Za-z0-9-]*):(?: (.*))?", line)
+              if match:
+                  fields.setdefault(match.group(1), []).append(match.group(2) or "")
+          for required_field in ("Suite", "Architectures"):
+              if len(fields.get(required_field, [])) != 1:
+                  raise SystemExit(
+                      f"signed InRelease {required_field} field count: "
+                      f"{len(fields.get(required_field, []))}"
+                  )
+          suite = fields["Suite"][0]
+          architectures = fields["Architectures"][0]
+
+          if payload.count("SHA256:") != 1:
+              raise SystemExit(
+                  f"signed InRelease SHA256 section count: {payload.count('SHA256:')}"
+              )
+          sha256_start = payload.index("SHA256:") + 1
+          matches = []
+          for line in payload[sha256_start:]:
+              if not line.startswith(" "):
+                  break
+              match = re.fullmatch(r" ([0-9a-f]{64}) +([0-9]+) (\S+)", line)
+              if match and match.group(3) == target_path:
+                  matches.append(match.groups())
+          if len(matches) != 1:
+              raise SystemExit(
+                  f"signed SHA256 relationship count for {target_path!r}: {len(matches)}"
+              )
+          digest, size, path = matches[0]
+          print("\t".join((suite, architectures, digest, size, path)))
+          PY
+            )"
+            IFS=$'\t' read -r release_suite release_architectures \
+              signed_sha256 signed_size signed_path <<< "$release_values"
+            emit docker_release_suite_expected "$DOCKER_RELEASE_SUITE"
+            emit docker_release_suite_actual "$release_suite"
+            emit docker_release_architecture_expected "$DOCKER_RELEASE_ARCHITECTURE"
+            emit docker_release_architectures_actual "$release_architectures"
+            emit docker_signed_packages_path_expected "$DOCKER_PACKAGES_PATH"
+            emit docker_signed_packages_path_actual "$signed_path"
+            emit docker_signed_packages_sha256_expected "$DOCKER_PACKAGES_SHA256"
+            emit docker_signed_packages_sha256_actual "$signed_sha256"
+            emit docker_signed_packages_size_expected "$DOCKER_PACKAGES_SIZE"
+            emit docker_signed_packages_size_actual "$signed_size"
+            [[ "$release_suite" == "$DOCKER_RELEASE_SUITE" ]] \
+              || fail "Docker signed suite mismatch"
+            actual_architecture=missing
+            case " $release_architectures " in
+              *" $DOCKER_RELEASE_ARCHITECTURE "*) actual_architecture="$DOCKER_RELEASE_ARCHITECTURE" ;;
+            esac
+            emit docker_release_architecture_actual "$actual_architecture"
+            [[ "$actual_architecture" == "$DOCKER_RELEASE_ARCHITECTURE" ]] \
+              || fail "Docker signed architecture mismatch"
+            [[ "$signed_path" == "$DOCKER_PACKAGES_PATH" ]] \
+              || fail "Docker signed package-index path mismatch"
+            [[ "$signed_sha256" == "$DOCKER_PACKAGES_SHA256" ]] \
+              || fail "Docker signed package-index SHA-256 mismatch"
+            [[ "$signed_size" == "$DOCKER_PACKAGES_SIZE" ]] \
+              || fail "Docker signed package-index size mismatch"
+            require_sha256 \
+              "$DOCKER_PACKAGES_SHA256" "$docker_packages" docker_packages_index
+            require_size \
+              "$DOCKER_PACKAGES_SIZE" "$docker_packages" docker_packages_index
           }
 
           daemon_path_state() {
@@ -352,24 +517,10 @@ jobs:
           fetch "$DOCKER_KEY_URL" "$DOCKER_KEY"
           fetch "$DOCKER_INRELEASE_URL" "$DOCKER_INRELEASE"
           fetch "$DOCKER_PACKAGES_URL" "$DOCKER_PACKAGES"
-          require_sha256 "$DOCKER_KEY_SHA256" "$DOCKER_KEY"
-          require_sha256 "$DOCKER_INRELEASE_SHA256" "$DOCKER_INRELEASE"
-          require_sha256 "$DOCKER_PACKAGES_SHA256" "$DOCKER_PACKAGES"
+          verify_docker_repository_metadata \
+            "$DOCKER_KEY" "$DOCKER_INRELEASE" "$DOCKER_PACKAGES"
 
-          mapfile -t docker_fingerprints < <(
-            gpg --batch --show-keys --with-colons "$DOCKER_KEY" \
-              | awk -F: '$1 == "fpr" {print $10}'
-          )
-          [[ "${#docker_fingerprints[@]}" == "2" ]] || fail "unexpected Docker key fingerprint count"
-          [[ "${docker_fingerprints[0]}" == "$DOCKER_KEY_PRIMARY_FINGERPRINT" ]] \
-            || fail "Docker primary key fingerprint mismatch"
-          [[ "${docker_fingerprints[1]}" == "$DOCKER_KEY_SIGNING_FINGERPRINT" ]] \
-            || fail "Docker signing subkey fingerprint mismatch"
-          gpg --batch --yes --dearmor --output "$WORK_DIR/docker.gpg" "$DOCKER_KEY"
-          gpgv --keyring "$WORK_DIR/docker.gpg" "$DOCKER_INRELEASE"
-          grep -Eq "^ $DOCKER_PACKAGES_SHA256 +[0-9]+ stable/binary-amd64/Packages.gz$" \
-            "$DOCKER_INRELEASE" || fail "signed metadata does not bind the frozen Packages.gz"
-
+          # DOCKER_PACKAGES_STANZA_GATE
           python3 - "$DOCKER_PACKAGES" <<'PY'
           import gzip
           import os
@@ -430,25 +581,12 @@ jobs:
           fetch "$CONTAINERD_URL" "$CONTAINERD_DEB"
           fetch "$DOCKER_CLI_URL" "$DOCKER_CLI_DEB"
           fetch "$DOCKER_CE_URL" "$DOCKER_CE_DEB"
-          require_sha256 "$CONTAINERD_SHA256" "$CONTAINERD_DEB"
-          require_sha256 "$DOCKER_CLI_SHA256" "$DOCKER_CLI_DEB"
-          require_sha256 "$DOCKER_CE_SHA256" "$DOCKER_CE_DEB"
-          [[ "$(stat --format=%s "$CONTAINERD_DEB")" == "$CONTAINERD_SIZE" ]] \
-            || fail "containerd package size mismatch"
-          [[ "$(stat --format=%s "$DOCKER_CLI_DEB")" == "$DOCKER_CLI_SIZE" ]] \
-            || fail "Docker CLI package size mismatch"
-          [[ "$(stat --format=%s "$DOCKER_CE_DEB")" == "$DOCKER_CE_SIZE" ]] \
-            || fail "Docker Engine package size mismatch"
-
-          [[ "$(dpkg-deb --field "$CONTAINERD_DEB" Package)" == "containerd.io" ]]
-          [[ "$(dpkg-deb --field "$CONTAINERD_DEB" Version)" == "$CONTAINERD_VERSION" ]]
-          [[ "$(dpkg-deb --field "$CONTAINERD_DEB" Architecture)" == "amd64" ]]
-          [[ "$(dpkg-deb --field "$DOCKER_CLI_DEB" Package)" == "docker-ce-cli" ]]
-          [[ "$(dpkg-deb --field "$DOCKER_CLI_DEB" Version)" == "$DOCKER_CLI_VERSION" ]]
-          [[ "$(dpkg-deb --field "$DOCKER_CLI_DEB" Architecture)" == "amd64" ]]
-          [[ "$(dpkg-deb --field "$DOCKER_CE_DEB" Package)" == "docker-ce" ]]
-          [[ "$(dpkg-deb --field "$DOCKER_CE_DEB" Version)" == "$DOCKER_CE_VERSION" ]]
-          [[ "$(dpkg-deb --field "$DOCKER_CE_DEB" Architecture)" == "amd64" ]]
+          verify_deb "$CONTAINERD_DEB" "$CONTAINERD_SHA256" \
+            "$CONTAINERD_SIZE" containerd.io "$CONTAINERD_VERSION" containerd_package
+          verify_deb "$DOCKER_CLI_DEB" "$DOCKER_CLI_SHA256" \
+            "$DOCKER_CLI_SIZE" docker-ce-cli "$DOCKER_CLI_VERSION" docker_cli_package
+          verify_deb "$DOCKER_CE_DEB" "$DOCKER_CE_SHA256" \
+            "$DOCKER_CE_SIZE" docker-ce "$DOCKER_CE_VERSION" docker_engine_package
 
           sudo systemctl stop docker.service docker.socket containerd.service
           sudo dpkg --install "$CONTAINERD_DEB" "$DOCKER_CLI_DEB" "$DOCKER_CE_DEB"
@@ -478,12 +616,15 @@ jobs:
           mkdir "$GVISOR_EXTRACT"
           fetch "$GVISOR_ARCHIVE_URL" "$GVISOR_ARCHIVE"
           fetch "$GVISOR_CHECKSUM_URL" "$GVISOR_CHECKSUM"
-          [[ "$(stat --format=%s "$GVISOR_ARCHIVE")" == "$GVISOR_ARCHIVE_SIZE" ]] \
-            || fail "gVisor archive size mismatch"
-          require_sha256 "$GVISOR_ARCHIVE_SHA256" "$GVISOR_ARCHIVE"
-          require_sha512 "$GVISOR_ARCHIVE_SHA512" "$GVISOR_ARCHIVE"
-          require_sha256 "$GVISOR_CHECKSUM_SHA256" "$GVISOR_CHECKSUM"
-          [[ "$(tr -d '\r\n' < "$GVISOR_CHECKSUM")" == "$GVISOR_ARCHIVE_SHA512  gvisor.tar.bz2" ]] \
+          require_size "$GVISOR_ARCHIVE_SIZE" "$GVISOR_ARCHIVE" gvisor_archive
+          require_sha256 "$GVISOR_ARCHIVE_SHA256" "$GVISOR_ARCHIVE" gvisor_archive
+          require_sha512 "$GVISOR_ARCHIVE_SHA512" "$GVISOR_ARCHIVE" gvisor_archive
+          require_sha256 \
+            "$GVISOR_CHECKSUM_SHA256" "$GVISOR_CHECKSUM" gvisor_checksum_file
+          gvisor_checksum_sidecar_actual="$(tr -d '\r\n' < "$GVISOR_CHECKSUM")"
+          emit gvisor_checksum_sidecar_expected "$GVISOR_ARCHIVE_SHA512  gvisor.tar.bz2"
+          emit gvisor_checksum_sidecar_actual "$gvisor_checksum_sidecar_actual"
+          [[ "$gvisor_checksum_sidecar_actual" == "$GVISOR_ARCHIVE_SHA512  gvisor.tar.bz2" ]] \
             || fail "gVisor checksum sidecar content mismatch"
 
           tar --list --bzip2 --file "$GVISOR_ARCHIVE" > "$WORK_DIR/gvisor-members.txt"
@@ -497,17 +638,12 @@ jobs:
           gvisor-bin/runsc-metric-server
           MEMBERS
           tar --extract --bzip2 --file "$GVISOR_ARCHIVE" --directory "$GVISOR_EXTRACT"
-          (
-            cd "$GVISOR_EXTRACT"
-            sha512sum --check <<'MEMBER_HASHES'
-          b60d1c418b841ab046951cc7a91f490a221198fbe81ec55dc364432578fddd44e97063793ce6651be397af2f64ec47170dff77a45db277819c3fb08fec9f3ced  containerd-shim-runsc-v1
-          84936438d583ec976800f464e75a83e1515f0890b451b9b4db219c4472b54ca9b106a6772ee683f1e64cce2128871d7637b14d800591f8451b8137f6c39fb2ef  runsc
-          8aff47fbad7c1ec5e5d156a1bb566e5f5d75db0f9bec5abf7d14bbf74e2a09c60a6692bafd2cefe4c1ed9aa0b46cdc701f09fef34f229ed74c27d068903c79f3  gvisor-bin/checkpointgofer
-          f0c131766303ca4733a4e42bd171d8ddf42a0a0087564605b3207b0f4c148d9ff355bad25e27d388c7c9cf06265160b3a02047ec195c035d9e8f428d8f608ce6  gvisor-bin/gvisor-sentry-prewarmer
-          09eef70d5d14e42bdc5f9e55ca9710a14e157d67cc1ce92df5f4322df1ba5ee67a598161c4854e206ecbfdff85d69418814bdcd45e4f6273eeaf0196b0d3adb3  gvisor-bin/gvisor_sentry
-          d47c33c105419c5c3c28b8894fad6cb917c3897c5376f3ffb955275af6bf744039f4e9f7bb2a0313d84fb296b643d3d4b66e7a4247e1e5cb568f8b69ac6a29ab  gvisor-bin/runsc-metric-server
-          MEMBER_HASHES
-          )
+          require_sha512 b60d1c418b841ab046951cc7a91f490a221198fbe81ec55dc364432578fddd44e97063793ce6651be397af2f64ec47170dff77a45db277819c3fb08fec9f3ced "$GVISOR_EXTRACT/containerd-shim-runsc-v1" gvisor_extracted_containerd_shim
+          require_sha512 84936438d583ec976800f464e75a83e1515f0890b451b9b4db219c4472b54ca9b106a6772ee683f1e64cce2128871d7637b14d800591f8451b8137f6c39fb2ef "$GVISOR_EXTRACT/runsc" gvisor_extracted_runsc
+          require_sha512 8aff47fbad7c1ec5e5d156a1bb566e5f5d75db0f9bec5abf7d14bbf74e2a09c60a6692bafd2cefe4c1ed9aa0b46cdc701f09fef34f229ed74c27d068903c79f3 "$GVISOR_EXTRACT/gvisor-bin/checkpointgofer" gvisor_extracted_checkpointgofer
+          require_sha512 f0c131766303ca4733a4e42bd171d8ddf42a0a0087564605b3207b0f4c148d9ff355bad25e27d388c7c9cf06265160b3a02047ec195c035d9e8f428d8f608ce6 "$GVISOR_EXTRACT/gvisor-bin/gvisor-sentry-prewarmer" gvisor_extracted_sentry_prewarmer
+          require_sha512 09eef70d5d14e42bdc5f9e55ca9710a14e157d67cc1ce92df5f4322df1ba5ee67a598161c4854e206ecbfdff85d69418814bdcd45e4f6273eeaf0196b0d3adb3 "$GVISOR_EXTRACT/gvisor-bin/gvisor_sentry" gvisor_extracted_sentry
+          require_sha512 d47c33c105419c5c3c28b8894fad6cb917c3897c5376f3ffb955275af6bf744039f4e9f7bb2a0313d84fb296b643d3d4b66e7a4247e1e5cb568f8b69ac6a29ab "$GVISOR_EXTRACT/gvisor-bin/runsc-metric-server" gvisor_extracted_metric_server
 
           for path in \
             /usr/local/bin/runsc \
@@ -518,12 +654,12 @@ jobs:
           gvisor_installed=1
           sudo tar --extract --bzip2 --file "$GVISOR_ARCHIVE" --directory /usr/local/bin
 
-          require_sha512 84936438d583ec976800f464e75a83e1515f0890b451b9b4db219c4472b54ca9b106a6772ee683f1e64cce2128871d7637b14d800591f8451b8137f6c39fb2ef /usr/local/bin/runsc
-          require_sha512 b60d1c418b841ab046951cc7a91f490a221198fbe81ec55dc364432578fddd44e97063793ce6651be397af2f64ec47170dff77a45db277819c3fb08fec9f3ced /usr/local/bin/containerd-shim-runsc-v1
-          require_sha512 8aff47fbad7c1ec5e5d156a1bb566e5f5d75db0f9bec5abf7d14bbf74e2a09c60a6692bafd2cefe4c1ed9aa0b46cdc701f09fef34f229ed74c27d068903c79f3 /usr/local/bin/gvisor-bin/checkpointgofer
-          require_sha512 f0c131766303ca4733a4e42bd171d8ddf42a0a0087564605b3207b0f4c148d9ff355bad25e27d388c7c9cf06265160b3a02047ec195c035d9e8f428d8f608ce6 /usr/local/bin/gvisor-bin/gvisor-sentry-prewarmer
-          require_sha512 09eef70d5d14e42bdc5f9e55ca9710a14e157d67cc1ce92df5f4322df1ba5ee67a598161c4854e206ecbfdff85d69418814bdcd45e4f6273eeaf0196b0d3adb3 /usr/local/bin/gvisor-bin/gvisor_sentry
-          require_sha512 d47c33c105419c5c3c28b8894fad6cb917c3897c5376f3ffb955275af6bf744039f4e9f7bb2a0313d84fb296b643d3d4b66e7a4247e1e5cb568f8b69ac6a29ab /usr/local/bin/gvisor-bin/runsc-metric-server
+          require_sha512 84936438d583ec976800f464e75a83e1515f0890b451b9b4db219c4472b54ca9b106a6772ee683f1e64cce2128871d7637b14d800591f8451b8137f6c39fb2ef /usr/local/bin/runsc gvisor_installed_runsc
+          require_sha512 b60d1c418b841ab046951cc7a91f490a221198fbe81ec55dc364432578fddd44e97063793ce6651be397af2f64ec47170dff77a45db277819c3fb08fec9f3ced /usr/local/bin/containerd-shim-runsc-v1 gvisor_installed_containerd_shim
+          require_sha512 8aff47fbad7c1ec5e5d156a1bb566e5f5d75db0f9bec5abf7d14bbf74e2a09c60a6692bafd2cefe4c1ed9aa0b46cdc701f09fef34f229ed74c27d068903c79f3 /usr/local/bin/gvisor-bin/checkpointgofer gvisor_installed_checkpointgofer
+          require_sha512 f0c131766303ca4733a4e42bd171d8ddf42a0a0087564605b3207b0f4c148d9ff355bad25e27d388c7c9cf06265160b3a02047ec195c035d9e8f428d8f608ce6 /usr/local/bin/gvisor-bin/gvisor-sentry-prewarmer gvisor_installed_sentry_prewarmer
+          require_sha512 09eef70d5d14e42bdc5f9e55ca9710a14e157d67cc1ce92df5f4322df1ba5ee67a598161c4854e206ecbfdff85d69418814bdcd45e4f6273eeaf0196b0d3adb3 /usr/local/bin/gvisor-bin/gvisor_sentry gvisor_installed_sentry
+          require_sha512 d47c33c105419c5c3c28b8894fad6cb917c3897c5376f3ffb955275af6bf744039f4e9f7bb2a0313d84fb296b643d3d4b66e7a4247e1e5cb568f8b69ac6a29ab /usr/local/bin/gvisor-bin/runsc-metric-server gvisor_installed_metric_server
 
           runsc_version="$(/usr/local/bin/runsc --version)"
           [[ "$runsc_version" == $'runsc version release-20260817.0\nspec: 1.2.1' ]] \
@@ -607,12 +743,12 @@ jobs:
 
           # Re-check every installed byte after registration. Missing sidecars
           # must fail; runsc is forbidden from downloading replacements.
-          require_sha512 84936438d583ec976800f464e75a83e1515f0890b451b9b4db219c4472b54ca9b106a6772ee683f1e64cce2128871d7637b14d800591f8451b8137f6c39fb2ef /usr/local/bin/runsc
-          require_sha512 b60d1c418b841ab046951cc7a91f490a221198fbe81ec55dc364432578fddd44e97063793ce6651be397af2f64ec47170dff77a45db277819c3fb08fec9f3ced /usr/local/bin/containerd-shim-runsc-v1
-          require_sha512 8aff47fbad7c1ec5e5d156a1bb566e5f5d75db0f9bec5abf7d14bbf74e2a09c60a6692bafd2cefe4c1ed9aa0b46cdc701f09fef34f229ed74c27d068903c79f3 /usr/local/bin/gvisor-bin/checkpointgofer
-          require_sha512 f0c131766303ca4733a4e42bd171d8ddf42a0a0087564605b3207b0f4c148d9ff355bad25e27d388c7c9cf06265160b3a02047ec195c035d9e8f428d8f608ce6 /usr/local/bin/gvisor-bin/gvisor-sentry-prewarmer
-          require_sha512 09eef70d5d14e42bdc5f9e55ca9710a14e157d67cc1ce92df5f4322df1ba5ee67a598161c4854e206ecbfdff85d69418814bdcd45e4f6273eeaf0196b0d3adb3 /usr/local/bin/gvisor-bin/gvisor_sentry
-          require_sha512 d47c33c105419c5c3c28b8894fad6cb917c3897c5376f3ffb955275af6bf744039f4e9f7bb2a0313d84fb296b643d3d4b66e7a4247e1e5cb568f8b69ac6a29ab /usr/local/bin/gvisor-bin/runsc-metric-server
+          require_sha512 84936438d583ec976800f464e75a83e1515f0890b451b9b4db219c4472b54ca9b106a6772ee683f1e64cce2128871d7637b14d800591f8451b8137f6c39fb2ef /usr/local/bin/runsc gvisor_registered_runsc
+          require_sha512 b60d1c418b841ab046951cc7a91f490a221198fbe81ec55dc364432578fddd44e97063793ce6651be397af2f64ec47170dff77a45db277819c3fb08fec9f3ced /usr/local/bin/containerd-shim-runsc-v1 gvisor_registered_containerd_shim
+          require_sha512 8aff47fbad7c1ec5e5d156a1bb566e5f5d75db0f9bec5abf7d14bbf74e2a09c60a6692bafd2cefe4c1ed9aa0b46cdc701f09fef34f229ed74c27d068903c79f3 /usr/local/bin/gvisor-bin/checkpointgofer gvisor_registered_checkpointgofer
+          require_sha512 f0c131766303ca4733a4e42bd171d8ddf42a0a0087564605b3207b0f4c148d9ff355bad25e27d388c7c9cf06265160b3a02047ec195c035d9e8f428d8f608ce6 /usr/local/bin/gvisor-bin/gvisor-sentry-prewarmer gvisor_registered_sentry_prewarmer
+          require_sha512 09eef70d5d14e42bdc5f9e55ca9710a14e157d67cc1ce92df5f4322df1ba5ee67a598161c4854e206ecbfdff85d69418814bdcd45e4f6273eeaf0196b0d3adb3 /usr/local/bin/gvisor-bin/gvisor_sentry gvisor_registered_sentry
+          require_sha512 d47c33c105419c5c3c28b8894fad6cb917c3897c5376f3ffb955275af6bf744039f4e9f7bb2a0313d84fb296b643d3d4b66e7a4247e1e5cb568f8b69ac6a29ab /usr/local/bin/gvisor-bin/runsc-metric-server gvisor_registered_metric_server
           emit gvisor_release "$GVISOR_RELEASE"
           emit gvisor_commit "$GVISOR_COMMIT"
           emit gvisor_archive_sha256 "$GVISOR_ARCHIVE_SHA256"
@@ -633,6 +769,10 @@ jobs:
           image_id="$(docker image inspect --format '{{.Id}}' "$OCI_IMAGE")"
           repo_digests="$(docker image inspect --format '{{json .RepoDigests}}' "$OCI_IMAGE")"
           repo_tags="$(docker image inspect --format '{{json .RepoTags}}' "$OCI_IMAGE")"
+          emit oci_config_digest_expected "$OCI_CONFIG_DIGEST"
+          emit oci_config_digest_actual "$image_id"
+          emit oci_manifest_digest_expected "$OCI_MANIFEST_DIGEST"
+          emit oci_repo_digests_actual "$repo_digests"
           [[ "$image_arch" == "amd64" ]] || fail "OCI image architecture mismatch"
           [[ "$image_os" == "linux" ]] || fail "OCI image OS mismatch"
           [[ "$image_id" == "$OCI_CONFIG_DIGEST" ]] || fail "OCI config digest mismatch"
@@ -753,6 +893,8 @@ jobs:
               ;;
           esac
           host_exe_sha512="$(sudo sha512sum "$host_exe" | awk '{print $1}')"
+          emit container_host_executable_sha512_expected "$host_exe_expected_sha512"
+          emit container_host_executable_sha512_actual "$host_exe_sha512"
           [[ "$host_exe_sha512" == "$host_exe_expected_sha512" ]] \
             || fail "live host-side gVisor executable hash mismatch"
           live_gvisor_processes="$(count_gvisor_processes)"
@@ -804,6 +946,8 @@ jobs:
           emit post_container_gvisor_processes "$remaining_after_container"
 
           sentinel_after="$(sha256sum "$SENTINEL" | awk '{print $1}')"
+          emit sentinel_after_sha256_expected "$sentinel_before"
+          emit sentinel_after_sha256_actual "$sentinel_after"
           [[ "$sentinel_after" == "$sentinel_before" ]] || fail "host sentinel changed"
           emit sentinel_after_sha256 "$sentinel_after"
           emit sentinel_unchanged true

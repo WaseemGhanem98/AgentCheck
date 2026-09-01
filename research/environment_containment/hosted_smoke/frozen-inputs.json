@@ -19,8 +19,11 @@
     },
     "signed_metadata": {
       "inrelease_url": "https://download.docker.com/linux/ubuntu/dists/noble/InRelease",
-      "inrelease_sha256": "f243e58e075e76419642c40effca8f72f2f0b67bebc80f1bfb40f0a87f2df3ae",
+      "suite": "noble",
+      "architecture": "amd64",
+      "packages_path": "stable/binary-amd64/Packages.gz",
       "packages_url": "https://download.docker.com/linux/ubuntu/dists/noble/stable/binary-amd64/Packages.gz",
+      "packages_size": 77410,
       "packages_sha256": "a22aaf0fdf661041647ae600107851fc8c4e5c5bb507013d03a4220d09884aed"
     },
     "packages": [

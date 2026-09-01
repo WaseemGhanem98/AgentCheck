@@ -23,9 +23,11 @@ sentinel, or an accepted `EnvironmentProvider`.
 `.github/workflows/maintained-runtime-smoke.yml` has only
 `workflow_dispatch`, top-level `permissions: {}`, one GitHub-hosted
 `ubuntu-24.04` job, and shell steps. It uses no action, checkout, repository
-content, token, secret, credential, privileged GitHub environment, or automatic
-trigger. The candidate must remain unpushed and unexecuted until a fresh
-independent reviewer accepts the exact committed tree.
+content, privileged GitHub environment, or automatic trigger. No platform token,
+secret, or credential is referenced or exposed to the shell; this is a
+token-unreferenced workflow, not a claim that the Actions platform has no
+internal job token. The exact successor must remain unpushed and unexecuted
+until a fresh independent reviewer accepts its committed tree.
 
 Any future input refresh is a source change requiring renewed review. The
 workflow never follows a moving release alias or changes a digest after a
@@ -38,9 +40,9 @@ duplicated into the no-checkout workflow. Its exact sources and checks are:
 
 - Docker's HTTPS signing key, exact key-file SHA-256, primary fingerprint, and
   signing-subkey fingerprint;
-- an exact SHA-256-pinned Docker Noble `InRelease` plus its detached inline
-  signature verification, and the exact SHA-256-pinned amd64 `Packages.gz` it
-  authenticates;
+- Docker Noble `InRelease` signature verification by that exact key before any
+  field is trusted, then exact signed suite, amd64 target path, SHA-256, and
+  size binding for the exact downloaded `stable/binary-amd64/Packages.gz`;
 - exact `containerd.io`, Docker CLI, and Docker Engine versions, filenames,
   sizes, architectures, and SHA-256 values from that signed package index;
 - gVisor `release-20260817.0`, its full commit, exact archive size, GitHub asset
@@ -54,6 +56,11 @@ The workflow verifies each checksum, fingerprint, signed-index relationship,
 package control field, archive member, installed file, and version before use.
 It tells `runsc install` both `download-sidecars=NEVER` and
 `require-sidecars=ALWAYS`; a missing sidecar cannot trigger a mutable download.
+The whole `InRelease` file is deliberately not byte-pinned: dates and unrelated
+repository components or architectures may change under the same verified key.
+Such aggregate drift is not evidence drift when the exact Noble stable-amd64
+relationship above remains signed and the downloaded package-index and package
+bytes still match their frozen hashes and sizes.
 
 ## Required host-produced evidence
 
@@ -87,7 +94,8 @@ liveness receipt and never substitutes for host-side runtime proof.
 
 ## Fail-closed result
 
-Any download, key, signature, metadata, package, version, archive, sidecar,
+Any download, key, fingerprint, signature, relevant signed metadata,
+package-index relationship or bytes, package, version, archive, sidecar,
 runtime registration, `systrap`, OCI identity, container, host-process,
 numeric user, applied capability/security option, private-tmpfs, sentinel,
 exit, removal, residual-process, runtime-unregistration, daemon-config/backup
