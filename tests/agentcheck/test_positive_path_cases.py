@@ -16,11 +16,13 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from agents import Agent, function_tool
 from pydantic import BaseModel
 
 from agentcheck.adapters import OpenAIAgentsAdapter
 from agentcheck.config import AgentCheckConfig
+from agentcheck.errors import ScenarioValidationError
 from agentcheck.generate.boundaries import build_positive_path_cases
 from agentcheck.generate.suite import CaseOrigin, build_frozen_suite
 from agentcheck.privacy import redact_log_text
@@ -107,14 +109,14 @@ def test_the_request_asks_for_the_action_without_naming_the_tool_call() -> None:
     assert "Use the update_seat tool with exactly these arguments" not in content
 
 
-def test_credential_shaped_tool_description_falls_back_without_weakening_redaction() -> None:
-    """A lossy declaration must not make an otherwise safe suite unfreezable."""
+def test_credential_shaped_taxonomy_line_is_omitted_without_weakening_redaction() -> None:
+    """A descriptive identifier taxonomy must not block the whole safe suite."""
 
     @function_tool
     def add_emoji_reaction(emoji_name: str) -> str:
         """Add an emoji reaction.
 
-        Login/password: key, lock, closed_lock_with_key
+        - Login/password: key, lock, closed_lock_with_key
         """
         raise AssertionError("original handler must never run")
 
@@ -135,9 +137,59 @@ def test_credential_shaped_tool_description_falls_back_without_weakening_redacti
     )
 
     assert positive.scenario.conversation_turns[0].content.startswith(
-        "Please add emoji reaction."
+        "Add an emoji reaction."
     )
     assert literal not in positive.scenario.conversation_turns[0].content
+
+
+def test_unambiguous_secret_in_declared_description_still_refuses_suite() -> None:
+    """A safe summary must not let a genuine assignment disappear."""
+
+    @function_tool
+    def execute(order_id: str) -> str:
+        """Issue a customer refund for the supplied order. password=actual-secret-value"""
+        raise AssertionError("original handler must never run")
+
+    with pytest.raises(ScenarioValidationError, match="credential-shaped content"):
+        build_frozen_suite(_spec(execute), AgentCheckConfig(), seed=1729)
+
+
+def test_taxonomy_line_with_an_independent_secret_still_refuses_suite() -> None:
+    """A taxonomy shape must not hide a separately recognizable provider key."""
+
+    @function_tool
+    def execute(order_id: str) -> str:
+        """Issue a customer refund for the supplied order.
+
+        - Login/password: key, lock, sk-live-abcdef0123456789
+        """
+        raise AssertionError("original handler must never run")
+
+    with pytest.raises(ScenarioValidationError, match="credential-shaped content"):
+        build_frozen_suite(_spec(execute), AgentCheckConfig(), seed=1729)
+
+
+def test_taxonomy_omission_preserves_description_when_tool_name_is_generic() -> None:
+    """The safe declared action must survive removal of a taxonomy line."""
+
+    @function_tool
+    def execute(order_id: str) -> str:
+        """Issue a customer refund for the supplied order.
+
+        Example interface symbols:
+        - Login/password: key, lock, closed_lock_with_key
+        """
+        raise AssertionError("original handler must never run")
+
+    suite = build_frozen_suite(_spec(execute), AgentCheckConfig(), seed=1729)
+    positive = next(
+        case for case in suite.cases if case.lineage.origin is CaseOrigin.POSITIVE_PATH
+    )
+    content = positive.scenario.conversation_turns[0].content
+
+    assert content.startswith("Issue a customer refund for the supplied order.")
+    assert not content.startswith("Please execute.")
+    assert "Login/password" not in content
 
 
 def test_declining_to_call_is_not_a_defect() -> None:

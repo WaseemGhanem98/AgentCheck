@@ -72,6 +72,11 @@ _UNEXPECTED_PROPERTY = "agentcheck_unexpected_property"
 
 _MAX_SCENARIO_ID = 150
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
+_IDENTIFIER_TAXONOMY_BULLET_RE = re.compile(
+    r"^\s*[-*+]\s+[^:=\r\n]*/[^:=\r\n]+:\s*"
+    r"(?P<items>(?P<first>(?:[a-z][a-z0-9_]{0,63}|\+\d{1,4}))"
+    r"(?:\s*,\s*(?:[a-z][a-z0-9_]{0,63}|\+\d{1,4})){2,})\s*$"
+)
 
 # Keywords the extractor reports but this slice deliberately does not invert.
 _UNSUPPORTED_KEYWORDS = (
@@ -738,6 +743,43 @@ def _render_value(value: JsonValue) -> str:
     return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True)
 
 
+def _description_for_positive_request(description: str) -> str:
+    """Omit only lossy Markdown taxonomy lines, or preserve refusal unchanged.
+
+    A slash-delimited category followed by three or more comma-separated
+    identifiers is documentation vocabulary, not a standalone credential
+    assignment. The structure is deliberately narrow: if any lossy line does
+    not have that complete shape, return the original description so the
+    frozen-suite secret check still rejects it. At least one safe line must
+    remain, because falling back to a generic tool name can erase the action
+    semantics that make a positive case useful.
+    """
+
+    if redact_log_text(description) == description:
+        return description
+    kept: list[str] = []
+    removed = False
+    for line in description.splitlines():
+        if redact_log_text(line) == line:
+            kept.append(line)
+            continue
+        match = _IDENTIFIER_TAXONOMY_BULLET_RE.fullmatch(line)
+        if match is not None:
+            identifiers = re.split(r"\s*,\s*", match.group("items"))
+            first_start, first_end = match.span("first")
+            expected = f"{line[:first_start]}[REDACTED]{line[first_end:]}"
+            if all(redact_log_text(item) == item for item in identifiers) and (
+                redact_log_text(line) == expected
+            ):
+                removed = True
+                continue
+        return description
+    candidate = "\n".join(kept).strip()
+    if not removed or not candidate or redact_log_text(candidate) != candidate:
+        return description
+    return candidate
+
+
 def _positive_request(tool: ToolDefinition, arguments: JsonObject) -> str:
     """Ask for the tool's declared action and supply every required value.
 
@@ -749,14 +791,9 @@ def _positive_request(tool: ToolDefinition, arguments: JsonObject) -> str:
     """
 
     description = (tool.description or "").strip()
-    # A declared description can contain credential-shaped text even when the
-    # tool schema itself is safe. Copying that text into a generated request
-    # makes the artifact boundary reject the entire suite. Never redact in
-    # place (that would change the declaration's meaning and fingerprint);
-    # omit the lossy description and use the existing tool-name fallback.
     action = (
-        description
-        if description and redact_log_text(description) == description
+        _description_for_positive_request(description)
+        if description
         else f"Please {_humanise(tool.name)}."
     )
     if not action.endswith((".", "!", "?")):
