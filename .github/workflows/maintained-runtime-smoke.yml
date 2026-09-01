@@ -321,6 +321,117 @@ jobs:
             printf '%s\n' "$count"
           }
 
+          runtime_map_absent() {
+            local runtime_map="$1"
+            python3 -c \
+              'import json, os, sys; raise SystemExit(os.environ["RUNTIME_NAME"] in json.load(sys.stdin))' \
+              <<< "$runtime_map"
+          }
+
+          wait_for_runtime_absence() {
+            local max_attempts="$1"
+            local delay_seconds="$2"
+            local attempt observed_map
+            runtime_map_actual=unavailable
+            runtime_wait_attempts=0
+            for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+              runtime_wait_attempts="$attempt"
+              if observed_map="$(docker info --format '{{json .Runtimes}}' 2>/dev/null)"; then
+                runtime_map_actual="$observed_map"
+                if runtime_map_absent "$runtime_map_actual"; then
+                  return 0
+                fi
+              else
+                runtime_map_actual=unavailable
+              fi
+              if [[ "$attempt" != "$max_attempts" ]]; then
+                sleep "$delay_seconds"
+              fi
+            done
+            return 1
+          }
+
+          cleanup_docker_runtime_state() {
+            local runtime_was_registered="$1"
+            local integration_rc=0
+            local reload_exit=not-run
+            local restart_exit=not-run
+            local restart_used=false
+            local after_reload_absent=not-run
+            local after_reload_map=not-run
+            local after_reload_attempts=0
+            local final_map=unavailable
+            local final_attempts=0
+            local service_state=unavailable
+            local service_active=false
+            runtime_cleanup_absent=false
+
+            if [[ "$runtime_was_registered" == "1" ]]; then
+              if sudo systemctl reload docker.service; then
+                reload_exit=0
+              else
+                reload_exit=$?
+                integration_rc=1
+              fi
+              if wait_for_runtime_absence 5 1; then
+                after_reload_absent=true
+              else
+                after_reload_absent=false
+              fi
+              after_reload_map="$runtime_map_actual"
+              after_reload_attempts="$runtime_wait_attempts"
+
+              if [[ "$reload_exit" != "0" || "$after_reload_absent" != "true" ]]; then
+                restart_used=true
+                if sudo systemctl restart docker.service; then
+                  restart_exit=0
+                else
+                  restart_exit=$?
+                  integration_rc=1
+                fi
+                if wait_for_runtime_absence 5 1; then
+                  runtime_cleanup_absent=true
+                fi
+                final_map="$runtime_map_actual"
+                final_attempts="$runtime_wait_attempts"
+              else
+                runtime_cleanup_absent=true
+                final_map="$after_reload_map"
+                final_attempts="$after_reload_attempts"
+              fi
+            else
+              if wait_for_runtime_absence 1 0; then
+                runtime_cleanup_absent=true
+              fi
+              final_map="$runtime_map_actual"
+              final_attempts="$runtime_wait_attempts"
+            fi
+
+            if service_state="$(systemctl is-active docker.service 2>/dev/null)" \
+                && [[ "$service_state" == "active" ]]; then
+              service_active=true
+            else
+              integration_rc=1
+              [[ -n "$service_state" ]] || service_state=unavailable
+            fi
+            [[ "$runtime_cleanup_absent" == "true" ]] || integration_rc=1
+
+            emit cleanup_docker_reload_exit "$reload_exit"
+            emit cleanup_runtime_after_reload_expected_absent true
+            emit cleanup_runtime_after_reload_absent "$after_reload_absent"
+            emit cleanup_runtime_after_reload_map "$after_reload_map"
+            emit cleanup_runtime_after_reload_attempts "$after_reload_attempts"
+            emit cleanup_docker_restart_used "$restart_used"
+            emit cleanup_docker_restart_exit "$restart_exit"
+            emit cleanup_runtime_final_expected_absent true
+            emit cleanup_runtime_final_absent "$runtime_cleanup_absent"
+            emit cleanup_runtime_final_map "$final_map"
+            emit cleanup_runtime_final_attempts "$final_attempts"
+            emit cleanup_docker_service_state "$service_state"
+            emit cleanup_docker_service_active "$service_active"
+            [[ "$integration_rc" == "0" ]]
+          }
+
           cleanup() {
             local original_rc=$?
             local cleanup_rc=0
@@ -333,6 +444,11 @@ jobs:
             local work_dir_absent=false
             local daemon_config_restored=not-captured
             local daemon_backup_restored=not-captured
+            local daemon_config_restore_applied=not-captured
+            local daemon_backup_restore_applied=not-captured
+            local daemon_config_final_state=not-captured
+            local daemon_backup_final_state=not-captured
+            local runsc_uninstall_exit=not-run
             trap - EXIT
             set +e
 
@@ -349,18 +465,21 @@ jobs:
             fi
 
             if [[ "$runtime_registered" == "1" ]]; then
-              if ! sudo /usr/local/bin/runsc uninstall --runtime "$RUNTIME_NAME"; then
+              if sudo /usr/local/bin/runsc uninstall --runtime "$RUNTIME_NAME"; then
+                runsc_uninstall_exit=0
+              else
+                runsc_uninstall_exit=$?
                 cleanup_rc=1
               fi
             fi
             if [[ "$daemon_state_captured" == "1" ]]; then
-              daemon_config_restored=false
-              daemon_backup_restored=false
+              daemon_config_restore_applied=false
+              daemon_backup_restore_applied=false
               if restore_daemon_path \
                   "$DOCKER_DAEMON_CONFIG" \
                   "$WORK_DIR/daemon.json.before" \
                   "$daemon_config_before_state"; then
-                daemon_config_restored=true
+                daemon_config_restore_applied=true
               else
                 cleanup_rc=1
               fi
@@ -368,21 +487,34 @@ jobs:
                   "$DOCKER_DAEMON_BACKUP" \
                   "$WORK_DIR/daemon.json-backup.before" \
                   "$daemon_backup_before_state"; then
-                daemon_backup_restored=true
+                daemon_backup_restore_applied=true
               else
                 cleanup_rc=1
               fi
             fi
-            if [[ "$runtime_registered" == "1" ]]; then
-              if ! sudo systemctl reload docker.service; then
+            if cleanup_docker_runtime_state "$runtime_registered"; then
+              runtime_absent="$runtime_cleanup_absent"
+            else
+              runtime_absent="$runtime_cleanup_absent"
+              cleanup_rc=1
+            fi
+            if [[ "$daemon_state_captured" == "1" ]]; then
+              daemon_config_final_state="$(daemon_path_state "$DOCKER_DAEMON_CONFIG")"
+              daemon_backup_final_state="$(daemon_path_state "$DOCKER_DAEMON_BACKUP")"
+              daemon_config_restored=false
+              daemon_backup_restored=false
+              if [[ "$daemon_config_restore_applied" == "true" \
+                  && "$daemon_config_final_state" == "$daemon_config_before_state" ]]; then
+                daemon_config_restored=true
+              else
                 cleanup_rc=1
               fi
-            fi
-            if docker info --format '{{json .Runtimes}}' \
-                | python3 -c 'import json, os, sys; raise SystemExit(os.environ["RUNTIME_NAME"] in json.load(sys.stdin))'; then
-              runtime_absent=true
-            else
-              cleanup_rc=1
+              if [[ "$daemon_backup_restore_applied" == "true" \
+                  && "$daemon_backup_final_state" == "$daemon_backup_before_state" ]]; then
+                daemon_backup_restored=true
+              else
+                cleanup_rc=1
+              fi
             fi
 
             for _ in {1..10}; do
@@ -443,9 +575,14 @@ jobs:
 
             emit cleanup_container_absent "$container_absent"
             emit cleanup_residual_gvisor_processes "$remaining"
+            emit cleanup_runsc_uninstall_exit "$runsc_uninstall_exit"
             emit cleanup_runtime_absent "$runtime_absent"
             emit cleanup_daemon_config_restored "$daemon_config_restored"
             emit cleanup_daemon_backup_restored "$daemon_backup_restored"
+            emit cleanup_daemon_config_expected_state "$daemon_config_before_state"
+            emit cleanup_daemon_config_final_state "$daemon_config_final_state"
+            emit cleanup_daemon_backup_expected_state "$daemon_backup_before_state"
+            emit cleanup_daemon_backup_final_state "$daemon_backup_final_state"
             emit cleanup_image_absent "$image_absent"
             emit cleanup_gvisor_files_absent "$gvisor_files_absent"
             emit cleanup_sentinel_sha256 "$after_hash"

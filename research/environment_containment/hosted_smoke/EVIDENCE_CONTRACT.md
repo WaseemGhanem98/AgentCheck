@@ -83,10 +83,13 @@ and the reviewer must also retain the GitHub `Set up job` runner-image block:
    `CapDrop=["ALL"]` and `SecurityOpt=["no-new-privileges"]`, a private `/tmp`
    tmpfs writable only by that UID:GID, and container exit code zero;
 8. automatic container removal, zero remaining frozen-gVisor processes,
-   runtime unregistration, byte/owner/mode restoration of the prior Docker
-   daemon config and its backup (including prior absence), truthful final image
-   presence, frozen gVisor file removal, temporary download/extraction directory
-   removal, and unchanged sentinel SHA-256.
+   exact `runsc uninstall` exit, bounded post-reload runtime-map observations,
+   any required Docker restart exit, final live runtime absence and Docker
+   service health, byte/owner/mode restoration of the prior Docker daemon config
+   and its backup reverified after final daemon convergence (including prior
+   absence), truthful final image presence, frozen gVisor file removal,
+   temporary download/extraction directory removal, and unchanged sentinel
+   SHA-256.
 
 In-container `dmesg` is neither invoked nor accepted as runtime identity.
 Target stdout would be untrusted in M2; here the fixed benign stdout is only a
@@ -99,12 +102,19 @@ package-index relationship or bytes, package, version, archive, sidecar,
 runtime registration, `systrap`, OCI identity, container, host-process,
 numeric user, applied capability/security option, private-tmpfs, sentinel,
 exit, removal, residual-process, runtime-unregistration, daemon-config/backup
-restoration, or owned-image cleanup mismatch makes the job fail. A pre-existing
-image fails before execution, remains untouched, and is truthfully receipted as
-present rather than misreported as cleaned. A remaining temporary download/
-extraction directory also fails cleanup. Cleanup runs on every exit and cannot
-turn an earlier error into success. There is no retry through another runtime,
-no standalone runsc execution mode, and no trusted-subprocess path.
+restoration, daemon reload/restart command, final live runtime map, Docker
+service-health, or owned-image cleanup mismatch makes the job fail. After
+restoring the prior daemon files, cleanup polls live runtime absence for a
+bounded interval. A still-advertised runtime causes one explicit Docker restart
+and another bounded poll; command failure, unhealthy service, unavailable or
+malformed runtime state, continued registration, or post-convergence file-state
+drift remains a failure. This deterministic cleanup recovery is not a runtime
+execution fallback. A pre-existing image fails before execution, remains
+untouched, and is truthfully receipted as present rather than misreported as
+cleaned. A remaining temporary download/extraction directory also fails
+cleanup. Cleanup runs on every exit and cannot turn an earlier error into
+success. There is no retry through another runtime, no standalone runsc
+execution mode, and no trusted-subprocess path.
 
 ## Interpretation
 

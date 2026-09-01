@@ -322,9 +322,21 @@ def test_evidence_and_cleanup_contract_are_complete_and_bounded() -> None:
         "sentinel_unchanged",
         "cleanup_container_absent",
         "cleanup_residual_gvisor_processes",
+        "cleanup_runsc_uninstall_exit",
+        "cleanup_docker_reload_exit",
+        "cleanup_runtime_after_reload_absent",
+        "cleanup_runtime_after_reload_map",
+        "cleanup_docker_restart_used",
+        "cleanup_docker_restart_exit",
+        "cleanup_runtime_final_absent",
+        "cleanup_runtime_final_map",
+        "cleanup_docker_service_state",
+        "cleanup_docker_service_active",
         "cleanup_runtime_absent",
         "cleanup_daemon_config_restored",
         "cleanup_daemon_backup_restored",
+        "cleanup_daemon_config_final_state",
+        "cleanup_daemon_backup_final_state",
         "cleanup_image_absent",
         "cleanup_gvisor_files_absent",
         "cleanup_work_dir_absent",
@@ -340,6 +352,9 @@ def test_evidence_and_cleanup_contract_are_complete_and_bounded() -> None:
     assert "runsc uninstall --runtime" in script
     assert "docker image rm" in script
     assert "count_gvisor_processes" in script
+    assert "cleanup_docker_runtime_state" in script
+    assert "wait_for_runtime_absence 5 1" in script
+    assert "systemctl restart docker.service" in script
     assert 'rm -rf -- "$WORK_DIR"' in script
     assert "cleanup_work_dir_absent" in script
     assert "host sentinel changed" in script
@@ -353,6 +368,8 @@ def test_evidence_and_cleanup_contract_are_complete_and_bounded() -> None:
         "whole `InRelease` file is deliberately not byte-pinned",
         "package-index and package bytes still match their frozen hashes and sizes",
         "token-unreferenced workflow",
+        "bounded post-reload runtime-map observations",
+        "reverified after final daemon convergence",
         "In-container `dmesg` is neither invoked nor accepted",
         "all hosted/runtime outcomes are **NOT PROVEN**",
     ):
@@ -392,6 +409,7 @@ exit 97
         prefix
         + separator
         + "count_gvisor_processes() { printf '0\\n'; }\n"
+        + "systemctl() { printf 'active\\n'; }\n"
         + 'if docker image inspect "$OCI_IMAGE" >/dev/null 2>&1; then\n'
         + '  fail "frozen OCI image unexpectedly exists before the smoke"\n'
         + "fi\n"
@@ -459,6 +477,15 @@ restore_daemon_path {backup} {tmp_path / "unused"} absent
     assert cleanup.index("runsc uninstall --runtime") < cleanup.index(
         "restore_daemon_path"
     )
+    assert cleanup.index("docker container inspect") < cleanup.index(
+        "cleanup_docker_runtime_state"
+    )
+    assert cleanup.index("restore_daemon_path") < cleanup.index(
+        "cleanup_docker_runtime_state"
+    )
+    assert cleanup.index("cleanup_docker_runtime_state") < cleanup.index(
+        'daemon_config_final_state="$(daemon_path_state'
+    )
     assert "$DOCKER_DAEMON_BACKUP" in cleanup
     assert "daemon_config_restored=true" in cleanup
     assert "daemon_backup_restored=true" in cleanup
@@ -470,6 +497,174 @@ restore_daemon_path {backup} {tmp_path / "unused"} absent
         "daemon_state_captured=1",
     ):
         assert required in script
+
+
+def _runtime_cleanup_result(
+    tmp_path: pathlib.Path,
+    *,
+    reload_clears: bool,
+    restart_clears: bool,
+    reload_succeeds: bool = True,
+    restart_succeeds: bool = True,
+    service_active: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    script = _smoke_script(_load_workflow())
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(parents=True)
+    state = tmp_path / "runtime-state"
+    state.write_text("present\n", encoding="utf-8")
+
+    fake_docker = fake_bin / "docker"
+    fake_docker.write_text(
+        """#!/usr/bin/env bash
+set -Eeuo pipefail
+[[ "$1" == "info" ]]
+if [[ "$(< "$FAKE_RUNTIME_STATE")" == "present" ]]; then
+  printf '%s\\n' '{"ac-smoke-runsc":{"path":"/usr/local/bin/runsc"},"runc":{}}'
+else
+  printf '%s\\n' '{"runc":{}}'
+fi
+""",
+        encoding="utf-8",
+    )
+    fake_docker.chmod(0o755)
+    fake_systemctl = fake_bin / "systemctl"
+    fake_systemctl.write_text(
+        """#!/usr/bin/env bash
+set -Eeuo pipefail
+case "$1" in
+  reload)
+    [[ "$FAKE_RELOAD_SUCCEEDS" == "1" ]] || exit 4
+    if [[ "$FAKE_RELOAD_CLEARS" == "1" ]]; then
+      printf 'absent\\n' > "$FAKE_RUNTIME_STATE"
+    fi
+    ;;
+  restart)
+    [[ "$FAKE_RESTART_SUCCEEDS" == "1" ]] || exit 5
+    if [[ "$FAKE_RESTART_CLEARS" == "1" ]]; then
+      printf 'absent\\n' > "$FAKE_RUNTIME_STATE"
+    fi
+    ;;
+  is-active)
+    if [[ "$FAKE_SERVICE_ACTIVE" == "1" ]]; then
+      printf 'active\\n'
+    else
+      printf 'inactive\\n'
+      exit 3
+    fi
+    ;;
+  *) exit 97 ;;
+esac
+""",
+        encoding="utf-8",
+    )
+    fake_systemctl.chmod(0o755)
+
+    harness = "\n".join(
+        [
+            "set -Eeuo pipefail",
+            'sudo() { "$@"; }',
+            "sleep() { :; }",
+            'emit() { printf \'TEST_RECEIPT\\t%s\\t%s\\n\' "$1" "$2"; }',
+            _bash_function(script, "runtime_map_absent"),
+            _bash_function(script, "wait_for_runtime_absence"),
+            _bash_function(script, "cleanup_docker_runtime_state"),
+            "cleanup_docker_runtime_state 1",
+        ]
+    )
+    env = os.environ.copy()
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "RUNTIME_NAME": "ac-smoke-runsc",
+            "FAKE_RUNTIME_STATE": str(state),
+            "FAKE_RELOAD_CLEARS": "1" if reload_clears else "0",
+            "FAKE_RESTART_CLEARS": "1" if restart_clears else "0",
+            "FAKE_RELOAD_SUCCEEDS": "1" if reload_succeeds else "0",
+            "FAKE_RESTART_SUCCEEDS": "1" if restart_succeeds else "0",
+            "FAKE_SERVICE_ACTIVE": "1" if service_active else "0",
+        }
+    )
+    return subprocess.run(
+        ["bash"],
+        input=harness,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=env,
+    )
+
+
+def test_cleanup_runtime_state_restarts_after_stale_reload_and_fails_closed(
+    tmp_path: pathlib.Path,
+) -> None:
+    recovered = _runtime_cleanup_result(
+        tmp_path / "recovered", reload_clears=False, restart_clears=True
+    )
+    assert recovered.returncode == 0, recovered.stdout + recovered.stderr
+    for receipt in (
+        "cleanup_docker_reload_exit\t0",
+        "cleanup_runtime_after_reload_absent\tfalse",
+        'cleanup_runtime_after_reload_map\t{"ac-smoke-runsc"',
+        "cleanup_runtime_after_reload_attempts\t5",
+        "cleanup_docker_restart_used\ttrue",
+        "cleanup_docker_restart_exit\t0",
+        "cleanup_runtime_final_expected_absent\ttrue",
+        "cleanup_runtime_final_absent\ttrue",
+        'cleanup_runtime_final_map\t{"runc":{}}',
+        "cleanup_runtime_final_attempts\t1",
+        "cleanup_docker_service_state\tactive",
+        "cleanup_docker_service_active\ttrue",
+    ):
+        assert receipt in recovered.stdout
+
+    stale = _runtime_cleanup_result(
+        tmp_path / "stale", reload_clears=False, restart_clears=False
+    )
+    assert stale.returncode == 1
+    assert "cleanup_docker_restart_used\ttrue" in stale.stdout
+    assert "cleanup_runtime_final_absent\tfalse" in stale.stdout
+    assert 'cleanup_runtime_final_map\t{"ac-smoke-runsc"' in stale.stdout
+    assert "cleanup_runtime_final_attempts\t5" in stale.stdout
+    assert "cleanup_docker_service_active\ttrue" in stale.stdout
+
+    reloaded = _runtime_cleanup_result(
+        tmp_path / "reloaded", reload_clears=True, restart_clears=False
+    )
+    assert reloaded.returncode == 0, reloaded.stdout + reloaded.stderr
+    assert "cleanup_runtime_after_reload_absent\ttrue" in reloaded.stdout
+    assert "cleanup_docker_restart_used\tfalse" in reloaded.stdout
+    assert "cleanup_docker_restart_exit\tnot-run" in reloaded.stdout
+
+    failed_reload = _runtime_cleanup_result(
+        tmp_path / "failed-reload",
+        reload_clears=False,
+        restart_clears=True,
+        reload_succeeds=False,
+    )
+    assert failed_reload.returncode == 1
+    assert "cleanup_docker_reload_exit\t4" in failed_reload.stdout
+    assert "cleanup_runtime_final_absent\ttrue" in failed_reload.stdout
+
+    failed_restart = _runtime_cleanup_result(
+        tmp_path / "failed-restart",
+        reload_clears=False,
+        restart_clears=True,
+        restart_succeeds=False,
+    )
+    assert failed_restart.returncode == 1
+    assert "cleanup_docker_restart_exit\t5" in failed_restart.stdout
+    assert "cleanup_runtime_final_absent\tfalse" in failed_restart.stdout
+
+    unhealthy = _runtime_cleanup_result(
+        tmp_path / "unhealthy",
+        reload_clears=True,
+        restart_clears=False,
+        service_active=False,
+    )
+    assert unhealthy.returncode == 1
+    assert "cleanup_docker_service_state\tinactive" in unhealthy.stdout
+    assert "cleanup_docker_service_active\tfalse" in unhealthy.stdout
 
 
 def _synthetic_inrelease(
