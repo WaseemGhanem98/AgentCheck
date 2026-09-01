@@ -2,21 +2,23 @@
 #
 # Copy this workflow into a repository that has an AgentCheck target, then:
 #   1. Set AGENTCHECK_TARGET to that directory (often ".").
-#   2. Commit a trusted baseline produced by an explicit command, not by a
+#   2. Replace the target-dependency step with your repository's own locked
+#      install. AgentCheck's adapter extras install one supported SDK; they do
+#      not install the rest of an arbitrary target application's dependencies.
+#   3. Commit a trusted baseline produced by an explicit command, not by a
 #      failing CI run:
 #         agentcheck test "$AGENTCHECK_TARGET" --no-store
 #         agentcheck baseline create "$AGENTCHECK_TARGET" --latest --out agentcheck-baseline.json
-#   3. Enable pull_request/push triggers if you want this on every change.
+#   4. Enable pull_request/push triggers if you want this on every change.
 #
 # This workflow does not call a hosted AgentCheck service, does not use the
-# GitHub API, and does not supply provider credentials. It fails only on new
-# or changed authoritative FAIL identities, not on historical failures and
-# not on INCONCLUSIVE.
+# GitHub API, and does not supply provider credentials. `agentcheck gate` is
+# the sole decision authority: the YAML does not reinterpret its exit status.
 #
 # This repository is not itself an AgentCheck target at its root. The default
 # below points at the bundled deterministic example. There is no committed
-# example baseline here; workflow_dispatch will exit 2 until you create one
-# locally or in a consuming project.
+# example baseline here. Without a baseline, all-PASS can exit 0, any FAIL
+# exits 1, and INCONCLUSIVE exits 3; baseline absence alone is not exit 2.
 
 # Runner note: this workflow is deliberately GitHub-hosted so the copied
 # template does not expose a personal runner to pull-request code. It is
@@ -57,27 +59,38 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: pyproject.toml
 
       - name: Install AgentCheck
         run: |
           python -m pip install --upgrade "pip==26.1.2" "setuptools==83.0.0"
-          python -m pip install ".[openai-agents]"
+          python -m pip install "agentcheck-ai==0.5.2"
+          agentcheck --version
+
+      - name: Install target dependencies
+        # This repository's bundled example imports the OpenAI Agents SDK.
+        # Replace this step in a consuming repository with that target's own
+        # locked dependency install. For an OpenAI or PydanticAI target, the
+        # corresponding exact AgentCheck extra is a convenient SDK install:
+        #   agentcheck-ai[openai-agents]==0.5.2
+        #   agentcheck-ai[pydantic-ai]==0.5.2
+        # Custom targets use the base package plus their own dependencies.
+        run: |
+          python -m pip install "openai-agents>=0.20,<0.23" "websockets>=15,<16"
 
       - name: Gate the change on agent behaviour
         # One command for the whole flow: run the frozen suite, compare it to
         # the trusted baseline, and return one status.
         #
-        #   0  no new behavioural failure -- historical failures the baseline
-        #      already accepts do not block
-        #   1  a behavioural failure is new against the baseline
-        #   2  the run is not certifiable (infrastructure, or a suite / source /
-        #      baseline mismatch). Deliberately not reported as a regression:
-        #      a suite that could not execute has not said anything about the
-        #      agent, and calling that a behavioural result is how a broken
-        #      harness becomes a green build.
-        #   3  the suite could not decide. Never treated as a pass.
+        #   0  allow: no new behavioural failure against a trusted baseline;
+        #      without one, every case passed. Accepted historical failures
+        #      may pass only when the current run is otherwise certifiable.
+        #   1  block: a behavioural failure is new against the baseline; without
+        #      one, any behavioural failure blocks.
+        #   2  block: the run or comparison is not certifiable (infrastructure,
+        #      incomplete execution evidence, or a suite/source/baseline
+        #      mismatch). A missing baseline by itself does not force exit 2.
+        #   3  block: the available evidence is INCONCLUSIVE. AgentCheck 0.5.2
+        #      does not let a baseline turn missing current evidence into PASS.
         run: |
           agentcheck gate "$AGENTCHECK_TARGET" \
             --baseline "$AGENTCHECK_BASELINE" \

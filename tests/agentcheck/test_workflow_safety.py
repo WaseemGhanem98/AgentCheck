@@ -14,6 +14,7 @@ import yaml
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOWS = REPOSITORY_ROOT / ".github" / "workflows"
+AGENTCHECK_EXAMPLE = WORKFLOWS / "agentcheck-example.yml"
 TRUST_MODEL_DOC = REPOSITORY_ROOT / "docs" / "ci-trust-model.md"
 FULL_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 
@@ -156,6 +157,75 @@ def test_process_heavy_pytest_commands_are_serial_on_hosted_runners() -> None:
     ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
     assert "tests -q -n 1" in ci
     assert '"${compat[@]}" -q -n 1' in ci
+
+
+def test_agentcheck_example_installs_the_exact_public_distribution() -> None:
+    workflow = _load(AGENTCHECK_EXAMPLE)
+    steps = workflow["jobs"]["regression-gate"]["steps"]
+    install = next(step for step in steps if step.get("name") == "Install AgentCheck")
+    script = install["run"]
+
+    assert 'python -m pip install "agentcheck-ai==0.5.2"' in script
+    assert "agentcheck --version" in script
+    assert 'pip install ".' not in script
+    assert "pyproject.toml" not in script
+
+
+def test_agentcheck_example_is_safe_without_consumer_cache_metadata() -> None:
+    workflow = _load(AGENTCHECK_EXAMPLE)
+    steps = workflow["jobs"]["regression-gate"]["steps"]
+    setup = next(step for step in steps if step.get("name") == "Set up Python")
+
+    assert setup["with"] == {"python-version": "3.12"}
+    assert "cache" not in setup["with"]
+    assert "cache-dependency-path" not in setup["with"]
+
+
+def test_agentcheck_example_separates_target_dependencies_from_the_evaluator() -> None:
+    workflow = _load(AGENTCHECK_EXAMPLE)
+    steps = workflow["jobs"]["regression-gate"]["steps"]
+    evaluator_index = next(
+        index for index, step in enumerate(steps) if step.get("name") == "Install AgentCheck"
+    )
+    target_index = next(
+        index
+        for index, step in enumerate(steps)
+        if step.get("name") == "Install target dependencies"
+    )
+    target_step = steps[target_index]
+    text = AGENTCHECK_EXAMPLE.read_text(encoding="utf-8")
+    prose = " ".join(line.lstrip("# ").strip() for line in text.splitlines())
+
+    assert evaluator_index < target_index
+    assert '"openai-agents>=0.20,<0.23"' in target_step["run"]
+    assert '"websockets>=15,<16"' in target_step["run"]
+    assert "replace this step" in prose.lower()
+    assert "do not install the rest of an arbitrary target" in prose.lower()
+    assert "agentcheck-ai[pydantic-ai]==0.5.2" in text
+    assert "custom targets use the base package plus their own dependencies" in prose.lower()
+
+
+def test_agentcheck_example_leaves_the_decision_to_gate() -> None:
+    workflow = _load(AGENTCHECK_EXAMPLE)
+    steps = workflow["jobs"]["regression-gate"]["steps"]
+    commands = "\n".join(
+        str(step.get("run", "")) for step in steps if isinstance(step, dict)
+    )
+    text = AGENTCHECK_EXAMPLE.read_text(encoding="utf-8")
+
+    assert commands.count("agentcheck gate") == 1
+    assert "agentcheck baseline check" not in commands
+    assert "continue-on-error" not in text
+    assert "sole decision authority" in text
+    for required in (
+        "0  allow:",
+        "1  block:",
+        "2  block:",
+        "3  block:",
+        "A missing baseline by itself does not force exit 2.",
+        "does not let a baseline turn missing current evidence into PASS",
+    ):
+        assert required in text
 
 
 def test_dependabot_preserves_supported_python_dependency_ranges() -> None:
