@@ -381,10 +381,12 @@ def _declared_types(schema: Mapping[str, Any]) -> tuple[JsonSchemaType, ...] | N
 
 
 def _union_branch_types(schema: Mapping[str, Any]) -> tuple[JsonSchemaType, ...] | None:
-    """Resolve the common ``anyOf``/``oneOf`` union of plain typed branches.
+    """Resolve an ``anyOf``/``oneOf`` union whose branches declare their types.
 
-    Optional arguments are usually declared this way.  Only branches that carry
-    nothing but a ``type`` are resolved; anything richer stays unknown.
+    Optional arguments are usually declared this way.  Structural keywords such
+    as ``items`` constrain a branch without making its explicit ``type``
+    ambiguous; candidate values remain independently proved by the full schema
+    validator before generation emits them.
     """
 
     for keyword in ("anyOf", "oneOf"):
@@ -394,7 +396,7 @@ def _union_branch_types(schema: Mapping[str, Any]) -> tuple[JsonSchemaType, ...]
         resolved: set[JsonSchemaType] = set()
         for branch in branches:
             mapping = _mapping(branch)
-            if mapping is None or set(mapping) != {"type"}:
+            if mapping is None:
                 return None
             branch_types = _declared_types(mapping)
             if branch_types is None:
