@@ -14,7 +14,7 @@ is the only way the resulting trajectory says anything about the agent.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, List, Optional
 
 from agents import Agent, function_tool
 from pydantic import BaseModel
@@ -23,6 +23,7 @@ from agentcheck.adapters import OpenAIAgentsAdapter
 from agentcheck.config import AgentCheckConfig
 from agentcheck.generate.boundaries import build_positive_path_cases
 from agentcheck.generate.suite import CaseOrigin, build_frozen_suite
+from agentcheck.inspect.capabilities import JsonSchemaType, extract_capabilities
 from agentcheck.schema_safety import offline_validator
 
 
@@ -36,6 +37,12 @@ def update_seat(confirmation_number: str, new_seat: str) -> str:
 def lookup_account(account_id: str) -> str:
     """Look up an account."""
     raise AssertionError("original handler must never run")
+
+
+class UnsupportedStructuredValue(BaseModel):
+    """Forces one union branch through a local schema reference."""
+
+    label: str
 
 
 def _spec(*tools: Any, output_type: Any = None):
@@ -144,6 +151,71 @@ def test_tools_without_a_constructible_baseline_are_omitted() -> None:
         raise AssertionError("original handler must never run")
 
     assert _positive(_spec(opaque)) == ()
+
+
+def test_schema_union_matrix_preserves_known_types_and_unknowns() -> None:
+    """Structural union branches stay known; implicit branch types do not.
+
+    OpenAI Agents SDK 0.22 emits ``Optional[List[str]]`` as an ``anyOf`` whose
+    array branch carries both ``type`` and ``items``.  That structural keyword
+    must not make the declared array type disappear from generation.  A branch
+    expressed only through ``$ref`` remains unknown and fail-closed.
+    """
+
+    @function_tool
+    def scalar(value: str) -> str:
+        """Accept one scalar string."""
+        raise AssertionError("original handler must never run")
+
+    @function_tool
+    def nullable_scalar(value: Optional[str]) -> str:
+        """Accept one nullable scalar string."""
+        raise AssertionError("original handler must never run")
+
+    @function_tool
+    def array(value: List[str]) -> str:
+        """Accept one array of strings."""
+        raise AssertionError("original handler must never run")
+
+    @function_tool
+    def nullable_array(value: Optional[List[str]]) -> str:
+        """Accept one nullable array of strings."""
+        raise AssertionError("original handler must never run")
+
+    @function_tool
+    def unsupported_union(value: str | UnsupportedStructuredValue) -> str:
+        """Accept a scalar or locally referenced structured value."""
+        raise AssertionError("original handler must never run")
+
+    specs = [
+        _spec(tool)
+        for tool in (scalar, nullable_scalar, array, nullable_array, unsupported_union)
+    ]
+    case_counts = [len(_positive(spec)) for spec in specs]
+    parameter_types = [
+        extract_capabilities([spec.tools.items[0].value])[0]
+        .arguments.parameters[0]
+        .types
+        for spec in specs
+    ]
+    nullable_array_definition = specs[3].tools.items[0].value
+    nullable_array_arguments = _positive(specs[3])[0].allowed_tool_behavior[
+        0
+    ].arguments_match
+
+    assert case_counts == [1, 1, 1, 1, 0]
+    assert parameter_types == [
+        (JsonSchemaType.STRING,),
+        (JsonSchemaType.NULL, JsonSchemaType.STRING),
+        (JsonSchemaType.ARRAY,),
+        (JsonSchemaType.ARRAY, JsonSchemaType.NULL),
+        (),
+    ]
+    assert nullable_array_arguments == {"value": []}
+    assert isinstance(nullable_array_arguments["value"], list)
+    assert offline_validator(nullable_array_definition.input_schema).is_valid(
+        dict(nullable_array_arguments)
+    )
 
 
 def test_a_zero_parameter_tool_has_a_constructible_baseline() -> None:
