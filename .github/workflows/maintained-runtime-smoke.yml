@@ -1,0 +1,699 @@
+# Review-only candidate for one harmless maintained-runtime dependency smoke.
+# Do not push or invoke before fresh independent review of the exact tree.
+
+name: Maintained runtime harmless smoke
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  harmless-smoke:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      DOCKER_KEY_URL: https://download.docker.com/linux/ubuntu/gpg
+      DOCKER_KEY_SHA256: 1500c1f56fa9e26b9b8f42452a553675796ade0807cdce11975eb98170b3a570
+      DOCKER_KEY_PRIMARY_FINGERPRINT: 9DC858229FC7DD38854AE2D88D81803C0EBFCD88
+      DOCKER_KEY_SIGNING_FINGERPRINT: D3306A018370199E527AE7997EA0A9C3F273FCD8
+      DOCKER_INRELEASE_URL: https://download.docker.com/linux/ubuntu/dists/noble/InRelease
+      DOCKER_INRELEASE_SHA256: f243e58e075e76419642c40effca8f72f2f0b67bebc80f1bfb40f0a87f2df3ae
+      DOCKER_PACKAGES_URL: https://download.docker.com/linux/ubuntu/dists/noble/stable/binary-amd64/Packages.gz
+      DOCKER_PACKAGES_SHA256: a22aaf0fdf661041647ae600107851fc8c4e5c5bb507013d03a4220d09884aed
+      DOCKER_CE_VERSION: 5:29.7.2-1~ubuntu.24.04~noble
+      DOCKER_CE_URL: https://download.docker.com/linux/ubuntu/dists/noble/pool/stable/amd64/docker-ce_29.7.2-1~ubuntu.24.04~noble_amd64.deb
+      DOCKER_CE_SHA256: 8243f97d569a0fa33ea32417e399e9f524e7d75d3898fa9d24e0eadaa486af68
+      DOCKER_CE_SIZE: "24039440"
+      DOCKER_CLI_VERSION: 5:29.7.2-1~ubuntu.24.04~noble
+      DOCKER_CLI_URL: https://download.docker.com/linux/ubuntu/dists/noble/pool/stable/amd64/docker-ce-cli_29.7.2-1~ubuntu.24.04~noble_amd64.deb
+      DOCKER_CLI_SHA256: 920a5fa031f33f2dd5b56b4a9bc4c725bc9549d6007004a6610a469873ec69fe
+      DOCKER_CLI_SIZE: "16984968"
+      CONTAINERD_VERSION: 2.1.5-1~ubuntu.24.04~noble
+      CONTAINERD_URL: https://download.docker.com/linux/ubuntu/dists/noble/pool/stable/amd64/containerd.io_2.1.5-1~ubuntu.24.04~noble_amd64.deb
+      CONTAINERD_SHA256: 42abab84165c35f6db6a141a02546d2396d8b9ef2c1923e2d6e4ec46cc5c6d47
+      CONTAINERD_SIZE: "22421448"
+      REQUIRED_DOCKER_VERSION: 29.7.2
+      GVISOR_RELEASE: release-20260817.0
+      GVISOR_COMMIT: 50e1502a95d36ad2faf2c7ef33b8bf21fe975293
+      GVISOR_ARCHIVE_URL: https://storage.googleapis.com/gvisor/releases/release/20260817.0/x86_64/gvisor.tar.bz2
+      GVISOR_ARCHIVE_SIZE: "164966070"
+      GVISOR_ARCHIVE_SHA256: ae345a8c1466586b3a163fb534301913da663a97b8ed446bc711b2e1963a32c5
+      GVISOR_ARCHIVE_SHA512: bd8271a7742f90e53373b2a8613f37f3ae2c765ff5e2e611a75a47167a323cab7519b149c50273307743491713525a14ad1b3e398651c93b16f3e248dfeff3dd
+      GVISOR_CHECKSUM_URL: https://storage.googleapis.com/gvisor/releases/release/20260817.0/x86_64/gvisor.tar.bz2.sha512
+      GVISOR_CHECKSUM_SHA256: 05730cd00318dff9e618e33566d6fa246cbd3ac141bb5799355ca039ff0556ee
+      RUNTIME_NAME: ac-smoke-runsc
+      OCI_IMAGE: docker.io/library/python@sha256:4427763a1ba36f5aa8f656a03e5d00f3b8d61f5dd950c73df6c14f8c7640f8ab
+      OCI_MANIFEST_DIGEST: sha256:4427763a1ba36f5aa8f656a03e5d00f3b8d61f5dd950c73df6c14f8c7640f8ab
+      OCI_CONFIG_DIGEST: sha256:4a7066d275a270e82ae35c51c7beed7167a9e23713d8b95ea5a5dc5c229d60aa
+
+    steps:
+      - name: Verify, run, and tear down the frozen harmless smoke
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          umask 077
+
+          WORK_DIR="$(mktemp -d "$RUNNER_TEMP/ac-maintained-runtime-smoke.XXXXXX")"
+          EVIDENCE="$WORK_DIR/evidence.tsv"
+          SENTINEL="$RUNNER_TEMP/ac-host-sentinel-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          CONTAINER_NAME="ac-harmless-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          runtime_registered=0
+          gvisor_installed=0
+          image_pulled=0
+          container_owned=0
+          sentinel_owned=0
+          sentinel_before=missing
+
+          emit() {
+            local key="$1"
+            local value="$2"
+            if [[ "$key" == *$'\t'* || "$value" == *$'\t'* || "$value" == *$'\n'* ]]; then
+              echo "invalid multiline evidence value for $key" >&2
+              return 1
+            fi
+            if [[ -d "$WORK_DIR" ]]; then
+              printf 'AC_SMOKE_EVIDENCE_V1\t%s\t%s\n' "$key" "$value" \
+                | tee -a "$EVIDENCE"
+            else
+              printf 'AC_SMOKE_EVIDENCE_V1\t%s\t%s\n' "$key" "$value"
+            fi
+          }
+
+          fail() {
+            echo "FAIL: $*" >&2
+            return 1
+          }
+
+          fetch() {
+            local url="$1"
+            local output="$2"
+            curl --proto '=https' --tlsv1.2 --fail --show-error --silent --location \
+              --output "$output" "$url"
+          }
+
+          require_sha256() {
+            local expected="$1"
+            local path="$2"
+            local actual
+            actual="$(sha256sum "$path" | awk '{print $1}')"
+            [[ "$actual" == "$expected" ]] || fail "SHA-256 mismatch for $path"
+          }
+
+          require_sha512() {
+            local expected="$1"
+            local path="$2"
+            local actual
+            actual="$(sha512sum "$path" | awk '{print $1}')"
+            [[ "$actual" == "$expected" ]] || fail "SHA-512 mismatch for $path"
+          }
+
+          count_gvisor_processes() {
+            local count=0
+            local link target
+            for link in /proc/[0-9]*/exe; do
+              if ! target="$(sudo readlink "$link" 2>/dev/null)"; then
+                continue
+              fi
+              case "$target" in
+                /usr/local/bin/runsc|/usr/local/bin/containerd-shim-runsc-v1|/usr/local/bin/gvisor-bin/*)
+                  count=$((count + 1))
+                  ;;
+              esac
+            done
+            printf '%s\n' "$count"
+          }
+
+          cleanup() {
+            local original_rc=$?
+            local cleanup_rc=0
+            local remaining=0
+            local after_hash="missing"
+            local container_absent=false
+            local runtime_absent=false
+            local image_absent=false
+            local gvisor_files_absent=false
+            local work_dir_absent=false
+            trap - EXIT
+            set +e
+
+            if [[ "$container_owned" == "1" ]] \
+                && docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+              if ! docker container rm --force "$CONTAINER_NAME" >/dev/null; then
+                cleanup_rc=1
+              fi
+            fi
+            if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+              cleanup_rc=1
+            else
+              container_absent=true
+            fi
+
+            if [[ "$runtime_registered" == "1" ]]; then
+              if ! sudo /usr/local/bin/runsc uninstall --runtime "$RUNTIME_NAME"; then
+                cleanup_rc=1
+              fi
+              if ! sudo systemctl reload docker.service; then
+                cleanup_rc=1
+              fi
+            fi
+            if docker info --format '{{json .Runtimes}}' \
+                | python3 -c 'import json, os, sys; raise SystemExit(os.environ["RUNTIME_NAME"] in json.load(sys.stdin))'; then
+              runtime_absent=true
+            else
+              cleanup_rc=1
+            fi
+
+            for _ in {1..10}; do
+              remaining="$(count_gvisor_processes)"
+              if [[ "$remaining" == "0" ]]; then
+                break
+              fi
+              sleep 1
+            done
+            if [[ "$remaining" != "0" ]]; then
+              cleanup_rc=1
+            fi
+
+            if [[ "$image_pulled" == "1" ]]; then
+              if docker image inspect "$OCI_IMAGE" >/dev/null 2>&1; then
+                if ! docker image rm "$OCI_IMAGE" >/dev/null; then
+                  cleanup_rc=1
+                fi
+              fi
+              if docker image inspect "$OCI_IMAGE" >/dev/null 2>&1; then
+                cleanup_rc=1
+              else
+                image_absent=true
+              fi
+            else
+              image_absent=true
+            fi
+
+            if [[ "$sentinel_owned" == "1" && -f "$SENTINEL" ]]; then
+              after_hash="$(sha256sum "$SENTINEL" | awk '{print $1}')"
+              if [[ "$after_hash" != "$sentinel_before" ]]; then
+                cleanup_rc=1
+              fi
+              if ! rm -f "$SENTINEL"; then
+                cleanup_rc=1
+              fi
+            elif [[ "$sentinel_owned" == "1" ]]; then
+              cleanup_rc=1
+            fi
+
+            if [[ "$gvisor_installed" == "1" ]]; then
+              if ! sudo rm -f \
+                /usr/local/bin/runsc \
+                /usr/local/bin/containerd-shim-runsc-v1 \
+                /usr/local/bin/gvisor-bin/checkpointgofer \
+                /usr/local/bin/gvisor-bin/gvisor-sentry-prewarmer \
+                /usr/local/bin/gvisor-bin/gvisor_sentry \
+                /usr/local/bin/gvisor-bin/runsc-metric-server; then
+                cleanup_rc=1
+              fi
+              if ! sudo rmdir /usr/local/bin/gvisor-bin; then
+                cleanup_rc=1
+              fi
+            fi
+            if [[ ! -e /usr/local/bin/runsc \
+                && ! -e /usr/local/bin/containerd-shim-runsc-v1 \
+                && ! -e /usr/local/bin/gvisor-bin ]]; then
+              gvisor_files_absent=true
+            else
+              cleanup_rc=1
+            fi
+
+            emit cleanup_container_absent "$container_absent"
+            emit cleanup_residual_gvisor_processes "$remaining"
+            emit cleanup_runtime_absent "$runtime_absent"
+            emit cleanup_image_absent "$image_absent"
+            emit cleanup_gvisor_files_absent "$gvisor_files_absent"
+            emit cleanup_sentinel_sha256 "$after_hash"
+            if [[ "$sentinel_owned" == "1" && "$after_hash" == "$sentinel_before" ]]; then
+              emit cleanup_sentinel_unchanged true
+            else
+              emit cleanup_sentinel_unchanged false
+            fi
+            emit cleanup_ephemeral_vm_disposal_required exact-docker-packages
+            emit smoke_original_exit "$original_rc"
+            echo "--- bounded smoke evidence ---"
+            cat "$EVIDENCE"
+
+            if ! rm -rf -- "$WORK_DIR"; then
+              cleanup_rc=1
+            fi
+            if [[ ! -e "$WORK_DIR" ]]; then
+              work_dir_absent=true
+            else
+              cleanup_rc=1
+            fi
+            emit cleanup_work_dir_absent "$work_dir_absent"
+            emit smoke_cleanup_exit "$cleanup_rc"
+
+            if [[ "$original_rc" != "0" || "$cleanup_rc" != "0" ]]; then
+              exit 1
+            fi
+            exit 0
+          }
+          trap cleanup EXIT
+
+          [[ "${GITHUB_ACTIONS:-}" == "true" ]] || fail "not running in GitHub Actions"
+          [[ "${RUNNER_OS:-}" == "Linux" ]] || fail "runner OS is not Linux"
+          [[ "${RUNNER_ARCH:-}" == "X64" ]] || fail "runner architecture is not X64"
+          [[ "${ImageOS:-}" == "ubuntu24" ]] || fail "runner ImageOS is not ubuntu24"
+          [[ "${ImageVersion:-}" =~ ^[0-9]{8}\.[0-9]{3}\.[0-9]+$ ]] \
+            || fail "runner ImageVersion is missing or malformed"
+          [[ "$(dpkg --print-architecture)" == "amd64" ]] || fail "dpkg architecture is not amd64"
+
+          # shellcheck disable=SC1091
+          source /etc/os-release
+          [[ "$ID" == "ubuntu" ]] || fail "host distribution is not Ubuntu"
+          [[ "$VERSION_CODENAME" == "noble" ]] || fail "host codename is not noble"
+
+          [[ ! -e "$SENTINEL" ]] || fail "host sentinel path already exists"
+          printf '%s\n' 'ac-harmless-host-sentinel-v1' > "$SENTINEL"
+          sentinel_owned=1
+          chmod 600 "$SENTINEL"
+          sentinel_before="$(sha256sum "$SENTINEL" | awk '{print $1}')"
+
+          emit runner_image_os "$ImageOS"
+          emit runner_image_version "$ImageVersion"
+          emit runner_os "$RUNNER_OS"
+          emit runner_arch "$RUNNER_ARCH"
+          emit ubuntu_version "$VERSION_ID"
+          emit ubuntu_codename "$VERSION_CODENAME"
+          emit kernel_release "$(uname -r)"
+          emit kernel_machine "$(uname -m)"
+          emit sentinel_before_sha256 "$sentinel_before"
+
+          initial_client="$(docker version --format '{{.Client.Version}}')"
+          initial_server="$(docker version --format '{{.Server.Version}}')"
+          emit docker_initial_client "$initial_client"
+          emit docker_initial_server "$initial_server"
+
+          DOCKER_KEY="$WORK_DIR/docker.asc"
+          DOCKER_INRELEASE="$WORK_DIR/InRelease"
+          DOCKER_PACKAGES="$WORK_DIR/Packages.gz"
+          fetch "$DOCKER_KEY_URL" "$DOCKER_KEY"
+          fetch "$DOCKER_INRELEASE_URL" "$DOCKER_INRELEASE"
+          fetch "$DOCKER_PACKAGES_URL" "$DOCKER_PACKAGES"
+          require_sha256 "$DOCKER_KEY_SHA256" "$DOCKER_KEY"
+          require_sha256 "$DOCKER_INRELEASE_SHA256" "$DOCKER_INRELEASE"
+          require_sha256 "$DOCKER_PACKAGES_SHA256" "$DOCKER_PACKAGES"
+
+          mapfile -t docker_fingerprints < <(
+            gpg --batch --show-keys --with-colons "$DOCKER_KEY" \
+              | awk -F: '$1 == "fpr" {print $10}'
+          )
+          [[ "${#docker_fingerprints[@]}" == "2" ]] || fail "unexpected Docker key fingerprint count"
+          [[ "${docker_fingerprints[0]}" == "$DOCKER_KEY_PRIMARY_FINGERPRINT" ]] \
+            || fail "Docker primary key fingerprint mismatch"
+          [[ "${docker_fingerprints[1]}" == "$DOCKER_KEY_SIGNING_FINGERPRINT" ]] \
+            || fail "Docker signing subkey fingerprint mismatch"
+          gpg --batch --yes --dearmor --output "$WORK_DIR/docker.gpg" "$DOCKER_KEY"
+          gpgv --keyring "$WORK_DIR/docker.gpg" "$DOCKER_INRELEASE"
+          grep -Eq "^ $DOCKER_PACKAGES_SHA256 +[0-9]+ stable/binary-amd64/Packages.gz$" \
+            "$DOCKER_INRELEASE" || fail "signed metadata does not bind the frozen Packages.gz"
+
+          python3 - "$DOCKER_PACKAGES" <<'PY'
+          import gzip
+          import os
+          import pathlib
+          import sys
+
+          expected = {
+              ("containerd.io", os.environ["CONTAINERD_VERSION"]): {
+                  "Architecture": "amd64",
+                  "Filename": "dists/noble/pool/stable/amd64/containerd.io_2.1.5-1~ubuntu.24.04~noble_amd64.deb",
+                  "Size": os.environ["CONTAINERD_SIZE"],
+                  "SHA256": os.environ["CONTAINERD_SHA256"],
+              },
+              ("docker-ce-cli", os.environ["DOCKER_CLI_VERSION"]): {
+                  "Architecture": "amd64",
+                  "Filename": "dists/noble/pool/stable/amd64/docker-ce-cli_29.7.2-1~ubuntu.24.04~noble_amd64.deb",
+                  "Size": os.environ["DOCKER_CLI_SIZE"],
+                  "SHA256": os.environ["DOCKER_CLI_SHA256"],
+              },
+              ("docker-ce", os.environ["DOCKER_CE_VERSION"]): {
+                  "Architecture": "amd64",
+                  "Filename": "dists/noble/pool/stable/amd64/docker-ce_29.7.2-1~ubuntu.24.04~noble_amd64.deb",
+                  "Size": os.environ["DOCKER_CE_SIZE"],
+                  "SHA256": os.environ["DOCKER_CE_SHA256"],
+              },
+          }
+
+          text = gzip.decompress(pathlib.Path(sys.argv[1]).read_bytes()).decode("utf-8")
+          found = {}
+          for paragraph in text.strip().split("\n\n"):
+              fields = {}
+              for line in paragraph.splitlines():
+                  if not line or line[0].isspace() or ": " not in line:
+                      continue
+                  key, value = line.split(": ", 1)
+                  fields[key] = value
+              identity = (fields.get("Package"), fields.get("Version"))
+              if identity in expected:
+                  if identity in found:
+                      raise SystemExit(f"duplicate package stanza: {identity!r}")
+                  found[identity] = fields
+
+          if set(found) != set(expected):
+              raise SystemExit(f"frozen package set mismatch: {sorted(found)!r}")
+          for identity, required in expected.items():
+              actual = found[identity]
+              for field, value in required.items():
+                  if actual.get(field) != value:
+                      raise SystemExit(
+                          f"{identity!r} {field} mismatch: {actual.get(field)!r} != {value!r}"
+                      )
+          print("signed Docker package metadata matches all frozen fields")
+          PY
+
+          CONTAINERD_DEB="$WORK_DIR/containerd.io.deb"
+          DOCKER_CLI_DEB="$WORK_DIR/docker-ce-cli.deb"
+          DOCKER_CE_DEB="$WORK_DIR/docker-ce.deb"
+          fetch "$CONTAINERD_URL" "$CONTAINERD_DEB"
+          fetch "$DOCKER_CLI_URL" "$DOCKER_CLI_DEB"
+          fetch "$DOCKER_CE_URL" "$DOCKER_CE_DEB"
+          require_sha256 "$CONTAINERD_SHA256" "$CONTAINERD_DEB"
+          require_sha256 "$DOCKER_CLI_SHA256" "$DOCKER_CLI_DEB"
+          require_sha256 "$DOCKER_CE_SHA256" "$DOCKER_CE_DEB"
+          [[ "$(stat --format=%s "$CONTAINERD_DEB")" == "$CONTAINERD_SIZE" ]] \
+            || fail "containerd package size mismatch"
+          [[ "$(stat --format=%s "$DOCKER_CLI_DEB")" == "$DOCKER_CLI_SIZE" ]] \
+            || fail "Docker CLI package size mismatch"
+          [[ "$(stat --format=%s "$DOCKER_CE_DEB")" == "$DOCKER_CE_SIZE" ]] \
+            || fail "Docker Engine package size mismatch"
+
+          [[ "$(dpkg-deb --field "$CONTAINERD_DEB" Package)" == "containerd.io" ]]
+          [[ "$(dpkg-deb --field "$CONTAINERD_DEB" Version)" == "$CONTAINERD_VERSION" ]]
+          [[ "$(dpkg-deb --field "$CONTAINERD_DEB" Architecture)" == "amd64" ]]
+          [[ "$(dpkg-deb --field "$DOCKER_CLI_DEB" Package)" == "docker-ce-cli" ]]
+          [[ "$(dpkg-deb --field "$DOCKER_CLI_DEB" Version)" == "$DOCKER_CLI_VERSION" ]]
+          [[ "$(dpkg-deb --field "$DOCKER_CLI_DEB" Architecture)" == "amd64" ]]
+          [[ "$(dpkg-deb --field "$DOCKER_CE_DEB" Package)" == "docker-ce" ]]
+          [[ "$(dpkg-deb --field "$DOCKER_CE_DEB" Version)" == "$DOCKER_CE_VERSION" ]]
+          [[ "$(dpkg-deb --field "$DOCKER_CE_DEB" Architecture)" == "amd64" ]]
+
+          sudo systemctl stop docker.service docker.socket containerd.service
+          sudo dpkg --install "$CONTAINERD_DEB" "$DOCKER_CLI_DEB" "$DOCKER_CE_DEB"
+          sudo systemctl daemon-reload
+          sudo systemctl start containerd.service docker.service
+          [[ "$(systemctl is-active containerd.service)" == "active" ]]
+          [[ "$(systemctl is-active docker.service)" == "active" ]]
+
+          [[ "$(dpkg-query --show --showformat='${Version}' containerd.io)" == "$CONTAINERD_VERSION" ]]
+          [[ "$(dpkg-query --show --showformat='${Version}' docker-ce-cli)" == "$DOCKER_CLI_VERSION" ]]
+          [[ "$(dpkg-query --show --showformat='${Version}' docker-ce)" == "$DOCKER_CE_VERSION" ]]
+          final_client="$(docker version --format '{{.Client.Version}}')"
+          final_server="$(docker version --format '{{.Server.Version}}')"
+          [[ "$final_client" == "$REQUIRED_DOCKER_VERSION" ]] \
+            || fail "Docker client version mismatch"
+          [[ "$final_server" == "$REQUIRED_DOCKER_VERSION" ]] \
+            || fail "Docker server version mismatch"
+          emit containerd_package_version "$CONTAINERD_VERSION"
+          emit docker_cli_package_version "$DOCKER_CLI_VERSION"
+          emit docker_engine_package_version "$DOCKER_CE_VERSION"
+          emit docker_final_client "$final_client"
+          emit docker_final_server "$final_server"
+
+          GVISOR_ARCHIVE="$WORK_DIR/gvisor.tar.bz2"
+          GVISOR_CHECKSUM="$WORK_DIR/gvisor.tar.bz2.sha512"
+          GVISOR_EXTRACT="$WORK_DIR/gvisor"
+          mkdir "$GVISOR_EXTRACT"
+          fetch "$GVISOR_ARCHIVE_URL" "$GVISOR_ARCHIVE"
+          fetch "$GVISOR_CHECKSUM_URL" "$GVISOR_CHECKSUM"
+          [[ "$(stat --format=%s "$GVISOR_ARCHIVE")" == "$GVISOR_ARCHIVE_SIZE" ]] \
+            || fail "gVisor archive size mismatch"
+          require_sha256 "$GVISOR_ARCHIVE_SHA256" "$GVISOR_ARCHIVE"
+          require_sha512 "$GVISOR_ARCHIVE_SHA512" "$GVISOR_ARCHIVE"
+          require_sha256 "$GVISOR_CHECKSUM_SHA256" "$GVISOR_CHECKSUM"
+          [[ "$(tr -d '\r\n' < "$GVISOR_CHECKSUM")" == "$GVISOR_ARCHIVE_SHA512  gvisor.tar.bz2" ]] \
+            || fail "gVisor checksum sidecar content mismatch"
+
+          tar --list --bzip2 --file "$GVISOR_ARCHIVE" > "$WORK_DIR/gvisor-members.txt"
+          diff --unified "$WORK_DIR/gvisor-members.txt" - <<'MEMBERS'
+          containerd-shim-runsc-v1
+          runsc
+          gvisor-bin/
+          gvisor-bin/checkpointgofer
+          gvisor-bin/gvisor-sentry-prewarmer
+          gvisor-bin/gvisor_sentry
+          gvisor-bin/runsc-metric-server
+          MEMBERS
+          tar --extract --bzip2 --file "$GVISOR_ARCHIVE" --directory "$GVISOR_EXTRACT"
+          (
+            cd "$GVISOR_EXTRACT"
+            sha512sum --check <<'MEMBER_HASHES'
+          b60d1c418b841ab046951cc7a91f490a221198fbe81ec55dc364432578fddd44e97063793ce6651be397af2f64ec47170dff77a45db277819c3fb08fec9f3ced  containerd-shim-runsc-v1
+          84936438d583ec976800f464e75a83e1515f0890b451b9b4db219c4472b54ca9b106a6772ee683f1e64cce2128871d7637b14d800591f8451b8137f6c39fb2ef  runsc
+          8aff47fbad7c1ec5e5d156a1bb566e5f5d75db0f9bec5abf7d14bbf74e2a09c60a6692bafd2cefe4c1ed9aa0b46cdc701f09fef34f229ed74c27d068903c79f3  gvisor-bin/checkpointgofer
+          f0c131766303ca4733a4e42bd171d8ddf42a0a0087564605b3207b0f4c148d9ff355bad25e27d388c7c9cf06265160b3a02047ec195c035d9e8f428d8f608ce6  gvisor-bin/gvisor-sentry-prewarmer
+          09eef70d5d14e42bdc5f9e55ca9710a14e157d67cc1ce92df5f4322df1ba5ee67a598161c4854e206ecbfdff85d69418814bdcd45e4f6273eeaf0196b0d3adb3  gvisor-bin/gvisor_sentry
+          d47c33c105419c5c3c28b8894fad6cb917c3897c5376f3ffb955275af6bf744039f4e9f7bb2a0313d84fb296b643d3d4b66e7a4247e1e5cb568f8b69ac6a29ab  gvisor-bin/runsc-metric-server
+          MEMBER_HASHES
+          )
+
+          for path in \
+            /usr/local/bin/runsc \
+            /usr/local/bin/containerd-shim-runsc-v1 \
+            /usr/local/bin/gvisor-bin; do
+            [[ ! -e "$path" ]] || fail "pre-existing gVisor install path: $path"
+          done
+          gvisor_installed=1
+          sudo tar --extract --bzip2 --file "$GVISOR_ARCHIVE" --directory /usr/local/bin
+
+          require_sha512 84936438d583ec976800f464e75a83e1515f0890b451b9b4db219c4472b54ca9b106a6772ee683f1e64cce2128871d7637b14d800591f8451b8137f6c39fb2ef /usr/local/bin/runsc
+          require_sha512 b60d1c418b841ab046951cc7a91f490a221198fbe81ec55dc364432578fddd44e97063793ce6651be397af2f64ec47170dff77a45db277819c3fb08fec9f3ced /usr/local/bin/containerd-shim-runsc-v1
+          require_sha512 8aff47fbad7c1ec5e5d156a1bb566e5f5d75db0f9bec5abf7d14bbf74e2a09c60a6692bafd2cefe4c1ed9aa0b46cdc701f09fef34f229ed74c27d068903c79f3 /usr/local/bin/gvisor-bin/checkpointgofer
+          require_sha512 f0c131766303ca4733a4e42bd171d8ddf42a0a0087564605b3207b0f4c148d9ff355bad25e27d388c7c9cf06265160b3a02047ec195c035d9e8f428d8f608ce6 /usr/local/bin/gvisor-bin/gvisor-sentry-prewarmer
+          require_sha512 09eef70d5d14e42bdc5f9e55ca9710a14e157d67cc1ce92df5f4322df1ba5ee67a598161c4854e206ecbfdff85d69418814bdcd45e4f6273eeaf0196b0d3adb3 /usr/local/bin/gvisor-bin/gvisor_sentry
+          require_sha512 d47c33c105419c5c3c28b8894fad6cb917c3897c5376f3ffb955275af6bf744039f4e9f7bb2a0313d84fb296b643d3d4b66e7a4247e1e5cb568f8b69ac6a29ab /usr/local/bin/gvisor-bin/runsc-metric-server
+
+          runsc_version="$(/usr/local/bin/runsc --version)"
+          [[ "$runsc_version" == $'runsc version release-20260817.0\nspec: 1.2.1' ]] \
+            || fail "runsc version output mismatch"
+          python3 - "$RUNTIME_NAME" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          runtime_name = sys.argv[1]
+          path = pathlib.Path("/etc/docker/daemon.json")
+          config = json.loads(path.read_text()) if path.exists() else {}
+          if runtime_name in (config.get("runtimes") or {}):
+              raise SystemExit(f"runtime name already exists: {runtime_name}")
+          PY
+          runtime_registered=1
+          sudo /usr/local/bin/runsc install \
+            --runtime "$RUNTIME_NAME" \
+            --clobber=false \
+            --download-sidecars=NEVER \
+            --require-sidecars=ALWAYS \
+            -- --platform=systrap
+          sudo systemctl reload docker.service
+          [[ "$(systemctl is-active docker.service)" == "active" ]]
+
+          python3 - "$RUNTIME_NAME" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          runtime_name = sys.argv[1]
+          config = json.loads(pathlib.Path("/etc/docker/daemon.json").read_text())
+          expected = {
+              "path": "/usr/local/bin/runsc",
+              "runtimeArgs": ["--platform=systrap"],
+          }
+          actual = (config.get("runtimes") or {}).get(runtime_name)
+          if actual != expected:
+              raise SystemExit(f"Docker runtime registration mismatch: {actual!r}")
+          PY
+          runtimes_json="$(docker info --format '{{json .Runtimes}}')"
+          python3 - "$RUNTIME_NAME" "$runtimes_json" <<'PY'
+          import json
+          import sys
+
+          runtime_name, payload = sys.argv[1:]
+          runtimes = json.loads(payload)
+          if runtime_name not in runtimes:
+              raise SystemExit(f"registered runtime absent from Docker info: {runtime_name}")
+          PY
+          default_runtime="$(docker info --format '{{.DefaultRuntime}}')"
+          [[ -n "$default_runtime" && "$default_runtime" != "$RUNTIME_NAME" ]] \
+            || fail "the smoke runtime must be selected explicitly, not by default"
+
+          # Re-check every installed byte after registration. Missing sidecars
+          # must fail; runsc is forbidden from downloading replacements.
+          require_sha512 84936438d583ec976800f464e75a83e1515f0890b451b9b4db219c4472b54ca9b106a6772ee683f1e64cce2128871d7637b14d800591f8451b8137f6c39fb2ef /usr/local/bin/runsc
+          require_sha512 b60d1c418b841ab046951cc7a91f490a221198fbe81ec55dc364432578fddd44e97063793ce6651be397af2f64ec47170dff77a45db277819c3fb08fec9f3ced /usr/local/bin/containerd-shim-runsc-v1
+          require_sha512 8aff47fbad7c1ec5e5d156a1bb566e5f5d75db0f9bec5abf7d14bbf74e2a09c60a6692bafd2cefe4c1ed9aa0b46cdc701f09fef34f229ed74c27d068903c79f3 /usr/local/bin/gvisor-bin/checkpointgofer
+          require_sha512 f0c131766303ca4733a4e42bd171d8ddf42a0a0087564605b3207b0f4c148d9ff355bad25e27d388c7c9cf06265160b3a02047ec195c035d9e8f428d8f608ce6 /usr/local/bin/gvisor-bin/gvisor-sentry-prewarmer
+          require_sha512 09eef70d5d14e42bdc5f9e55ca9710a14e157d67cc1ce92df5f4322df1ba5ee67a598161c4854e206ecbfdff85d69418814bdcd45e4f6273eeaf0196b0d3adb3 /usr/local/bin/gvisor-bin/gvisor_sentry
+          require_sha512 d47c33c105419c5c3c28b8894fad6cb917c3897c5376f3ffb955275af6bf744039f4e9f7bb2a0313d84fb296b643d3d4b66e7a4247e1e5cb568f8b69ac6a29ab /usr/local/bin/gvisor-bin/runsc-metric-server
+          emit gvisor_release "$GVISOR_RELEASE"
+          emit gvisor_commit "$GVISOR_COMMIT"
+          emit gvisor_archive_sha256 "$GVISOR_ARCHIVE_SHA256"
+          emit gvisor_archive_sha512 "$GVISOR_ARCHIVE_SHA512"
+          emit gvisor_sidecar_policy NEVER-download_ALWAYS-require
+          emit docker_runtime_name "$RUNTIME_NAME"
+          emit docker_runtime_path /usr/local/bin/runsc
+          emit docker_runtime_platform systrap
+          emit docker_default_runtime "$default_runtime"
+
+          if docker image inspect "$OCI_IMAGE" >/dev/null 2>&1; then
+            fail "frozen OCI image unexpectedly exists before the smoke"
+          fi
+          image_pulled=1
+          docker pull --platform linux/amd64 "$OCI_IMAGE"
+          image_arch="$(docker image inspect --format '{{.Architecture}}' "$OCI_IMAGE")"
+          image_os="$(docker image inspect --format '{{.Os}}' "$OCI_IMAGE")"
+          image_id="$(docker image inspect --format '{{.Id}}' "$OCI_IMAGE")"
+          repo_digests="$(docker image inspect --format '{{json .RepoDigests}}' "$OCI_IMAGE")"
+          repo_tags="$(docker image inspect --format '{{json .RepoTags}}' "$OCI_IMAGE")"
+          [[ "$image_arch" == "amd64" ]] || fail "OCI image architecture mismatch"
+          [[ "$image_os" == "linux" ]] || fail "OCI image OS mismatch"
+          [[ "$image_id" == "$OCI_CONFIG_DIGEST" ]] || fail "OCI config digest mismatch"
+          python3 - "$OCI_MANIFEST_DIGEST" "$repo_digests" "$repo_tags" <<'PY'
+          import json
+          import sys
+
+          digest, repo_digests_json, repo_tags_json = sys.argv[1:]
+          repo_digests = json.loads(repo_digests_json)
+          repo_tags = json.loads(repo_tags_json)
+          if not isinstance(repo_digests, list) or not any(
+              value.endswith("@" + digest) for value in repo_digests
+          ):
+              raise SystemExit(f"OCI RepoDigest mismatch: {repo_digests!r}")
+          if repo_tags not in (None, []):
+              raise SystemExit(f"mutable OCI tag unexpectedly present: {repo_tags!r}")
+          PY
+          emit oci_manifest_digest "$OCI_MANIFEST_DIGEST"
+          emit oci_config_digest "$image_id"
+          emit oci_platform "$image_os/$image_arch"
+          emit oci_repo_digests "$repo_digests"
+
+          if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+            fail "smoke container name already exists"
+          fi
+          container_id="$(
+            docker run \
+              --detach \
+              --rm \
+              --name "$CONTAINER_NAME" \
+              --platform linux/amd64 \
+              --runtime "$RUNTIME_NAME" \
+              --network none \
+              --read-only \
+              --cap-drop ALL \
+              --security-opt no-new-privileges \
+              --pids-limit 32 \
+              --memory 192m \
+              --cpus 1 \
+              --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m \
+              "$OCI_IMAGE" \
+              python -B -c 'import time; print("harmless-runtime-smoke-ready", flush=True); time.sleep(20)'
+          )"
+          container_owned=1
+          [[ "$container_id" =~ ^[0-9a-f]{64}$ ]] || fail "invalid container ID"
+
+          container_logs=""
+          for _ in {1..10}; do
+            container_logs="$(docker logs "$CONTAINER_NAME")"
+            if [[ "$container_logs" == "harmless-runtime-smoke-ready" ]]; then
+              break
+            fi
+            sleep 1
+          done
+          [[ "$container_logs" == "harmless-runtime-smoke-ready" ]] \
+            || fail "benign container liveness output mismatch"
+
+          [[ "$(docker inspect --format '{{.State.Running}}' "$CONTAINER_NAME")" == "true" ]]
+          [[ "$(docker inspect --format '{{.HostConfig.Runtime}}' "$CONTAINER_NAME")" == "$RUNTIME_NAME" ]] \
+            || fail "Docker reports an unexpected container runtime"
+          [[ "$(docker inspect --format '{{json .HostConfig.Binds}}' "$CONTAINER_NAME")" == "null" ]] \
+            || fail "container unexpectedly has a bind mount"
+          [[ "$(docker inspect --format '{{json .Mounts}}' "$CONTAINER_NAME")" == "[]" ]] \
+            || fail "container unexpectedly has a host mount"
+          [[ "$(docker inspect --format '{{.HostConfig.NetworkMode}}' "$CONTAINER_NAME")" == "none" ]]
+          [[ "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$CONTAINER_NAME")" == "true" ]]
+          [[ "$(docker inspect --format '{{.HostConfig.Privileged}}' "$CONTAINER_NAME")" == "false" ]]
+
+          host_pid="$(docker inspect --format '{{.State.Pid}}' "$CONTAINER_NAME")"
+          [[ "$host_pid" =~ ^[1-9][0-9]*$ ]] || fail "Docker host PID is invalid"
+          host_exe="$(sudo readlink "/proc/$host_pid/exe")"
+          case "$host_exe" in
+            /usr/local/bin/runsc)
+              host_exe_expected_sha512=84936438d583ec976800f464e75a83e1515f0890b451b9b4db219c4472b54ca9b106a6772ee683f1e64cce2128871d7637b14d800591f8451b8137f6c39fb2ef
+              ;;
+            /usr/local/bin/containerd-shim-runsc-v1)
+              host_exe_expected_sha512=b60d1c418b841ab046951cc7a91f490a221198fbe81ec55dc364432578fddd44e97063793ce6651be397af2f64ec47170dff77a45db277819c3fb08fec9f3ced
+              ;;
+            /usr/local/bin/gvisor-bin/checkpointgofer)
+              host_exe_expected_sha512=8aff47fbad7c1ec5e5d156a1bb566e5f5d75db0f9bec5abf7d14bbf74e2a09c60a6692bafd2cefe4c1ed9aa0b46cdc701f09fef34f229ed74c27d068903c79f3
+              ;;
+            /usr/local/bin/gvisor-bin/gvisor-sentry-prewarmer)
+              host_exe_expected_sha512=f0c131766303ca4733a4e42bd171d8ddf42a0a0087564605b3207b0f4c148d9ff355bad25e27d388c7c9cf06265160b3a02047ec195c035d9e8f428d8f608ce6
+              ;;
+            /usr/local/bin/gvisor-bin/gvisor_sentry)
+              host_exe_expected_sha512=09eef70d5d14e42bdc5f9e55ca9710a14e157d67cc1ce92df5f4322df1ba5ee67a598161c4854e206ecbfdff85d69418814bdcd45e4f6273eeaf0196b0d3adb3
+              ;;
+            /usr/local/bin/gvisor-bin/runsc-metric-server)
+              host_exe_expected_sha512=d47c33c105419c5c3c28b8894fad6cb917c3897c5376f3ffb955275af6bf744039f4e9f7bb2a0313d84fb296b643d3d4b66e7a4247e1e5cb568f8b69ac6a29ab
+              ;;
+            *)
+              fail "container host PID does not execute a frozen gVisor binary: $host_exe"
+              ;;
+          esac
+          host_exe_sha512="$(sudo sha512sum "$host_exe" | awk '{print $1}')"
+          [[ "$host_exe_sha512" == "$host_exe_expected_sha512" ]] \
+            || fail "live host-side gVisor executable hash mismatch"
+          live_gvisor_processes="$(count_gvisor_processes)"
+          [[ "$live_gvisor_processes" =~ ^[1-9][0-9]*$ ]] \
+            || fail "missing live host-side gVisor process evidence"
+
+          emit container_id "$container_id"
+          emit container_runtime "$RUNTIME_NAME"
+          emit container_host_pid "$host_pid"
+          emit container_host_executable "$host_exe"
+          emit container_host_executable_sha512 "$host_exe_sha512"
+          emit live_gvisor_processes "$live_gvisor_processes"
+          emit container_bind_mounts none
+          emit container_network none
+          emit container_root_read_only true
+          emit container_privileged false
+          emit container_stdout "$container_logs"
+
+          container_exit="$(docker wait "$CONTAINER_NAME")"
+          [[ "$container_exit" == "0" ]] || fail "benign container exited nonzero"
+          emit container_exit "$container_exit"
+
+          for _ in {1..10}; do
+            if ! docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+          if docker container inspect "$CONTAINER_NAME" >/dev/null 2>&1; then
+            fail "container was not automatically removed"
+          fi
+          emit container_removed true
+          container_owned=0
+
+          remaining_after_container=0
+          for _ in {1..10}; do
+            remaining_after_container="$(count_gvisor_processes)"
+            if [[ "$remaining_after_container" == "0" ]]; then
+              break
+            fi
+            sleep 1
+          done
+          [[ "$remaining_after_container" == "0" ]] \
+            || fail "gVisor process remained after container removal"
+          emit post_container_gvisor_processes "$remaining_after_container"
+
+          sentinel_after="$(sha256sum "$SENTINEL" | awk '{print $1}')"
+          [[ "$sentinel_after" == "$sentinel_before" ]] || fail "host sentinel changed"
+          emit sentinel_after_sha256 "$sentinel_after"
+          emit sentinel_unchanged true
