@@ -11,6 +11,8 @@ from typing import Any
 import pytest
 import yaml
 
+from scripts import check_workflow_safety
+
 
 REPOSITORY_ROOT = pathlib.Path(__file__).resolve().parents[2]
 WORKFLOWS = REPOSITORY_ROOT / ".github" / "workflows"
@@ -59,15 +61,36 @@ def test_workflows_use_hosted_runners_and_read_only_defaults(
 ) -> None:
     workflow = _load(workflow_path)
     text = workflow_path.read_text(encoding="utf-8")
-    assert workflow.get("permissions") == {"contents": "read"}
+    assert check_workflow_safety._safe_top_level_permissions(
+        workflow.get("permissions")
+    )
     assert "pull_request_target" not in _triggers(workflow)
     assert "self-hosted" not in text.lower()
     assert "agentcheck-local" not in text.lower()
     for job_name, job in (workflow.get("jobs") or {}).items():
         runner = job.get("runs-on")
-        assert runner == "ubuntu-latest", (
+        assert check_workflow_safety._hosted_runner(runner), (
             f"{workflow_path.name}:{job_name} uses unexpected runner {runner!r}"
         )
+
+
+def test_top_level_permissions_accept_only_no_access_or_contents_read() -> None:
+    assert check_workflow_safety._safe_top_level_permissions({})
+    assert check_workflow_safety._safe_top_level_permissions({"contents": "read"})
+    assert not check_workflow_safety._safe_top_level_permissions({"contents": "write"})
+    assert not check_workflow_safety._safe_top_level_permissions({"actions": "read"})
+    assert not check_workflow_safety._safe_top_level_permissions(
+        {"contents": "${{ inputs.permission }}"}
+    )
+
+
+def test_hosted_runner_allowlist_is_exact_and_expression_free() -> None:
+    assert check_workflow_safety._hosted_runner("ubuntu-latest")
+    assert check_workflow_safety._hosted_runner("ubuntu-24.04")
+    assert not check_workflow_safety._hosted_runner("ubuntu-22.04")
+    assert not check_workflow_safety._hosted_runner("self-hosted")
+    assert not check_workflow_safety._hosted_runner(["self-hosted", "linux"])
+    assert not check_workflow_safety._hosted_runner("${{ matrix.runner }}")
 
 
 @pytest.mark.parametrize("workflow_path", _workflow_files(), ids=lambda path: path.name)
