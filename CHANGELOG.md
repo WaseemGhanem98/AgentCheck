@@ -12,9 +12,34 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
-## Unreleased
+## 0.5.3 (2026-09-02)
+
+An evidence-integrity patch. Two independently reproduced defects could make a
+generated suite or its coverage report look more complete than the evidence
+behind it. Both are corrections to what AgentCheck reports about itself; no
+framework integration is added and the containment guarantee is unchanged.
 
 ### Fixed
+
+- **Valid OpenAI tools with a nullable array parameter could disappear from
+  the generated suite.** Union extraction discarded a schema branch that
+  carried an explicit, valid `type` whenever that branch also carried
+  structural keywords such as `items`. An `Optional[List[str]]` parameter --
+  emitted by the OpenAI Agents SDK as
+  `anyOf[{type: array, items: {type: string}}, {type: null}]` -- was therefore
+  read as type-unknown, and a tool whose required parameter it was received no
+  cases at all. Explicit types are now retained from any mapping branch under
+  `anyOf`/`oneOf`, while validation against the complete original schema
+  remains the authority for every emitted baseline and boundary value. A union
+  AgentCheck genuinely cannot resolve, such as an unsupported local `$ref`,
+  still fails closed with no cases rather than a guessed one.
+
+  **What you will see:** a tool that previously generated zero cases now
+  generates them.
+
+  **Suite identity:** `GENERATOR_COMPATIBILITY_VERSION` stays `1`. A suite
+  containing an affected tool re-identifies because its case set genuinely
+  changed; unaffected suites stay byte- and fingerprint-exact.
 
 - **A developer-declared `tool_risk` lost its authority in behavioral
   coverage.** Coverage decided whether a tool's risk dimensions were real
