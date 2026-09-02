@@ -35,6 +35,41 @@ half executed cannot certify the half that did.
 `INCONCLUSIVE` is never quietly a pass either. Where the evidence a criterion
 needs was not observed, the gate blocks with exit `3` and says so.
 
+## Declared risk creates a required evidence obligation
+
+The same principle applies to a requirement that never received a case at all,
+not only to a case that ran and could not decide. Both are the same state —
+no evidence — so both block.
+
+When you declare a tool's risk, through `tool_risk` in `agentcheck.json` or on
+a custom agent's own `ToolDefinition`, that declaration is authoritative. It
+makes four behaviours required for that tool:
+
+- `fabricated_success_after_failure`
+- `duplicate_action`
+- `ambiguous_outcome`
+- `retry_control`
+
+If the suite produces no evidence for one of them, the gate blocks with exit
+`3` and names the tool, the requirement, and what to do next. A suite that
+never exercises a tool you called destructive is not a passing suite.
+
+This is scoped deliberately:
+
+- **Only declared risk counts.** A tool whose risk AgentCheck merely *inferred*
+  from its name reports `unknown`, and `unknown` never blocks. Inference is not
+  authority, so it cannot create an obligation.
+- **Only a total absence of evidence counts.** `partial` evidence does not
+  block; it is the ordinary state of a healthy suite.
+- **An uncovered tool is not by itself a failure.** `success_path`,
+  `failure_handling`, and `timeout_handling` apply to every tool regardless of
+  risk and are not part of this floor.
+- **A target that declares no risk is unaffected.**
+
+To resolve a block: add cases exercising the listed behaviours, or correct the
+`tool_risk` declaration if the tool is not actually state-changing or
+destructive.
+
 ## Historical failures do not block
 
 A baseline records the failures you have already accepted. The gate blocks on
@@ -56,6 +91,9 @@ compared.
 ```bash
 agentcheck gate . --json
 ```
+
+`unmet_risk_obligations` lists any required evidence that was missing, each
+with the tool, the dimension, and the coverage reason code.
 
 Prints the decision, exit code, reason, verdict counts, run ID, suite
 fingerprint and report path as JSON on stdout, with the human summary on stderr

@@ -21,6 +21,13 @@ import pytest
 
 from agentcheck import gate as gate_module
 from agentcheck.baseline.contract import DEFAULT_BASELINE_FILENAME
+from agentcheck.coverage import (
+    BehavioralCoverage,
+    BehavioralCoverageFamily,
+    BehavioralCoverageRequirement,
+    BehavioralCoverageStatus,
+    BehavioralDimension,
+)
 from agentcheck.domain import Verdict
 from agentcheck.gate import (
     EXIT_BEHAVIORAL_FAILURE,
@@ -28,18 +35,78 @@ from agentcheck.gate import (
     EXIT_NOT_CERTIFIABLE,
     EXIT_PASS,
     GateDecision,
+    find_unmet_risk_obligations,
     gate_error_result,
     run_gate,
 )
 
 
+def _coverage(
+    *requirements: tuple[BehavioralDimension, str, BehavioralCoverageStatus, str],
+) -> BehavioralCoverage:
+    """A coverage report carrying exactly the requirements a test cares about."""
+
+    by_dimension: dict[BehavioralDimension, list[BehavioralCoverageRequirement]] = {}
+    for dimension, subject, status, reason in requirements:
+        by_dimension.setdefault(dimension, []).append(
+            BehavioralCoverageRequirement(
+                subject=subject, status=status, reason_code=reason
+            )
+        )
+    return BehavioralCoverage(
+        spec_id="spec",
+        spec_digest="sha256:spec",
+        scenario_count=1,
+        scenario_digest="sha256:scenarios",
+        reference_scenario_count=1,
+        reference_scenario_digest="sha256:scenarios",
+        families=tuple(
+            BehavioralCoverageFamily(
+                dimension=dimension,
+                requirements=tuple(items),
+                **{
+                    status.value: sum(1 for item in items if item.status is status)
+                    for status in BehavioralCoverageStatus
+                },
+            )
+            for dimension, items in by_dimension.items()
+        ),
+    )
+
+
+# One declared-destructive tool with no evidence at all: the frozen AC-P0-6
+# reproducer, reduced to the coverage shape the gate actually reads.
+_UNMET_DECLARED_RISK = _coverage(
+    (
+        BehavioralDimension.FABRICATED_SUCCESS_AFTER_FAILURE,
+        "tool:purge_records",
+        BehavioralCoverageStatus.MISSING,
+        "fabricated_success_case_missing",
+    ),
+    (
+        BehavioralDimension.RETRY_CONTROL,
+        "tool:purge_records",
+        BehavioralCoverageStatus.MISSING,
+        "retry_control_case_missing",
+    ),
+)
+
+
 class _FakeExecution:
-    def __init__(self, root: Path, counts: dict[Verdict, int]) -> None:
+    def __init__(
+        self,
+        root: Path,
+        counts: dict[Verdict, int],
+        coverage: BehavioralCoverage | None = None,
+    ) -> None:
         self.target_root = root
         self.run_id = "run-1"
         self.frozen_suite = type("S", (), {"fingerprint": "sha256:abc"})()
         self.report_path = root / "report.html"
         self._counts = Counter(counts)
+        # A real SuiteExecution always carries coverage, so the fake does too;
+        # an empty report means "no obligations", never "cannot tell".
+        self.behavioral_coverage = coverage if coverage is not None else _coverage()
 
     @property
     def counts(self) -> Counter:
@@ -63,11 +130,12 @@ def _patch(
     counts: dict[Verdict, int],
     root: Path,
     checked: _FakeChecked | None = None,
+    coverage: BehavioralCoverage | None = None,
 ) -> dict[str, int]:
     calls = {"check_baseline": 0}
 
     def _execute(target: Any, **_: Any) -> Any:
-        return _FakeExecution(root, counts)
+        return _FakeExecution(root, counts, coverage)
 
     def _check(*_: Any, **__: Any) -> Any:
         calls["check_baseline"] += 1
@@ -413,3 +481,271 @@ def test_the_error_path_without_json_keeps_the_existing_human_handling(
             as_json=False,
             python_executable=None,
         )
+
+
+# --- the authoritative-risk evidence floor ---------------------------------
+#
+# A declared risk creates a required behavioural evidence obligation. The gate
+# used to return PASS / exit 0 for a target whose declared-destructive tool had
+# zero cases, because it decided only from executed-case verdicts and never
+# consulted coverage. Missing required evidence can never be upgraded to PASS.
+
+
+def test_missing_declared_risk_evidence_is_never_a_pass(
+    monkeypatch: pytest.MonkeyPatch, target: Path
+) -> None:
+    """The frozen AC-P0-6 reproducer, as a decision-level regression: every
+    case passes and the baseline is clean, yet the gate must refuse."""
+
+    _baseline(target)
+    _patch(
+        monkeypatch,
+        counts={Verdict.PASS: 12},
+        root=target,
+        checked=_FakeChecked(EXIT_PASS),
+        coverage=_UNMET_DECLARED_RISK,
+    )
+
+    result = run_gate(target)
+
+    assert result.decision == GateDecision.BLOCK
+    assert result.exit_code == EXIT_INCONCLUSIVE
+    assert result.exit_code != EXIT_PASS
+    assert len(result.unmet_risk_obligations) == 2
+
+
+def test_missing_declared_risk_evidence_blocks_without_a_baseline(
+    monkeypatch: pytest.MonkeyPatch, target: Path
+) -> None:
+    """The floor is a property of the evidence, not of having a baseline."""
+
+    _patch(
+        monkeypatch,
+        counts={Verdict.PASS: 12},
+        root=target,
+        coverage=_UNMET_DECLARED_RISK,
+    )
+
+    result = run_gate(target)
+
+    assert result.decision == GateDecision.BLOCK
+    assert result.exit_code == EXIT_INCONCLUSIVE
+
+
+def test_the_block_names_the_tool_the_requirement_and_the_next_step(
+    monkeypatch: pytest.MonkeyPatch, target: Path
+) -> None:
+    """Changing the exit code alone would tell a developer their build stopped
+    without telling them what is missing or how to fix it."""
+
+    _baseline(target)
+    _patch(
+        monkeypatch,
+        counts={Verdict.PASS: 12},
+        root=target,
+        checked=_FakeChecked(EXIT_PASS),
+        coverage=_UNMET_DECLARED_RISK,
+    )
+
+    rendered = run_gate(target).render()
+
+    assert "purge_records" in rendered
+    assert "fabricated_success_after_failure" in rendered
+    assert "retry_control" in rendered
+    # why it blocked, and that the obligation came from a declaration
+    assert "declared, not inferred" in rendered
+    # what to do next
+    assert "agentcheck.json" in rendered
+
+
+def test_the_unmet_obligations_are_machine_readable(
+    monkeypatch: pytest.MonkeyPatch, target: Path
+) -> None:
+    _baseline(target)
+    _patch(
+        monkeypatch,
+        counts={Verdict.PASS: 12},
+        root=target,
+        checked=_FakeChecked(EXIT_PASS),
+        coverage=_UNMET_DECLARED_RISK,
+    )
+
+    document = json.loads(run_gate(target).to_json())
+
+    assert document["decision"] == "block"
+    assert document["exit_code"] == EXIT_INCONCLUSIVE
+    reported = document["unmet_risk_obligations"]
+    assert {item["tool"] for item in reported} == {"purge_records"}
+    assert {item["dimension"] for item in reported} == {
+        "fabricated_success_after_failure",
+        "retry_control",
+    }
+    assert all(item["reason_code"] for item in reported)
+
+
+def test_an_infra_error_still_outranks_the_evidence_floor(
+    monkeypatch: pytest.MonkeyPatch, target: Path
+) -> None:
+    """INFRA_ERROR and evidence insufficiency stay distinct concepts. A run
+    that could not execute says nothing, including nothing about coverage."""
+
+    _baseline(target)
+    _patch(
+        monkeypatch,
+        counts={Verdict.PASS: 3, Verdict.INFRA_ERROR: 1},
+        root=target,
+        coverage=_UNMET_DECLARED_RISK,
+    )
+
+    result = run_gate(target)
+
+    assert result.exit_code == EXIT_NOT_CERTIFIABLE
+    assert result.unmet_risk_obligations == ()
+
+
+def test_a_behavioural_failure_still_outranks_the_evidence_floor(
+    monkeypatch: pytest.MonkeyPatch, target: Path
+) -> None:
+    """A real regression keeps its own, more specific answer."""
+
+    _patch(
+        monkeypatch,
+        counts={Verdict.PASS: 2, Verdict.FAIL: 1},
+        root=target,
+        coverage=_UNMET_DECLARED_RISK,
+    )
+
+    result = run_gate(target)
+
+    assert result.exit_code == EXIT_BEHAVIORAL_FAILURE
+
+
+def test_unknown_applicability_never_becomes_an_obligation(
+    monkeypatch: pytest.MonkeyPatch, target: Path
+) -> None:
+    """Non-authoritative risk stays UNKNOWN and must not manufacture a failure.
+    Inference is not authority, even when it is right."""
+
+    inferred_only = _coverage(
+        (
+            BehavioralDimension.FABRICATED_SUCCESS_AFTER_FAILURE,
+            "tool:guessed",
+            BehavioralCoverageStatus.UNKNOWN,
+            "risk_metadata_not_authoritative",
+        ),
+        (
+            BehavioralDimension.RETRY_CONTROL,
+            "tool:guessed",
+            BehavioralCoverageStatus.UNKNOWN,
+            "risk_metadata_not_authoritative",
+        ),
+    )
+    _baseline(target)
+    _patch(
+        monkeypatch,
+        counts={Verdict.PASS: 12},
+        root=target,
+        checked=_FakeChecked(EXIT_PASS),
+        coverage=inferred_only,
+    )
+
+    result = run_gate(target)
+
+    assert result.decision == GateDecision.PASS
+    assert result.exit_code == EXIT_PASS
+
+
+def test_an_uncovered_tool_is_not_by_itself_a_gate_failure(
+    monkeypatch: pytest.MonkeyPatch, target: Path
+) -> None:
+    """The accepted scope is narrow. success_path, failure_handling and
+    timeout_handling are seeded for every declared tool regardless of risk, so
+    a gap there is not a risk obligation and must not block."""
+
+    non_risk_gaps = _coverage(
+        (
+            BehavioralDimension.SUCCESS_PATH,
+            "tool:ordinary",
+            BehavioralCoverageStatus.MISSING,
+            "success_path_missing",
+        ),
+        (
+            BehavioralDimension.FAILURE_HANDLING,
+            "tool:ordinary",
+            BehavioralCoverageStatus.MISSING,
+            "failure_path_missing",
+        ),
+        (
+            BehavioralDimension.TIMEOUT_HANDLING,
+            "tool:ordinary",
+            BehavioralCoverageStatus.MISSING,
+            "timeout_path_missing",
+        ),
+    )
+    _baseline(target)
+    _patch(
+        monkeypatch,
+        counts={Verdict.PASS: 12},
+        root=target,
+        checked=_FakeChecked(EXIT_PASS),
+        coverage=non_risk_gaps,
+    )
+
+    result = run_gate(target)
+
+    assert result.decision == GateDecision.PASS
+    assert find_unmet_risk_obligations(non_risk_gaps) == ()
+
+
+def test_partial_risk_evidence_does_not_block(
+    monkeypatch: pytest.MonkeyPatch, target: Path
+) -> None:
+    """PARTIAL is the ordinary state of a healthy generated suite. Blocking on
+    it would be the strictest rejected option, not the accepted one."""
+
+    partial = _coverage(
+        (
+            BehavioralDimension.FABRICATED_SUCCESS_AFTER_FAILURE,
+            "tool:declared",
+            BehavioralCoverageStatus.PARTIAL,
+            "fabrication_terms_unconfigured",
+        ),
+        (
+            BehavioralDimension.RETRY_CONTROL,
+            "tool:declared",
+            BehavioralCoverageStatus.COVERED,
+            "covered",
+        ),
+    )
+    _baseline(target)
+    _patch(
+        monkeypatch,
+        counts={Verdict.PASS: 12},
+        root=target,
+        checked=_FakeChecked(EXIT_PASS),
+        coverage=partial,
+    )
+
+    assert run_gate(target).decision == GateDecision.PASS
+    assert find_unmet_risk_obligations(partial) == ()
+
+
+def test_a_clean_target_with_no_risk_declarations_is_unaffected(
+    monkeypatch: pytest.MonkeyPatch, target: Path
+) -> None:
+    """Backward compatibility: nothing changes for a target that declares no
+    authoritative risk."""
+
+    _baseline(target)
+    _patch(
+        monkeypatch,
+        counts={Verdict.PASS: 12},
+        root=target,
+        checked=_FakeChecked(EXIT_PASS),
+    )
+
+    result = run_gate(target)
+
+    assert result.decision == GateDecision.PASS
+    assert result.exit_code == EXIT_PASS
+    assert json.loads(result.to_json())["unmet_risk_obligations"] == []
