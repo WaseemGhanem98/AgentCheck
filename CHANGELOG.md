@@ -42,6 +42,11 @@ identity**.
   the `tool_risk` declaration if the tool is not actually state-changing or
   destructive.
 
+  **A known limit.** Generation caps cases per origin, so a target declaring
+  risk on more than roughly ten tools can find that AgentCheck's own generator
+  stops emitting the cases this floor requires, and regenerating will not clear
+  it. Do not delete a true declaration to go green; see `docs/ci-gate.md`.
+
   **Scope is narrow, by design.** Whether an obligation exists is read from the
   declaration, not from what coverage reports, so risk AgentCheck merely
   *inferred* from a tool's name can never block — inference is not authority.

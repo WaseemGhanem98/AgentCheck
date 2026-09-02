@@ -845,3 +845,109 @@ def test_only_covered_or_partial_counts_as_satisfied(
         )
         unmet = unmet_risk_obligations(_spec("purge_records"), ())
         assert len(unmet) == len(_RISK_DIMENSIONS), status
+
+
+def test_a_duplicate_declared_tool_name_creates_no_obligation() -> None:
+    """A name declared twice binds to no single contract.
+
+    `analyze_behavioral_coverage` excludes ambiguous names, and obligations
+    must stay a subset of what it seeds, so they are excluded here too. An
+    earlier version keyed obligations by name and let the second definition
+    overwrite the first, silently dropping two of the four dimensions
+    depending on declaration order -- three different behaviours all passed
+    the suite, so this pins the one that is consistent with the analyzer.
+
+    Nothing is lost: `ToolGateway` refuses a duplicate tool definition, so such
+    a target stops at `infra_error`, which outranks this floor anyway.
+    """
+
+    from agentcheck.adapters import CustomAgentAdapter
+    from agentcheck.domain import ToolDefinition
+
+    def _tool(*, destructive: bool) -> ToolDefinition:
+        return ToolDefinition(
+            name="purge_records",
+            description="Purge records.",
+            input_schema={"type": "object", "properties": {}},
+            state_changing=True,
+            destructive=destructive,
+            replaceable=True,
+        )
+
+    class _Agent:
+        name = "T"
+        instructions = "Assist."
+        tools = (_tool(destructive=True), _tool(destructive=False))
+
+        def start(self, message, tools):  # pragma: no cover - never reached
+            raise AssertionError("no turn runs")
+
+        def resume(self, state, message, tools):  # pragma: no cover
+            raise AssertionError("no turn runs")
+
+    spec = CustomAgentAdapter().inspect(_Agent())
+
+    assert unmet_risk_obligations(spec, ()) == ()
+
+
+def test_every_branch_that_counts_obligations_also_names_them(
+    monkeypatch: pytest.MonkeyPatch, target: Path
+) -> None:
+    """A bare count with no rows tells a developer nothing.
+
+    Several branches outrank the floor but still carry obligations: an
+    infrastructure error, a real regression, an inconclusive run. Each reports
+    the count, so each must also name the tool, the requirement and the
+    remedy.
+    """
+
+    cases = (
+        ("infra", {Verdict.PASS: 3, Verdict.INFRA_ERROR: 1}, True),
+        ("fail", {Verdict.PASS: 2, Verdict.FAIL: 1}, False),
+        ("inconclusive", {Verdict.PASS: 2, Verdict.INCONCLUSIVE: 1}, False),
+    )
+    for name, counts, baseline in cases:
+        # A fresh directory per case: a baseline file left behind by an earlier
+        # iteration would silently move the next one onto the compared path.
+        root = target / name
+        root.mkdir()
+        if baseline:
+            _baseline(root)
+        _patch(
+            monkeypatch,
+            counts=counts,
+            root=root,
+            spec=_spec("purge_records"),
+            scenarios=(),
+            checked=_FakeChecked(EXIT_NOT_CERTIFIABLE) if baseline else None,
+        )
+
+        rendered = run_gate(root).render()
+
+        assert "purge_records" in rendered, counts
+        assert "declared, not inferred" in rendered, counts
+        assert "agentcheck.json" in rendered, counts
+
+
+def test_obligations_are_reported_in_json_on_every_branch(
+    monkeypatch: pytest.MonkeyPatch, target: Path
+) -> None:
+    """`--json` must not depend on whether a baseline file happens to exist."""
+
+    for name, counts in (
+        ("fail", {Verdict.PASS: 2, Verdict.FAIL: 1}),
+        ("inconclusive", {Verdict.PASS: 2, Verdict.INCONCLUSIVE: 1}),
+    ):
+        root = target / name
+        root.mkdir()
+        _patch(
+            monkeypatch,
+            counts=counts,
+            root=root,
+            spec=_spec("purge_records"),
+            scenarios=(),
+        )
+
+        document = json.loads(run_gate(root).to_json())
+
+        assert document["unmet_risk_obligations"], counts

@@ -540,9 +540,24 @@ def risk_obligations_for_spec(
     """
 
     risk_by_name = {item.tool_name: item for item in spec.tool_risk.items}
+    # A name declared twice binds to no single ToolDefinition, so there is no
+    # one contract to hold a tool to. `analyze_behavioral_coverage` excludes
+    # ambiguous names for the same reason, and obligations must stay a subset
+    # of what it seeds. Nothing is lost in practice: `ToolGateway` refuses a
+    # duplicate tool definition outright, so such a target cannot reach a
+    # verdict at all -- it stops at `infra_error`, which outranks this floor.
+    ambiguous = {
+        name
+        for name, count in Counter(
+            item.value.name for item in spec.tools.items
+        ).items()
+        if count > 1
+    }
     obligations: dict[str, frozenset[BehavioralDimension]] = {}
     for tool_item in spec.tools.items:
         tool = tool_item.value
+        if tool.name in ambiguous:
+            continue
         assertion = risk_by_name.get(tool.name)
         if assertion is None:
             continue

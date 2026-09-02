@@ -77,6 +77,20 @@ To resolve a block: add cases exercising the listed behaviours, or correct the
 `tool_risk` declaration if the tool is not actually state-changing or
 destructive.
 
+### A known limit on large declared surfaces
+
+Generation caps how many cases it emits per origin, so a target that declares
+risk on many tools can reach a point where AgentCheck's own generator stops
+producing the very cases this floor requires. Measured against the bundled
+generator, targets declaring risk on around ten tools or fewer are satisfied by
+their generated suite; past that, later tools begin receiving no fault variants
+and their obligations stay unmet, and regenerating will not clear it.
+
+**Do not delete a true risk declaration to get past this.** That trades a
+correct description of your agent for a green build, which is the opposite of
+what the gate is for. Supply the missing cases yourself, or reduce the number
+of tools evaluated in one run. Raising the caps is tracked separately.
+
 ## Historical failures do not block
 
 A baseline records the failures you have already accepted. The gate blocks on

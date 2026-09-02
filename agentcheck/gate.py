@@ -68,10 +68,14 @@ def _obligation_detail(
         "a declaration is authoritative and cannot be satisfied by absence"
     )
     lines.append(
-        "add cases that exercise the listed behaviours for those tools, or "
-        "correct the risk declaration if the tool is not actually "
-        "state-changing or destructive -- that is the tool_risk block in "
-        "agentcheck.json, or the tool's own ToolDefinition on a custom agent"
+        "add cases that exercise the listed behaviours for those tools. If a "
+        "listed tool is not actually state-changing or destructive, correct "
+        "its risk declaration instead -- the tool_risk block in "
+        "agentcheck.json, or the tool's own ToolDefinition on a custom agent. "
+        "Do not remove a declaration that is true: on a target with many "
+        "declared risky tools, generation's own per-origin caps can stop it "
+        "emitting these cases, and see docs/ci-gate.md before changing "
+        "anything"
     )
     return tuple(lines)
 
@@ -137,12 +141,15 @@ class GateResult:
         if self.suite_fingerprint:
             lines.append(f"  suite      {self.suite_fingerprint}")
         if self.unmet_risk_obligations:
-            # A one-line summary only; the per-obligation rows live in `detail`,
-            # which is rendered below, so they are not repeated here.
-            tools = sorted({item.tool_name for item in self.unmet_risk_obligations})
-            lines.append(
-                f"  evidence   {len(self.unmet_risk_obligations)} required "
-                f"obligation(s) unmet across {len(tools)} tool(s)"
+            # render() owns the whole obligation block. Several branches carry
+            # obligations without putting them in `detail` -- an infra error or
+            # a real regression outranks the floor but the obligations are
+            # still true -- and a bare count with no rows tells a developer
+            # nothing, which is exactly what `_obligation_detail` exists to
+            # prevent.
+            lines.append("")
+            lines.extend(
+                f"  {line}" for line in _obligation_detail(self.unmet_risk_obligations)
             )
         lines.append(
             "  baseline   "
@@ -288,6 +295,7 @@ def run_gate(
                 baseline_path=None,
                 baseline_compared=False,
                 report_path=report,
+                unmet_risk_obligations=obligations,
             )
         if counts.get("inconclusive"):
             return GateResult(
@@ -304,6 +312,7 @@ def run_gate(
                 baseline_path=None,
                 baseline_compared=False,
                 report_path=report,
+                unmet_risk_obligations=obligations,
             )
         if obligations:
             return GateResult(
@@ -312,7 +321,7 @@ def run_gate(
                 reason=(
                     "required behavioural evidence is missing, which is not a pass"
                 ),
-                detail=tuple([*_obligation_detail(obligations), *detail]),
+                detail=tuple(detail),
                 summary_block="",
                 counts=counts,
                 run_id=execution.run_id,
@@ -372,7 +381,7 @@ def run_gate(
             decision=GateDecision.BLOCK,
             exit_code=EXIT_INCONCLUSIVE,
             reason="required behavioural evidence is missing, which is not a pass",
-            detail=_obligation_detail(obligations),
+            detail=(),
             summary_block=checked.summary,
             counts=counts,
             run_id=execution.run_id,
