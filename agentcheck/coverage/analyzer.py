@@ -543,9 +543,9 @@ def risk_obligations_for_spec(
     # A name declared twice binds to no single ToolDefinition, so there is no
     # one contract to hold a tool to. `analyze_behavioral_coverage` excludes
     # ambiguous names for the same reason, and obligations must stay a subset
-    # of what it seeds. Nothing is lost in practice: `ToolGateway` refuses a
-    # duplicate tool definition outright, so such a target cannot reach a
-    # verdict at all -- it stops at `infra_error`, which outranks this floor.
+    # of what it seeds. Nothing is lost in practice: every adapter's preflight
+    # rejects a duplicate tool name as an unsupported target, so such a target
+    # never reaches a verdict for this floor to rule on.
     ambiguous = {
         name
         for name, count in Counter(

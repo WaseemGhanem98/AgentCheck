@@ -61,21 +61,29 @@ def _obligation_detail(
     remaining = len(obligations) - MAX_REPORTED_OBLIGATIONS
     if remaining > 0:
         lines.append(
-            f"  ... and {remaining} more; the run report shows every requirement"
+            f"  ... and {remaining} more; `agentcheck gate --json` lists every "
+            "one under unmet_risk_obligations"
         )
     lines.append(
         "these are required because the tool's risk is declared, not inferred; "
         "a declaration is authoritative and cannot be satisfied by absence"
     )
     lines.append(
-        "add cases that exercise the listed behaviours for those tools. If a "
-        "listed tool is not actually state-changing or destructive, correct "
-        "its risk declaration instead -- the tool_risk block in "
-        "agentcheck.json, or the tool's own ToolDefinition on a custom agent. "
-        "Do not remove a declaration that is true: on a target with many "
+        "if this run was bounded by max_cases, the missing cases may simply "
+        "not have been selected -- raise or remove it and re-run before "
+        "changing anything else"
+    )
+    lines.append(
+        "otherwise add cases that exercise the listed behaviours for those "
+        "tools. If a listed tool is not actually state-changing or "
+        "destructive, correct its risk declaration instead -- the tool_risk "
+        "block in agentcheck.json, or the tool's own ToolDefinition on a "
+        "custom agent"
+    )
+    lines.append(
+        "do not remove a declaration that is true: on a target with many "
         "declared risky tools, generation's own per-origin caps can stop it "
-        "emitting these cases, and see docs/ci-gate.md before changing "
-        "anything"
+        "emitting these cases. See docs/ci-gate.md"
     )
     return tuple(lines)
 

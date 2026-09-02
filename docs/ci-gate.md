@@ -77,6 +77,11 @@ To resolve a block: add cases exercising the listed behaviours, or correct the
 `tool_risk` declaration if the tool is not actually state-changing or
 destructive.
 
+`max_cases` bounds a run before obligations are evaluated, so a bounded run can
+report obligations unmet simply because the cases were not selected. That can
+happen well below the limit described next. Raise or remove `max_cases` and
+re-run before concluding the evidence is genuinely absent.
+
 ### A known limit on large declared surfaces
 
 Generation caps how many cases it emits per origin, so a target that declares
