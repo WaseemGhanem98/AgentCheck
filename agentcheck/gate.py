@@ -23,12 +23,7 @@ from agentcheck.application import SuiteExecution, execute_suite
 from agentcheck.baseline.contract import DEFAULT_BASELINE_FILENAME
 from agentcheck.baseline.service import check_baseline
 from agentcheck.config import contained_path
-from agentcheck.coverage import (
-    BehavioralCoverage,
-    BehavioralCoverageStatus,
-    risk_obligations_for_spec,
-)
-from agentcheck.domain import AgentSpec
+from agentcheck.coverage import UnmetRiskObligation, unmet_risk_obligations
 from agentcheck.domain import Verdict
 
 
@@ -41,115 +36,6 @@ EXIT_INCONCLUSIVE = 3
 
 # Keep one blocked gate readable in a terminal; the report holds the full set.
 MAX_REPORTED_OBLIGATIONS = 10
-
-
-@dataclass(frozen=True)
-class UnmetRiskObligation:
-    """One required behavioural evidence obligation the suite did not meet.
-
-    ``subject`` is the coverage subject (``tool:<name>``), ``dimension`` the
-    risk-scoped behaviour that a declared risk made mandatory, and
-    ``reason_code`` the coverage analyzer's own account of what is absent.
-    """
-
-    subject: str
-    dimension: str
-    reason_code: str
-
-    @property
-    def tool_name(self) -> str:
-        """The tool this obligation belongs to.
-
-        Obligations are built from ``tool:<name>`` subjects the spec produced,
-        so the prefix is always present; anything else is returned unchanged
-        rather than mangled into a name that does not exist.
-        """
-
-        prefix, separator, name = self.subject.partition(":")
-        return name if separator and prefix == "tool" else self.subject
-
-
-TRUNCATED_DETAIL_REASON = "coverage_detail_unavailable"
-UNREADABLE_STATUS_REASON = "coverage_status_unavailable"
-
-
-def find_unmet_risk_obligations(
-    spec: AgentSpec, coverage: BehavioralCoverage
-) -> tuple[UnmetRiskObligation, ...]:
-    """Obligations created by declared risk that the suite did not meet.
-
-    Authority comes from ``spec.tool_risk`` via
-    :func:`~agentcheck.coverage.risk_obligations_for_spec`; coverage supplies
-    only the *status* of an obligation the spec already established. A status
-    can never create an obligation, so a tool whose risk is merely inferred can
-    never block here however its coverage reads.
-
-    Three ways an obligation goes unmet, all of them "no evidence stands behind
-    this requirement":
-
-    ``MISSING``
-        The requirement was evaluated and nothing satisfied it.
-    ``UNKNOWN``
-        The requirement could not be bound to evidence at all -- a tool schema
-        too large or deep to project stably, or a name that collides. The
-        declaration is still authoritative, so an unreadable status is unknown,
-        not satisfied.
-    absent from the bounded detail
-        ``BehavioralCoverageFamily.requirements`` is a display view, capped and
-        stripped of colliding subjects, while its sibling counters are
-        complete. An absent row is only treated as unmet when those counters
-        prove some ``MISSING`` requirement is unaccounted for -- otherwise the
-        counts themselves establish that nothing is missing, and blocking would
-        be provably false and unfixable for any target with more declared tools
-        than the cap.
-    """
-
-    obligations = risk_obligations_for_spec(spec)
-    if not obligations:
-        return ()
-
-    families = {family.dimension: family for family in coverage.families}
-    unmet: list[UnmetRiskObligation] = []
-    for tool_name, dimensions in obligations.items():
-        subject = f"tool:{tool_name}"
-        for dimension in dimensions:
-            family = families.get(dimension)
-            rows = {} if family is None else {
-                item.subject: item for item in family.requirements
-            }
-            requirement = rows.get(subject)
-            if requirement is None:
-                visible_missing = sum(
-                    1
-                    for item in rows.values()
-                    if item.status is BehavioralCoverageStatus.MISSING
-                )
-                unaccounted = (0 if family is None else family.missing) - visible_missing
-                if unaccounted > 0 or family is None:
-                    unmet.append(
-                        UnmetRiskObligation(
-                            subject=subject,
-                            dimension=dimension.value,
-                            reason_code=TRUNCATED_DETAIL_REASON,
-                        )
-                    )
-            elif requirement.status is BehavioralCoverageStatus.MISSING:
-                unmet.append(
-                    UnmetRiskObligation(
-                        subject=subject,
-                        dimension=dimension.value,
-                        reason_code=requirement.reason_code,
-                    )
-                )
-            elif requirement.status is BehavioralCoverageStatus.UNKNOWN:
-                unmet.append(
-                    UnmetRiskObligation(
-                        subject=subject,
-                        dimension=dimension.value,
-                        reason_code=requirement.reason_code or UNREADABLE_STATUS_REASON,
-                    )
-                )
-    return tuple(sorted(unmet, key=lambda item: (item.subject, item.dimension)))
 
 
 def _obligation_detail(
@@ -169,16 +55,13 @@ def _obligation_detail(
     ]
     for item in obligations[:MAX_REPORTED_OBLIGATIONS]:
         lines.append(
-            f"  {item.tool_name}: no {item.dimension} evidence "
+            f"  {item.tool_name}: no {item.dimension.value} evidence "
             f"({item.reason_code})"
         )
     remaining = len(obligations) - MAX_REPORTED_OBLIGATIONS
     if remaining > 0:
-        lines.append(f"  ... and {remaining} more; the report lists all of them")
-    if any(item.reason_code == TRUNCATED_DETAIL_REASON for item in obligations):
         lines.append(
-            "  (some statuses could not be read from the bounded coverage "
-            "detail, so they are reported as unmet rather than assumed met)"
+            f"  ... and {remaining} more; the run report shows every requirement"
         )
     lines.append(
         "these are required because the tool's risk is declared, not inferred; "
@@ -232,8 +115,7 @@ class GateResult:
                 "unmet_risk_obligations": [
                     {
                         "tool": item.tool_name,
-                        "subject": item.subject,
-                        "dimension": item.dimension,
+                        "dimension": item.dimension.value,
                         "reason_code": item.reason_code,
                     }
                     for item in self.unmet_risk_obligations
@@ -358,9 +240,7 @@ def run_gate(
     # Evaluated once here, consulted only on the paths that would otherwise
     # return PASS. Certifiability and a real behavioural failure keep their own
     # more specific answers; this floor never overrides them.
-    obligations = find_unmet_risk_obligations(
-        execution.spec, execution.behavioral_coverage
-    )
+    obligations = unmet_risk_obligations(execution.spec, execution.scenarios)
 
     # Certifiability first. An infrastructure error means the suite did not get
     # to say anything, so it is neither a pass nor a regression, and answering
@@ -549,9 +429,6 @@ __all__ = [
     "EXIT_PASS",
     "GateDecision",
     "GateResult",
-    "TRUNCATED_DETAIL_REASON",
-    "UNREADABLE_STATUS_REASON",
-    "find_unmet_risk_obligations",
     "gate_error_result",
     "run_gate",
 ]

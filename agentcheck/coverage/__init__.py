@@ -1,8 +1,10 @@
 """Declared, observable behavioral coverage for AgentCheck suites."""
 
 from .analyzer import (
+    UnmetRiskObligation,
     analyze_behavioral_coverage,
     risk_obligations_for_spec,
+    unmet_risk_obligations,
     verify_behavioral_coverage_binding,
 )
 from .contract import (
@@ -23,7 +25,9 @@ __all__ = [
     "BehavioralCoverageRequirement",
     "BehavioralCoverageStatus",
     "BehavioralDimension",
+    "UnmetRiskObligation",
     "analyze_behavioral_coverage",
     "risk_obligations_for_spec",
+    "unmet_risk_obligations",
     "verify_behavioral_coverage_binding",
 ]

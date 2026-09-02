@@ -67,11 +67,11 @@ This is scoped deliberately:
   risk and are not part of this floor.
 - **A target that declares no risk is unaffected.**
 
-An obligation also goes unmet when its status cannot be read at all — a tool
-schema too large or deep to bind stably, or a requirement outside the bounded
-per-requirement detail while the report's own counters say something is still
-missing. An unreadable status is unknown, not satisfied. Where those counters
-show nothing missing, they settle the question and the gate does not block.
+Whether an obligation is met is evaluated from the declared risk and the
+scenarios directly, not read back out of the coverage report. The report is a
+presentation: its per-requirement detail is bounded and its subject names are
+redacted, so a tool with a large schema or a secret-shaped name can be
+unreadable there. Deciding from it would let such a tool slip through.
 
 To resolve a block: add cases exercising the listed behaviours, or correct the
 `tool_risk` declaration if the tool is not actually state-changing or

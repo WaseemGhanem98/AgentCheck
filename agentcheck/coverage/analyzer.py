@@ -571,6 +571,72 @@ def risk_obligations_for_spec(
     return obligations
 
 
+@dataclass(frozen=True, slots=True)
+class UnmetRiskObligation:
+    """One declared risk obligation the evaluated scenarios do not satisfy."""
+
+    tool_name: str
+    dimension: BehavioralDimension
+    reason_code: str
+
+
+def unmet_risk_obligations(
+    spec: AgentSpec, scenarios: "Sequence[Scenario]"
+) -> tuple[UnmetRiskObligation, ...]:
+    """Declared risk obligations the scenarios leave without evidence.
+
+    Deliberately computed from the spec and the scenarios themselves rather
+    than from a rendered :class:`BehavioralCoverage`. That report is a
+    *presentation* of coverage: its per-requirement detail is capped at
+    ``MAX_COVERAGE_DETAILS``, drops subjects that collide after redaction, and
+    carries subjects already passed through ``redact_log_text`` so a
+    secret-shaped tool name no longer matches the name in the spec. Any
+    consumer that must decide something -- the release gate above all --
+    cannot reconstruct per-tool truth from it, and three separate attempts to
+    do so each produced a false PASS or a false BLOCK.
+
+    Here every obligation is evaluated directly, so there is nothing to
+    truncate, nothing to redact, and no counter arithmetic to get wrong. A
+    requirement counts as satisfied only when it is COVERED or PARTIAL;
+    anything else -- MISSING, or an UNKNOWN the evaluator could not decide --
+    is evidence that does not exist, and the reason code says which.
+    """
+
+    obligations = risk_obligations_for_spec(spec)
+    if not obligations:
+        return ()
+
+    tools = {item.value.name: item.value for item in spec.tools.items}
+    satisfied = {
+        BehavioralCoverageStatus.COVERED,
+        BehavioralCoverageStatus.PARTIAL,
+    }
+    unmet: list[UnmetRiskObligation] = []
+    for tool_name, dimensions in obligations.items():
+        for dimension in dimensions:
+            outcome = _evaluate_seed(
+                _Seed(
+                    dimension=dimension,
+                    subject=_tool_subject(tool_name),
+                    applicability=_Applicability.APPLICABLE,
+                    tool_name=tool_name,
+                ),
+                scenarios,
+                tools,
+            )
+            if outcome.status not in satisfied:
+                unmet.append(
+                    UnmetRiskObligation(
+                        tool_name=tool_name,
+                        dimension=dimension,
+                        reason_code=outcome.reason_code,
+                    )
+                )
+    return tuple(
+        sorted(unmet, key=lambda item: (item.tool_name, item.dimension.value))
+    )
+
+
 def _seed_from_spec(
     spec: AgentSpec,
     seeds: dict[tuple[BehavioralDimension, str], _Seed],
@@ -2421,7 +2487,9 @@ def verify_behavioral_coverage_binding(
 
 
 __all__ = [
+    "UnmetRiskObligation",
     "analyze_behavioral_coverage",
     "risk_obligations_for_spec",
+    "unmet_risk_obligations",
     "verify_behavioral_coverage_binding",
 ]
