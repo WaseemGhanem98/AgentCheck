@@ -56,15 +56,21 @@ never exercises a tool you called destructive is not a passing suite.
 
 This is scoped deliberately:
 
-- **Only declared risk counts.** A tool whose risk AgentCheck merely *inferred*
-  from its name reports `unknown`, and `unknown` never blocks. Inference is not
-  authority, so it cannot create an obligation.
+- **Only declared risk counts.** Whether an obligation exists is read from the
+  declaration itself, not from what the coverage report happens to say. A tool
+  whose risk AgentCheck merely *inferred* from its name can never create an
+  obligation, even if its coverage shows a gap. Inference is not authority.
 - **Only a total absence of evidence counts.** `partial` evidence does not
   block; it is the ordinary state of a healthy suite.
 - **An uncovered tool is not by itself a failure.** `success_path`,
   `failure_handling`, and `timeout_handling` apply to every tool regardless of
   risk and are not part of this floor.
 - **A target that declares no risk is unaffected.**
+
+The per-requirement detail in a coverage report is bounded. If a declared
+tool's status cannot be read from it, the gate reports that obligation as unmet
+rather than assuming it was met — an unreadable status is unknown, not
+satisfied.
 
 To resolve a block: add cases exercising the listed behaviours, or correct the
 `tool_risk` declaration if the tool is not actually state-changing or

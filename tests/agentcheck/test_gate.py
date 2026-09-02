@@ -41,6 +41,42 @@ from agentcheck.gate import (
 )
 
 
+def _spec(*declared: str) -> Any:
+    """A real inspected spec whose named tools carry a developer declaration.
+
+    Authority is read from the spec now, so these tests cannot fake it with a
+    stub -- the declaration has to survive the adapter's own risk resolution.
+    """
+
+    from agents import Agent, function_tool
+
+    from agentcheck.adapters import OpenAIAgentsAdapter
+    from agentcheck.config import ToolRiskDeclaration
+
+    tools = []
+    for name in declared:
+
+        def _make(tool_name: str) -> Any:
+            @function_tool(
+                name_override=tool_name,
+                description_override="Look up a record by id.",
+            )
+            def _tool(record_id: str) -> str:
+                raise AssertionError("never runs")
+
+            return _tool
+
+        tools.append(_make(name))
+
+    return OpenAIAgentsAdapter().inspect(
+        Agent(name="T", instructions="Assist.", tools=tools, model="gpt-4.1-mini"),
+        declared_tool_risk={
+            name: ToolRiskDeclaration(state_changing=True, destructive=True)
+            for name in declared
+        },
+    )
+
+
 def _coverage(
     *requirements: tuple[BehavioralDimension, str, BehavioralCoverageStatus, str],
 ) -> BehavioralCoverage:
@@ -98,15 +134,17 @@ class _FakeExecution:
         root: Path,
         counts: dict[Verdict, int],
         coverage: BehavioralCoverage | None = None,
+        spec: Any = None,
     ) -> None:
         self.target_root = root
         self.run_id = "run-1"
         self.frozen_suite = type("S", (), {"fingerprint": "sha256:abc"})()
         self.report_path = root / "report.html"
         self._counts = Counter(counts)
-        # A real SuiteExecution always carries coverage, so the fake does too;
-        # an empty report means "no obligations", never "cannot tell".
+        # A real SuiteExecution always carries both, so the fake does too; an
+        # empty report means "no obligations", never "cannot tell".
         self.behavioral_coverage = coverage if coverage is not None else _coverage()
+        self.spec = spec if spec is not None else _spec()
 
     @property
     def counts(self) -> Counter:
@@ -131,11 +169,12 @@ def _patch(
     root: Path,
     checked: _FakeChecked | None = None,
     coverage: BehavioralCoverage | None = None,
+    spec: Any = None,
 ) -> dict[str, int]:
     calls = {"check_baseline": 0}
 
     def _execute(target: Any, **_: Any) -> Any:
-        return _FakeExecution(root, counts, coverage)
+        return _FakeExecution(root, counts, coverage, spec)
 
     def _check(*_: Any, **__: Any) -> Any:
         calls["check_baseline"] += 1
@@ -504,6 +543,7 @@ def test_missing_declared_risk_evidence_is_never_a_pass(
         root=target,
         checked=_FakeChecked(EXIT_PASS),
         coverage=_UNMET_DECLARED_RISK,
+        spec=_spec("purge_records"),
     )
 
     result = run_gate(target)
@@ -524,6 +564,7 @@ def test_missing_declared_risk_evidence_blocks_without_a_baseline(
         counts={Verdict.PASS: 12},
         root=target,
         coverage=_UNMET_DECLARED_RISK,
+        spec=_spec("purge_records"),
     )
 
     result = run_gate(target)
@@ -545,6 +586,7 @@ def test_the_block_names_the_tool_the_requirement_and_the_next_step(
         root=target,
         checked=_FakeChecked(EXIT_PASS),
         coverage=_UNMET_DECLARED_RISK,
+        spec=_spec("purge_records"),
     )
 
     rendered = run_gate(target).render()
@@ -568,6 +610,7 @@ def test_the_unmet_obligations_are_machine_readable(
         root=target,
         checked=_FakeChecked(EXIT_PASS),
         coverage=_UNMET_DECLARED_RISK,
+        spec=_spec("purge_records"),
     )
 
     document = json.loads(run_gate(target).to_json())
@@ -595,12 +638,17 @@ def test_an_infra_error_still_outranks_the_evidence_floor(
         counts={Verdict.PASS: 3, Verdict.INFRA_ERROR: 1},
         root=target,
         coverage=_UNMET_DECLARED_RISK,
+        spec=_spec("purge_records"),
     )
 
     result = run_gate(target)
 
+    # Precedence is what matters: a run that could not execute says nothing,
+    # and its own answer wins. The obligations are still recorded rather than
+    # dropped, so `--json` stays useful for triage.
     assert result.exit_code == EXIT_NOT_CERTIFIABLE
-    assert result.unmet_risk_obligations == ()
+    assert result.decision == GateDecision.BLOCK
+    assert result.unmet_risk_obligations != ()
 
 
 def test_a_behavioural_failure_still_outranks_the_evidence_floor(
@@ -613,6 +661,7 @@ def test_a_behavioural_failure_still_outranks_the_evidence_floor(
         counts={Verdict.PASS: 2, Verdict.FAIL: 1},
         root=target,
         coverage=_UNMET_DECLARED_RISK,
+        spec=_spec("purge_records"),
     )
 
     result = run_gate(target)
@@ -647,6 +696,7 @@ def test_unknown_applicability_never_becomes_an_obligation(
         root=target,
         checked=_FakeChecked(EXIT_PASS),
         coverage=inferred_only,
+        spec=_spec(),  # nothing declared: no obligation can exist
     )
 
     result = run_gate(target)
@@ -689,12 +739,13 @@ def test_an_uncovered_tool_is_not_by_itself_a_gate_failure(
         root=target,
         checked=_FakeChecked(EXIT_PASS),
         coverage=non_risk_gaps,
+        spec=_spec("ordinary"),
     )
 
     result = run_gate(target)
 
     assert result.decision == GateDecision.PASS
-    assert find_unmet_risk_obligations(non_risk_gaps) == ()
+    assert find_unmet_risk_obligations(_spec("ordinary"), non_risk_gaps) == ()
 
 
 def test_partial_risk_evidence_does_not_block(
@@ -724,10 +775,11 @@ def test_partial_risk_evidence_does_not_block(
         root=target,
         checked=_FakeChecked(EXIT_PASS),
         coverage=partial,
+        spec=_spec("declared"),
     )
 
     assert run_gate(target).decision == GateDecision.PASS
-    assert find_unmet_risk_obligations(partial) == ()
+    assert find_unmet_risk_obligations(_spec("declared"), partial) == ()
 
 
 def test_a_clean_target_with_no_risk_declarations_is_unaffected(
@@ -749,3 +801,169 @@ def test_a_clean_target_with_no_risk_declarations_is_unaffected(
     assert result.decision == GateDecision.PASS
     assert result.exit_code == EXIT_PASS
     assert json.loads(result.to_json())["unmet_risk_obligations"] == []
+
+
+# --- the two ways this floor was wrong before independent review ------------
+
+
+def test_inferred_risk_never_creates_an_obligation_even_when_coverage_says_missing(
+    monkeypatch: pytest.MonkeyPatch, target: Path
+) -> None:
+    """Authority comes from the spec, never from a coverage status.
+
+    `_seed_from_scenarios` can raise a risk dimension to APPLICABLE from
+    scenario constraints alone, so a tool whose risk is only *inferred* can
+    reach MISSING. Reading MISSING as "declared" would make inference
+    authoritative and would tell the developer to fix a `tool_risk` entry they
+    never wrote.
+    """
+
+    missing_but_inferred = _coverage(
+        (
+            BehavioralDimension.AMBIGUOUS_OUTCOME,
+            "tool:act",
+            BehavioralCoverageStatus.MISSING,
+            "ambiguous_outcome_case_missing",
+        ),
+    )
+    _baseline(target)
+    _patch(
+        monkeypatch,
+        counts={Verdict.PASS: 12},
+        root=target,
+        checked=_FakeChecked(EXIT_PASS),
+        coverage=missing_but_inferred,
+        spec=_spec(),  # `act` exists in coverage but is declared by nobody
+    )
+
+    result = run_gate(target)
+
+    assert result.decision == GateDecision.PASS
+    assert result.unmet_risk_obligations == ()
+    assert find_unmet_risk_obligations(_spec(), missing_but_inferred) == ()
+
+
+def test_an_obligation_missing_from_the_bounded_detail_is_not_assumed_met(
+    monkeypatch: pytest.MonkeyPatch, target: Path
+) -> None:
+    """`family.requirements` is a bounded view: capped at MAX_COVERAGE_DETAILS
+    and stripped of subjects that collide after redaction, while the counts
+    beside it are complete. A declared tool whose status is not in that view has
+    an unknown status, not a satisfied one -- assuming otherwise reproduces the
+    false green this floor exists to close.
+    """
+
+    # The declared tool is absent from the detail rows entirely.
+    detail_without_our_tool = _coverage(
+        (
+            BehavioralDimension.RETRY_CONTROL,
+            "tool:someone_else",
+            BehavioralCoverageStatus.COVERED,
+            "covered",
+        ),
+    )
+    _baseline(target)
+    _patch(
+        monkeypatch,
+        counts={Verdict.PASS: 12},
+        root=target,
+        checked=_FakeChecked(EXIT_PASS),
+        coverage=detail_without_our_tool,
+        spec=_spec("purge_records"),
+    )
+
+    result = run_gate(target)
+
+    assert result.decision == GateDecision.BLOCK
+    assert result.exit_code == EXIT_INCONCLUSIVE
+    assert any(
+        item.reason_code == gate_module.TRUNCATED_DETAIL_REASON
+        for item in result.unmet_risk_obligations
+    )
+    assert "could not be read" in result.render()
+
+
+@pytest.mark.parametrize(
+    ("dimension", "reason"),
+    [
+        (
+            BehavioralDimension.FABRICATED_SUCCESS_AFTER_FAILURE,
+            "fabricated_success_case_missing",
+        ),
+        (BehavioralDimension.DUPLICATE_ACTION, "duplicate_action_case_missing"),
+        (BehavioralDimension.AMBIGUOUS_OUTCOME, "ambiguous_outcome_case_missing"),
+        (BehavioralDimension.RETRY_CONTROL, "retry_control_case_missing"),
+    ],
+)
+def test_each_declared_risk_dimension_is_individually_load_bearing(
+    monkeypatch: pytest.MonkeyPatch,
+    target: Path,
+    dimension: BehavioralDimension,
+    reason: str,
+) -> None:
+    """All four dimensions the decision names must block on their own, so none
+    can be dropped from the set without a test failing."""
+
+    _baseline(target)
+    _patch(
+        monkeypatch,
+        counts={Verdict.PASS: 12},
+        root=target,
+        checked=_FakeChecked(EXIT_PASS),
+        coverage=_coverage(
+            (dimension, "tool:purge_records", BehavioralCoverageStatus.MISSING, reason)
+        ),
+        spec=_spec("purge_records"),
+    )
+
+    result = run_gate(target)
+
+    assert result.exit_code == EXIT_INCONCLUSIVE
+    assert [item.dimension for item in result.unmet_risk_obligations] == [
+        dimension.value
+    ]
+
+
+def test_unsupported_risk_evidence_does_not_block(
+    monkeypatch: pytest.MonkeyPatch, target: Path
+) -> None:
+    """UNSUPPORTED is a statement about what AgentCheck can express, not
+    missing evidence, and must not be turned into an obligation."""
+
+    unsupported = _coverage(
+        (
+            BehavioralDimension.RETRY_CONTROL,
+            "tool:purge_records",
+            BehavioralCoverageStatus.UNSUPPORTED,
+            "trajectory_ordering_not_supported",
+        ),
+        (
+            BehavioralDimension.AMBIGUOUS_OUTCOME,
+            "tool:purge_records",
+            BehavioralCoverageStatus.COVERED,
+            "covered",
+        ),
+        (
+            BehavioralDimension.FABRICATED_SUCCESS_AFTER_FAILURE,
+            "tool:purge_records",
+            BehavioralCoverageStatus.COVERED,
+            "covered",
+        ),
+        (
+            BehavioralDimension.DUPLICATE_ACTION,
+            "tool:purge_records",
+            BehavioralCoverageStatus.COVERED,
+            "covered",
+        ),
+    )
+    _baseline(target)
+    _patch(
+        monkeypatch,
+        counts={Verdict.PASS: 12},
+        root=target,
+        checked=_FakeChecked(EXIT_PASS),
+        coverage=unsupported,
+        spec=_spec("purge_records"),
+    )
+
+    assert run_gate(target).decision == GateDecision.PASS

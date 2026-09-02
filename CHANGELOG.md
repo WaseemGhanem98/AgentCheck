@@ -42,9 +42,11 @@ identity**.
   the `tool_risk` declaration if the tool is not actually state-changing or
   destructive.
 
-  **Scope is narrow, by design.** Risk that AgentCheck merely *inferred* from a
-  tool's name reports `unknown` and never blocks — inference is not authority
-  and cannot create an obligation. `partial` evidence does not block; it is the
+  **Scope is narrow, by design.** Whether an obligation exists is read from the
+  declaration, not from what coverage reports, so risk AgentCheck merely
+  *inferred* from a tool's name can never block — inference is not authority.
+  Conversely, a declared tool whose status cannot be read from the bounded
+  coverage detail is reported unmet rather than assumed met. `partial` evidence does not block; it is the
   ordinary state of a healthy suite. `success_path`, `failure_handling`, and
   `timeout_handling` apply to every tool regardless of risk and are not part of
   this floor, so an uncovered tool is not by itself a gate failure. A target

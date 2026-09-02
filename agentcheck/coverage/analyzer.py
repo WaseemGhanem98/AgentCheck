@@ -511,6 +511,45 @@ def _risk_group_applicability(
     return groups
 
 
+def risk_obligations_for_spec(
+    spec: AgentSpec,
+) -> dict[str, frozenset[BehavioralDimension]]:
+    """Which risk dimensions each tool's *declared* risk makes mandatory.
+
+    Authority is read from the spec, never from a coverage status. A coverage
+    status cannot stand in for authority: ``_seed_from_scenarios`` can raise a
+    risk dimension to APPLICABLE from scenario constraints alone, so a tool
+    whose risk is merely inferred can still reach MISSING. Anything consuming
+    "this requirement was required" -- the release gate's evidence floor above
+    all -- must ask the spec, which is the only place the declaration lives.
+
+    Returns only tools with at least one obligation, so an empty mapping means
+    the target declares no authoritative risk at all.
+    """
+
+    groups = _risk_group_applicability(spec)
+    obligations: dict[str, frozenset[BehavioralDimension]] = {}
+    for name, (action, destructive) in groups.items():
+        dimensions: set[BehavioralDimension] = set()
+        if action is _Applicability.APPLICABLE:
+            dimensions.update(
+                (
+                    BehavioralDimension.FABRICATED_SUCCESS_AFTER_FAILURE,
+                    BehavioralDimension.DUPLICATE_ACTION,
+                )
+            )
+        if destructive is _Applicability.APPLICABLE:
+            dimensions.update(
+                (
+                    BehavioralDimension.AMBIGUOUS_OUTCOME,
+                    BehavioralDimension.RETRY_CONTROL,
+                )
+            )
+        if dimensions:
+            obligations[name] = frozenset(dimensions)
+    return obligations
+
+
 def _seed_from_spec(
     spec: AgentSpec,
     seeds: dict[tuple[BehavioralDimension, str], _Seed],
@@ -2360,4 +2399,8 @@ def verify_behavioral_coverage_binding(
         )
 
 
-__all__ = ["analyze_behavioral_coverage", "verify_behavioral_coverage_binding"]
+__all__ = [
+    "analyze_behavioral_coverage",
+    "risk_obligations_for_spec",
+    "verify_behavioral_coverage_binding",
+]
