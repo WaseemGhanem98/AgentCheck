@@ -24,6 +24,7 @@ from agentcheck.domain import (
     OracleStrength,
     OutputCriterion,
     OutputCriterionKind,
+    RiskAuthority,
     Scenario,
     SimulatedToolStatus,
     ToolBehaviorConstraint,
@@ -435,15 +436,86 @@ def _prerequisite_pairs(scenario: Scenario) -> tuple[tuple[str, str], ...]:
     )
 
 
+_AUTHORITATIVE_RISK = frozenset(
+    {RiskAuthority.DEVELOPER_DECLARED, RiskAuthority.FRAMEWORK_AUTHORITATIVE}
+)
+
+
+def _risk_group_applicability(
+    spec: AgentSpec,
+) -> dict[str, tuple[_Applicability | None, _Applicability | None]]:
+    """Per tool, the applicability of the action-gated and destructive-gated
+    risk dimensions, decided by the authority of the axis that gates each group.
+
+    ``fabricated_success_after_failure`` and ``duplicate_action`` are gated on
+    "state-changing or destructive"; ``ambiguous_outcome`` and ``retry_control``
+    are gated on "destructive" alone. A group is APPLICABLE when its predicate
+    is true *and* the axis that made it true was declared, and is ``None`` -- no
+    requirement at all -- only when the predicate is authoritatively false.
+    Anything resting on inference or an un-inferable axis stays UNKNOWN, so
+    declaring one axis never upgrades the other's authority: declaring only
+    ``state_changing`` leaves the destructive-gated dimensions unknown rather
+    than pruning them.
+
+    The predicate is read from the ``ToolDefinition``, which is the single
+    source of truth every other consumer already gates on (``generate``'s fault
+    variants, the derived policy pack). Only *authority* comes from
+    ``spec.tool_risk``, which is the same split ``policies.derived`` uses -- so
+    coverage cannot disagree with generation about whether a dimension applies.
+
+    Authority is deliberately not read from ``AgentProperty.authoritative`` on
+    the tool item. That flag records how the tool *schema* was obtained -- read
+    first-hand from a declaration, or reconstructed from a framework object --
+    and is unconditionally ``False`` on both SDK adapters. Neither the OpenAI
+    Agents SDK nor PydanticAI can carry risk itself, so for those targets a
+    developer declaration is the entire risk authority; keying coverage off the
+    schema flag discarded it and dropped real requirements out of the missing
+    denominator. A tool with no recorded assertion has no risk provenance to
+    read and falls back to that flag, which is exactly what decided this before
+    risk assertions existed.
+    """
+
+    risk_by_name = {item.tool_name: item for item in spec.tool_risk.items}
+    groups: dict[str, tuple[_Applicability | None, _Applicability | None]] = {}
+    for tool_item in spec.tools.items:
+        tool = tool_item.value
+        assertion = risk_by_name.get(tool.name)
+        if assertion is None:
+            state_declared = destructive_declared = tool_item.authoritative
+        else:
+            state_declared = assertion.state_changing.authority in _AUTHORITATIVE_RISK
+            destructive_declared = assertion.destructive.authority in _AUTHORITATIVE_RISK
+
+        if (tool.destructive and destructive_declared) or (
+            tool.state_changing and state_declared
+        ):
+            action = _Applicability.APPLICABLE
+        elif (
+            destructive_declared
+            and state_declared
+            and not tool.destructive
+            and not tool.state_changing
+        ):
+            action = None
+        else:
+            action = _Applicability.UNKNOWN
+
+        if tool.destructive and destructive_declared:
+            destructive_group = _Applicability.APPLICABLE
+        elif destructive_declared and not tool.destructive:
+            destructive_group = None
+        else:
+            destructive_group = _Applicability.UNKNOWN
+
+        groups[tool.name] = (action, destructive_group)
+    return groups
+
+
 def _seed_from_spec(
-    spec: AgentSpec, seeds: dict[tuple[BehavioralDimension, str], _Seed]
+    spec: AgentSpec,
+    seeds: dict[tuple[BehavioralDimension, str], _Seed],
+    risk_groups: dict[str, tuple[_Applicability | None, _Applicability | None]],
 ) -> None:
-    risk_dimensions = (
-        BehavioralDimension.FABRICATED_SUCCESS_AFTER_FAILURE,
-        BehavioralDimension.DUPLICATE_ACTION,
-        BehavioralDimension.AMBIGUOUS_OUTCOME,
-        BehavioralDimension.RETRY_CONTROL,
-    )
     for tool_item in sorted(spec.tools.items, key=lambda value: value.value.name):
         tool = tool_item.value
         subject = _tool_subject(tool.name)
@@ -460,40 +532,36 @@ def _seed_from_spec(
                 tool_name=tool.name,
             )
 
-        if not tool_item.authoritative:
-            for dimension in risk_dimensions:
+        action, destructive_group = risk_groups.get(
+            tool.name, (_Applicability.UNKNOWN, _Applicability.UNKNOWN)
+        )
+        for applicability, dimensions in (
+            (
+                action,
+                (
+                    BehavioralDimension.FABRICATED_SUCCESS_AFTER_FAILURE,
+                    BehavioralDimension.DUPLICATE_ACTION,
+                ),
+            ),
+            (
+                destructive_group,
+                (
+                    BehavioralDimension.AMBIGUOUS_OUTCOME,
+                    BehavioralDimension.RETRY_CONTROL,
+                ),
+            ),
+        ):
+            # ``None`` is the authoritative "this tool cannot do that" answer
+            # and carries no requirement, exactly as an unset risk flag
+            # produced no seed before.
+            if applicability is None:
+                continue
+            for dimension in dimensions:
                 _add_seed(
                     seeds,
                     dimension,
                     subject,
-                    _Applicability.UNKNOWN,
-                    tool_name=tool.name,
-                )
-            continue
-
-        state_changing = tool.state_changing or tool.destructive
-        if state_changing:
-            for dimension in (
-                BehavioralDimension.FABRICATED_SUCCESS_AFTER_FAILURE,
-                BehavioralDimension.DUPLICATE_ACTION,
-            ):
-                _add_seed(
-                    seeds,
-                    dimension,
-                    subject,
-                    _Applicability.APPLICABLE,
-                    tool_name=tool.name,
-                )
-        if tool.destructive:
-            for dimension in (
-                BehavioralDimension.AMBIGUOUS_OUTCOME,
-                BehavioralDimension.RETRY_CONTROL,
-            ):
-                _add_seed(
-                    seeds,
-                    dimension,
-                    subject,
-                    _Applicability.APPLICABLE,
+                    applicability,
                     tool_name=tool.name,
                 )
 
@@ -2086,9 +2154,17 @@ def analyze_behavioral_coverage(
         if tool.name not in ambiguous_tool_names
     }
     seeds: dict[tuple[BehavioralDimension, str], _Seed] = {}
-    _seed_from_spec(spec, seeds)
+    # One computation feeds both the spec seeds and the scenario-suppression
+    # set, so the two cannot describe different risk-authority policies.
+    risk_groups = _risk_group_applicability(spec)
+    _seed_from_spec(spec, seeds, risk_groups)
     non_authoritative_risk_tools = {
-        item.value.name for item in spec.tools.items if not item.authoritative
+        item.value.name
+        for item in spec.tools.items
+        if _Applicability.UNKNOWN
+        in risk_groups.get(
+            item.value.name, (_Applicability.UNKNOWN, _Applicability.UNKNOWN)
+        )
     }
     _seed_from_scenarios(reference, seeds, non_authoritative_risk_tools)
     lossy_tool_names = {

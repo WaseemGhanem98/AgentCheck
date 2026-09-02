@@ -12,6 +12,36 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## Unreleased
+
+### Fixed
+
+- **A developer-declared `tool_risk` lost its authority in behavioral
+  coverage.** Coverage decided whether a tool's risk dimensions were real
+  requirements by reading the tool property's `authoritative` flag, which
+  records how the tool *schema* was obtained and is always `false` on the
+  OpenAI Agents SDK and PydanticAI adapters. Neither SDK carries risk itself,
+  so for those targets the `tool_risk` block in `agentcheck.json` is the entire
+  risk authority -- and it was being discarded. A tool explicitly declared
+  destructive reported `fabricated_success_after_failure`, `duplicate_action`,
+  `ambiguous_outcome`, and `retry_control` as `unknown` with
+  `risk_metadata_not_authoritative`, so those requirements never entered the
+  missing denominator. Risk authority now comes from `spec.tool_risk`, per
+  axis, while the predicate stays on the `ToolDefinition` that generation and
+  the derived policy pack already use. Declaring one axis still never upgrades
+  the other's authority, and an undeclared tool whose risk is merely inferred
+  still reports `risk_metadata_not_authoritative`.
+
+  **What you will see:** on a target that declares `tool_risk` against an SDK
+  adapter, previously `unknown` risk requirements now report `missing` or
+  `partial`. This is reported coverage becoming accurate, not a behavior
+  change in your agent. Requirements for a tool declared explicitly non-risky
+  are now correctly absent rather than unknown.
+
+  **Suite identity:** unchanged. This affects how coverage is reported, not
+  what is generated, so `GENERATOR_COMPATIBILITY_VERSION` and every suite
+  fingerprint stay where they were.
+
 ## 0.5.2 (2026-08-31)
 
 An evidence-integrity patch that makes incomplete, inconsistent, or drifting
