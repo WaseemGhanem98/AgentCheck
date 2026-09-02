@@ -21,10 +21,10 @@ from referencing.exceptions import Unresolvable
 from agentcheck.domain import (
     AgentSpec,
     FaultType,
-    RiskAuthority,
     OracleStrength,
     OutputCriterion,
     OutputCriterionKind,
+    RiskAuthority,
     Scenario,
     SimulatedToolStatus,
     ToolBehaviorConstraint,
