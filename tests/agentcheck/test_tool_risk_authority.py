@@ -355,8 +355,13 @@ RISK_DIMENSIONS = (
     BehavioralDimension.RETRY_CONTROL,
 )
 
-# Deliberately reads as a pure lookup so nothing is inferable as risky: the
-# declaration is then the only risk signal on either target.
+# `purge` is in the destructive verb set, so this tool IS classified risky by
+# inference (INFERRED, confidence 0.6) despite the benign description. That is
+# deliberate and is exactly the interesting case: inference and declaration
+# agree on the *value*, so any behaviour difference is attributable to
+# authority alone. It also makes `test_undeclared_sdk_risk_still_reports_unknown`
+# a real control -- inference alone must not reach authority even when it
+# happens to be right.
 PURGE_DESCRIPTION = "Look up a record by id."
 
 
@@ -374,7 +379,8 @@ PURGE_RECORD = ToolDefinition(
         "required": ["record_id"],
         "additionalProperties": False,
     },
-    # Declares no risk of its own, exactly like the SDK tool above.
+    # Declares no risk of its own, so the agentcheck.json declaration is the
+    # only thing that can make it risky on this adapter.
     state_changing=False,
     destructive=False,
 )
@@ -407,7 +413,9 @@ def test_declared_risk_keeps_coverage_authority_on_the_openai_adapter() -> None:
     """An explicit `tool_risk` declaration makes the risk dimensions real
     requirements rather than `unknown`. The SDK cannot carry risk itself, so the
     declaration is the whole authority and must not be discarded merely because
-    the schema was reconstructed from a framework object."""
+    the schema was reconstructed from a framework object. Without the
+    declaration this same tool is only *inferred* risky, which stays unknown --
+    see `test_undeclared_sdk_risk_still_reports_unknown`."""
 
     spec = _spec(
         purge_record,
@@ -466,7 +474,9 @@ def test_declared_risk_coverage_matches_the_custom_adapter_exactly() -> None:
 
 def test_undeclared_sdk_risk_still_reports_unknown() -> None:
     """The fix must not launder inference into authority: with no declaration
-    the same tool keeps reporting `risk_metadata_not_authoritative`."""
+    the same tool is still classified risky by inference (INFERRED, 0.6) yet
+    keeps reporting `risk_metadata_not_authoritative`. Inference being *right*
+    about the value must not make it authoritative."""
 
     statuses = _risk_status(_spec(purge_record))
     assert set(statuses) == set(RISK_DIMENSIONS)

@@ -457,18 +457,22 @@ def _risk_group_applicability(
     ``state_changing`` leaves the destructive-gated dimensions unknown rather
     than pruning them.
 
-    Risk authority is read from ``spec.tool_risk``, not from
-    ``AgentProperty.authoritative`` on the tool item. That flag records how the
-    tool *schema* was obtained -- read first-hand from a declaration, or
-    reconstructed from a framework object -- and is unconditionally ``False`` on
-    both SDK adapters. Neither the OpenAI Agents SDK nor PydanticAI can carry
-    risk itself, so for those targets a developer declaration is the entire risk
-    authority; keying coverage off the schema flag discarded it and dropped four
-    real requirements out of the missing denominator.
+    The predicate is read from the ``ToolDefinition``, which is the single
+    source of truth every other consumer already gates on (``generate``'s fault
+    variants, the derived policy pack). Only *authority* comes from
+    ``spec.tool_risk``, which is the same split ``policies.derived`` uses -- so
+    coverage cannot disagree with generation about whether a dimension applies.
 
-    A spec carrying no assertion for a tool has no risk provenance to read, so
-    it falls back to that schema flag -- exactly what decided this before risk
-    assertions existed -- rather than degrading every such tool to UNKNOWN.
+    Authority is deliberately not read from ``AgentProperty.authoritative`` on
+    the tool item. That flag records how the tool *schema* was obtained -- read
+    first-hand from a declaration, or reconstructed from a framework object --
+    and is unconditionally ``False`` on both SDK adapters. Neither the OpenAI
+    Agents SDK nor PydanticAI can carry risk itself, so for those targets a
+    developer declaration is the entire risk authority; keying coverage off the
+    schema flag discarded it and dropped real requirements out of the missing
+    denominator. A tool with no recorded assertion has no risk provenance to
+    read and falls back to that flag, which is exactly what decided this before
+    risk assertions existed.
     """
 
     risk_by_name = {item.tool_name: item for item in spec.tool_risk.items}
@@ -477,43 +481,28 @@ def _risk_group_applicability(
         tool = tool_item.value
         assertion = risk_by_name.get(tool.name)
         if assertion is None:
-            if tool_item.authoritative:
-                action = (
-                    _Applicability.APPLICABLE
-                    if (tool.state_changing or tool.destructive)
-                    else None
-                )
-                destructive_group = (
-                    _Applicability.APPLICABLE if tool.destructive else None
-                )
-            else:
-                action = _Applicability.UNKNOWN
-                destructive_group = _Applicability.UNKNOWN
-            groups[tool.name] = (action, destructive_group)
-            continue
+            state_declared = destructive_declared = tool_item.authoritative
+        else:
+            state_declared = assertion.state_changing.authority in _AUTHORITATIVE_RISK
+            destructive_declared = assertion.destructive.authority in _AUTHORITATIVE_RISK
 
-        destructive = assertion.destructive
-        state_changing = assertion.state_changing
-        destructive_declared = destructive.authority in _AUTHORITATIVE_RISK
-        state_declared = state_changing.authority in _AUTHORITATIVE_RISK
-
-        if (destructive.value and destructive_declared) or (
-            state_changing.value and state_declared
+        if (tool.destructive and destructive_declared) or (
+            tool.state_changing and state_declared
         ):
             action = _Applicability.APPLICABLE
         elif (
             destructive_declared
             and state_declared
-            and not destructive.value
-            and not state_changing.value
+            and not tool.destructive
+            and not tool.state_changing
         ):
             action = None
         else:
             action = _Applicability.UNKNOWN
 
-        if destructive.value and destructive_declared:
+        if tool.destructive and destructive_declared:
             destructive_group = _Applicability.APPLICABLE
-        elif destructive_declared and not destructive.value:
+        elif destructive_declared and not tool.destructive:
             destructive_group = None
         else:
             destructive_group = _Applicability.UNKNOWN
@@ -523,9 +512,10 @@ def _risk_group_applicability(
 
 
 def _seed_from_spec(
-    spec: AgentSpec, seeds: dict[tuple[BehavioralDimension, str], _Seed]
+    spec: AgentSpec,
+    seeds: dict[tuple[BehavioralDimension, str], _Seed],
+    risk_groups: dict[str, tuple[_Applicability | None, _Applicability | None]],
 ) -> None:
-    risk_groups = _risk_group_applicability(spec)
     for tool_item in sorted(spec.tools.items, key=lambda value: value.value.name):
         tool = tool_item.value
         subject = _tool_subject(tool.name)
@@ -2164,13 +2154,15 @@ def analyze_behavioral_coverage(
         if tool.name not in ambiguous_tool_names
     }
     seeds: dict[tuple[BehavioralDimension, str], _Seed] = {}
-    _seed_from_spec(spec, seeds)
-    spec_risk_groups = _risk_group_applicability(spec)
+    # One computation feeds both the spec seeds and the scenario-suppression
+    # set, so the two cannot describe different risk-authority policies.
+    risk_groups = _risk_group_applicability(spec)
+    _seed_from_spec(spec, seeds, risk_groups)
     non_authoritative_risk_tools = {
         item.value.name
         for item in spec.tools.items
         if _Applicability.UNKNOWN
-        in spec_risk_groups.get(
+        in risk_groups.get(
             item.value.name, (_Applicability.UNKNOWN, _Applicability.UNKNOWN)
         )
     }
