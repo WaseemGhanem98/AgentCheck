@@ -14,13 +14,14 @@ import pytest
 from agents import Agent, function_tool
 
 from agentcheck.adapters import CustomAgentAdapter, OpenAIAgentsAdapter, UnsupportedTargetError
-from agentcheck.config import ToolRiskDeclaration
+from agentcheck.config import AgentCheckConfig, ToolRiskDeclaration
 from agentcheck.domain import RiskAuthority, ToolDefinition
 from agentcheck.coverage import (
     BehavioralCoverageStatus,
     BehavioralDimension,
     analyze_behavioral_coverage,
 )
+from agentcheck.generate import build_frozen_suite
 from agentcheck.generate.boundaries import build_outcome_variant_cases
 from agentcheck.inspect.risk_authority import resolve_tool_risk, unmatched_tool_risk_names
 from agentcheck.policies.derived import derive_tool_risk_pack
@@ -513,3 +514,59 @@ def test_declaring_one_axis_does_not_upgrade_the_other_in_coverage() -> None:
     assert (
         reasons[BehavioralDimension.RETRY_CONTROL] == "risk_metadata_not_authoritative"
     )
+
+
+def test_scenario_risk_suppression_follows_declared_authority() -> None:
+    """The other half of the fix: the set that suppresses scenario-derived risk
+    evidence must also follow declared authority, not the schema flag.
+
+    `_seed_from_scenarios` refuses to let generator `source:behavioral_outcome`
+    variants launder UNKNOWN into applicability for a tool whose risk is merely
+    inferred. Keying that set off `AgentProperty.authoritative` suppressed it
+    for *every* SDK tool, declaration or not.
+
+    Reverting only that set leaves the whole suite green, because a declared
+    risky tool's spec seed is already APPLICABLE and `_add_seed` merges by max
+    rank -- the suppression is invisible. The discriminator is a tool declared
+    explicitly NOT risky: its spec seed carries no requirement at all, so the
+    scenario seed is the only one, and whether it is APPLICABLE or UNKNOWN is
+    observable.
+    """
+
+    agent = Agent(
+        name="T", instructions="Assist.", tools=[purge_record], model="gpt-4.1-mini"
+    )
+    # Generated with no declaration, so `purge_record` is inferred risky and the
+    # suite really does contain `source:behavioral_outcome` variants for it.
+    inferred_spec = OpenAIAgentsAdapter().inspect(agent)
+    suite = build_frozen_suite(inferred_spec, AgentCheckConfig(), seed=SEED)
+    assert any(
+        "source:behavioral_outcome" in scenario.dimension_tags
+        and "tool:purge_record" in scenario.dimension_tags
+        for scenario in suite.scenarios
+    ), "fixture no longer generates the behavioural-outcome variants it relies on"
+
+    # Now analysed against a spec whose developer declares the tool NOT risky.
+    declared_safe = OpenAIAgentsAdapter().inspect(
+        agent,
+        declared_tool_risk={
+            "purge_record": ToolRiskDeclaration(
+                state_changing=False, destructive=False
+            )
+        },
+    )
+    coverage = analyze_behavioral_coverage(declared_safe, suite.scenarios)
+    reported = {
+        family.dimension: (requirement.status, requirement.reason_code)
+        for family in coverage.families
+        for requirement in family.requirements
+        if requirement.subject == "tool:purge_record"
+        and family.dimension in RISK_DIMENSIONS
+    }
+    assert set(reported) == set(RISK_DIMENSIONS)
+    for dimension, (status, reason) in reported.items():
+        assert reason != "risk_metadata_not_authoritative", (
+            f"{dimension.value} was suppressed as non-authoritative even though "
+            "the developer declared this tool's risk explicitly"
+        )
+        assert status is not BehavioralCoverageStatus.UNKNOWN
