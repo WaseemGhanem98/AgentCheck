@@ -12,6 +12,60 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## Unreleased
+
+### Fixed
+
+- **The release gate could return `PASS` for a target whose declared-destructive
+  tool was never tested.** `agentcheck gate` decided only from executed-case
+  verdicts and the baseline comparison, and never consulted behavioral
+  coverage. A tool you explicitly declared state-changing or destructive could
+  therefore have zero generated cases, contribute no verdict, and leave the
+  gate green — with nothing in its output saying so.
+
+  The gate already held the principle this broke: *missing evidence can never
+  be upgraded to `PASS`*. It applied that only to a case that ran and could not
+  decide, never to a requirement that received no case at all. Both are the
+  same state, and both now block.
+
+  A declaration — `tool_risk` in `agentcheck.json`, or a custom agent's own
+  `ToolDefinition` — is authoritative, and makes four behaviours required for
+  that tool: `fabricated_success_after_failure`, `duplicate_action`,
+  `ambiguous_outcome`, and `retry_control`. If the suite produces no evidence
+  for one, the gate blocks with exit `3` and names the tool, the requirement,
+  and what to do next. `--json` reports the same under
+  `unmet_risk_obligations`.
+
+  **What you will see:** a target that declares a tool's risk but never
+  exercises it moves from exit `0` to exit `3`. That is a false green being
+  corrected. To resolve it, add cases exercising the listed behaviours, or fix
+  the `tool_risk` declaration if the tool is not actually state-changing or
+  destructive.
+
+  **A known limit.** Generation caps cases per origin, so a target declaring
+  risk on more than roughly ten tools can find that AgentCheck's own generator
+  stops emitting the cases this floor requires, and regenerating will not clear
+  it. Do not delete a true declaration to go green; see `docs/ci-gate.md`.
+
+  **Scope is narrow, by design.** Whether an obligation exists is read from the
+  declaration, not from what coverage reports, so risk AgentCheck merely
+  *inferred* from a tool's name can never block — inference is not authority.
+  Whether an obligation is met is evaluated from the declared risk and the
+  scenarios directly rather than read back out of the coverage report, so a
+  tool the report cannot show — one with a very large schema, or a name that
+  redacts — is still accounted for. `partial` evidence does not block; it is the
+  ordinary state of a healthy suite. `success_path`, `failure_handling`, and
+  `timeout_handling` apply to every tool regardless of risk and are not part of
+  this floor, so an uncovered tool is not by itself a gate failure. A target
+  that declares no risk is unaffected, and the shipped `custom_agent` example
+  still passes unchanged. `FAIL`, `INCONCLUSIVE`, and `INFRA_ERROR` remain
+  distinct: an infrastructure error still outranks everything, and a real
+  behavioural failure keeps its own exit `1`.
+
+  **Suite identity:** unchanged. This changes a release decision, not
+  generation, so `GENERATOR_COMPATIBILITY_VERSION` and every suite fingerprint
+  stay where they are.
+
 ## 0.5.3 (2026-09-02)
 
 An evidence-integrity patch. Two independently reproduced defects could make a

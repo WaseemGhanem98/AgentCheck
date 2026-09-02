@@ -570,3 +570,67 @@ def test_scenario_risk_suppression_follows_declared_authority() -> None:
             "the developer declared this tool's risk explicitly"
         )
         assert status is not BehavioralCoverageStatus.UNKNOWN
+
+
+def test_missing_risk_evidence_implies_authoritative_risk() -> None:
+    """Spec-derived risk applicability does not leak inference into MISSING.
+
+    Note what this does *not* say. An earlier version of the release gate read
+    a `MISSING` risk requirement as proof of a declaration, on the theory that
+    only an `APPLICABLE` seed reaches `MISSING` and only declared risk makes a
+    risk dimension `APPLICABLE`. The second half is false --
+    `_seed_from_scenarios` raises risk dimensions straight from scenario
+    constraints -- so the gate now derives obligations from `spec.tool_risk`
+    instead, and this property is no longer load-bearing for it.
+
+    It is still worth pinning: it is the spec-derived half of the applicability
+    rule, and its failure would mean inference had become authoritative
+    somewhere in the analyzer.
+    """
+
+    agent = Agent(
+        name="T", instructions="Assist.", tools=[purge_record], model="gpt-4.1-mini"
+    )
+    # No declaration: `purge` makes this INFERRED-risky, never authoritative.
+    inferred = OpenAIAgentsAdapter().inspect(agent)
+    assertion = next(a for a in inferred.tool_risk.items if a.tool_name == "purge_record")
+    assert assertion.destructive.authority is RiskAuthority.INFERRED
+
+    suite = build_frozen_suite(inferred, AgentCheckConfig(), seed=SEED)
+    # Both the empty suite and a real generated one, so the property is not an
+    # artefact of having no scenarios at all.
+    for scenarios in ((), suite.scenarios):
+        coverage = analyze_behavioral_coverage(inferred, scenarios)
+        for family in coverage.families:
+            if family.dimension not in RISK_DIMENSIONS:
+                continue
+            for requirement in family.requirements:
+                assert requirement.status is not BehavioralCoverageStatus.MISSING, (
+                    f"{family.dimension.value} reported MISSING for "
+                    f"{requirement.subject} on merely inferred risk; the gate "
+                    "would treat that as a declared obligation"
+                )
+
+
+def test_declared_risk_does_produce_missing_evidence_obligations() -> None:
+    """The other half: with a declaration, the same untested tool does reach
+    MISSING. Without this the invariant test above would pass vacuously."""
+
+    agent = Agent(
+        name="T", instructions="Assist.", tools=[purge_record], model="gpt-4.1-mini"
+    )
+    declared = OpenAIAgentsAdapter().inspect(
+        agent,
+        declared_tool_risk={
+            "purge_record": ToolRiskDeclaration(state_changing=True, destructive=True)
+        },
+    )
+    coverage = analyze_behavioral_coverage(declared, ())
+    missing = {
+        family.dimension
+        for family in coverage.families
+        if family.dimension in RISK_DIMENSIONS
+        for requirement in family.requirements
+        if requirement.status is BehavioralCoverageStatus.MISSING
+    }
+    assert missing == set(RISK_DIMENSIONS)

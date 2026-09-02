@@ -23,6 +23,7 @@ from agentcheck.application import SuiteExecution, execute_suite
 from agentcheck.baseline.contract import DEFAULT_BASELINE_FILENAME
 from agentcheck.baseline.service import check_baseline
 from agentcheck.config import contained_path
+from agentcheck.coverage import UnmetRiskObligation, unmet_risk_obligations
 from agentcheck.domain import Verdict
 
 
@@ -31,6 +32,60 @@ EXIT_PASS = 0
 EXIT_BEHAVIORAL_FAILURE = 1
 EXIT_NOT_CERTIFIABLE = 2
 EXIT_INCONCLUSIVE = 3
+
+
+# Keep one blocked gate readable in a terminal; the report holds the full set.
+MAX_REPORTED_OBLIGATIONS = 10
+
+
+def _obligation_detail(
+    obligations: tuple[UnmetRiskObligation, ...],
+) -> tuple[str, ...]:
+    """Say which tool, which requirement, why it blocks, and what to do next.
+
+    Changing the exit code alone would tell a developer their build stopped
+    without telling them what evidence is missing or how to supply it, so the
+    detail lines carry all four.
+    """
+
+    tools = sorted({item.tool_name for item in obligations})
+    lines = [
+        f"{len(obligations)} required behavioural evidence obligation(s) are "
+        f"unmet across {len(tools)} tool(s)",
+    ]
+    for item in obligations[:MAX_REPORTED_OBLIGATIONS]:
+        lines.append(
+            f"  {item.tool_name}: no {item.dimension.value} evidence "
+            f"({item.reason_code})"
+        )
+    remaining = len(obligations) - MAX_REPORTED_OBLIGATIONS
+    if remaining > 0:
+        lines.append(
+            f"  ... and {remaining} more; `agentcheck gate --json` lists every "
+            "one under unmet_risk_obligations"
+        )
+    lines.append(
+        "these are required because the tool's risk is declared, not inferred; "
+        "a declaration is authoritative and cannot be satisfied by absence"
+    )
+    lines.append(
+        "if this run was bounded by max_cases, the missing cases may simply "
+        "not have been selected -- raise or remove it and re-run before "
+        "changing anything else"
+    )
+    lines.append(
+        "otherwise add cases that exercise the listed behaviours for those "
+        "tools. If a listed tool is not actually state-changing or "
+        "destructive, correct its risk declaration instead -- the tool_risk "
+        "block in agentcheck.json, or the tool's own ToolDefinition on a "
+        "custom agent"
+    )
+    lines.append(
+        "do not remove a declaration that is true: on a target with many "
+        "declared risky tools, generation's own per-origin caps can stop it "
+        "emitting these cases. See docs/ci-gate.md"
+    )
+    return tuple(lines)
 
 
 class GateDecision(str):
@@ -53,6 +108,7 @@ class GateResult:
     baseline_path: str | None
     baseline_compared: bool
     report_path: str
+    unmet_risk_obligations: tuple[UnmetRiskObligation, ...] = ()
 
     def to_json(self) -> str:
         return json.dumps(
@@ -68,6 +124,14 @@ class GateResult:
                 "baseline": self.baseline_path,
                 "baseline_compared": self.baseline_compared,
                 "report": self.report_path,
+                "unmet_risk_obligations": [
+                    {
+                        "tool": item.tool_name,
+                        "dimension": item.dimension.value,
+                        "reason_code": item.reason_code,
+                    }
+                    for item in self.unmet_risk_obligations
+                ],
             },
             indent=2,
             sort_keys=True,
@@ -84,6 +148,17 @@ class GateResult:
         lines.append(f"  run        {self.run_id}")
         if self.suite_fingerprint:
             lines.append(f"  suite      {self.suite_fingerprint}")
+        if self.unmet_risk_obligations:
+            # render() owns the whole obligation block. Several branches carry
+            # obligations without putting them in `detail` -- an infra error or
+            # a real regression outranks the floor but the obligations are
+            # still true -- and a bare count with no rows tells a developer
+            # nothing, which is exactly what `_obligation_detail` exists to
+            # prevent.
+            lines.append("")
+            lines.extend(
+                f"  {line}" for line in _obligation_detail(self.unmet_risk_obligations)
+            )
         lines.append(
             "  baseline   "
             + (
@@ -177,6 +252,10 @@ def run_gate(
         execution.frozen_suite.fingerprint if execution.frozen_suite else None
     )
     report = str(execution.report_path)
+    # Evaluated once here, consulted only on the paths that would otherwise
+    # return PASS. Certifiability and a real behavioural failure keep their own
+    # more specific answers; this floor never overrides them.
+    obligations = unmet_risk_obligations(execution.spec, execution.scenarios)
 
     # Certifiability first. An infrastructure error means the suite did not get
     # to say anything, so it is neither a pass nor a regression, and answering
@@ -199,6 +278,7 @@ def run_gate(
             baseline_path=None,
             baseline_compared=False,
             report_path=report,
+            unmet_risk_obligations=obligations,
         )
 
     baseline_file = _baseline_file(root, baseline)
@@ -223,6 +303,7 @@ def run_gate(
                 baseline_path=None,
                 baseline_compared=False,
                 report_path=report,
+                unmet_risk_obligations=obligations,
             )
         if counts.get("inconclusive"):
             return GateResult(
@@ -239,6 +320,24 @@ def run_gate(
                 baseline_path=None,
                 baseline_compared=False,
                 report_path=report,
+                unmet_risk_obligations=obligations,
+            )
+        if obligations:
+            return GateResult(
+                decision=GateDecision.BLOCK,
+                exit_code=EXIT_INCONCLUSIVE,
+                reason=(
+                    "required behavioural evidence is missing, which is not a pass"
+                ),
+                detail=tuple(detail),
+                summary_block="",
+                counts=counts,
+                run_id=execution.run_id,
+                suite_fingerprint=suite_fingerprint,
+                baseline_path=None,
+                baseline_compared=False,
+                report_path=report,
+                unmet_risk_obligations=obligations,
             )
         return GateResult(
             decision=GateDecision.PASS,
@@ -252,6 +351,7 @@ def run_gate(
             baseline_path=None,
             baseline_compared=False,
             report_path=report,
+            unmet_risk_obligations=obligations,
         )
 
     relative = str(baseline_file.relative_to(root))
@@ -279,6 +379,25 @@ def run_gate(
             baseline_path=relative,
             baseline_compared=True,
             report_path=report,
+            unmet_risk_obligations=obligations,
+        )
+    if checked.exit_code == EXIT_PASS and obligations:
+        # A baseline can accept known failures; it cannot supply evidence the
+        # suite never gathered. Same principle the INCONCLUSIVE branch above
+        # already applies, extended to a requirement that received no case.
+        return GateResult(
+            decision=GateDecision.BLOCK,
+            exit_code=EXIT_INCONCLUSIVE,
+            reason="required behavioural evidence is missing, which is not a pass",
+            detail=(),
+            summary_block=checked.summary,
+            counts=counts,
+            run_id=execution.run_id,
+            suite_fingerprint=suite_fingerprint,
+            baseline_path=relative,
+            baseline_compared=True,
+            report_path=report,
+            unmet_risk_obligations=obligations,
         )
     if checked.exit_code == EXIT_PASS:
         return GateResult(
@@ -295,6 +414,7 @@ def run_gate(
             baseline_path=relative,
             baseline_compared=True,
             report_path=report,
+            unmet_risk_obligations=obligations,
         )
 
     reason = {
@@ -314,11 +434,13 @@ def run_gate(
         baseline_path=relative,
         baseline_compared=True,
         report_path=report,
+        unmet_risk_obligations=obligations,
     )
 
 
 __all__ = [
     "EXIT_BEHAVIORAL_FAILURE",
+    "UnmetRiskObligation",
     "EXIT_INCONCLUSIVE",
     "EXIT_NOT_CERTIFIABLE",
     "EXIT_PASS",
