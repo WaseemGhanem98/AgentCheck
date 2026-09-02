@@ -16,6 +16,11 @@ from agents import Agent, function_tool
 from agentcheck.adapters import CustomAgentAdapter, OpenAIAgentsAdapter, UnsupportedTargetError
 from agentcheck.config import ToolRiskDeclaration
 from agentcheck.domain import RiskAuthority, ToolDefinition
+from agentcheck.coverage import (
+    BehavioralCoverageStatus,
+    BehavioralDimension,
+    analyze_behavioral_coverage,
+)
 from agentcheck.generate.boundaries import build_outcome_variant_cases
 from agentcheck.inspect.risk_authority import resolve_tool_risk, unmatched_tool_risk_names
 from agentcheck.policies.derived import derive_tool_risk_pack
@@ -331,3 +336,170 @@ def test_a_misspelled_tool_risk_name_refuses_prepare_for_a_custom_agent() -> Non
             declared_tool_risk={"cancle_order": ToolRiskDeclaration(destructive=False)},
         )
     assert "unknown_tool_risk_declaration" in {issue.code for issue in excinfo.value.issues}
+
+
+# --- coverage: a declaration must keep its authority on an SDK adapter ------
+#
+# The documented contract (README, docs/fault-testing.md) is that a developer
+# declaration is *always* authoritative, and that `risk_metadata_not_authoritative`
+# means "a lexical classification rather than a declared one". Behavioral
+# coverage used to key that decision off the tool *property's* `authoritative`
+# flag, which records how the tool schema was obtained and is unconditionally
+# False on both SDK adapters -- so an explicit declaration silently lost its
+# authority and four real requirements dropped out of the missing denominator.
+
+RISK_DIMENSIONS = (
+    BehavioralDimension.FABRICATED_SUCCESS_AFTER_FAILURE,
+    BehavioralDimension.DUPLICATE_ACTION,
+    BehavioralDimension.AMBIGUOUS_OUTCOME,
+    BehavioralDimension.RETRY_CONTROL,
+)
+
+# Deliberately reads as a pure lookup so nothing is inferable as risky: the
+# declaration is then the only risk signal on either target.
+PURGE_DESCRIPTION = "Look up a record by id."
+
+
+@function_tool(name_override="purge_record", description_override=PURGE_DESCRIPTION)
+def purge_record(record_id: str) -> str:
+    raise AssertionError("original handler must never run")
+
+
+PURGE_RECORD = ToolDefinition(
+    name="purge_record",
+    description=PURGE_DESCRIPTION,
+    input_schema={
+        "type": "object",
+        "properties": {"record_id": {"type": "string"}},
+        "required": ["record_id"],
+        "additionalProperties": False,
+    },
+    # Declares no risk of its own, exactly like the SDK tool above.
+    state_changing=False,
+    destructive=False,
+)
+
+
+class _PurgeCustomAgent:
+    name = "T"
+    instructions = "Assist."
+    tools = (PURGE_RECORD,)
+
+    def start(self, message, tools):  # pragma: no cover - never reached
+        raise AssertionError("no turn runs in this test")
+
+    def resume(self, state, message, tools):  # pragma: no cover - never reached
+        raise AssertionError("no turn runs in this test")
+
+
+def _risk_status(spec):
+    coverage = analyze_behavioral_coverage(spec, [])
+    return {
+        family.dimension: (requirement.status, requirement.reason_code)
+        for family in coverage.families
+        for requirement in family.requirements
+        if requirement.subject == "tool:purge_record"
+        and family.dimension in RISK_DIMENSIONS
+    }
+
+
+def test_declared_risk_keeps_coverage_authority_on_the_openai_adapter() -> None:
+    """An explicit `tool_risk` declaration makes the risk dimensions real
+    requirements rather than `unknown`. The SDK cannot carry risk itself, so the
+    declaration is the whole authority and must not be discarded merely because
+    the schema was reconstructed from a framework object."""
+
+    spec = _spec(
+        purge_record,
+        tool_risk={
+            "purge_record": ToolRiskDeclaration(state_changing=True, destructive=True)
+        },
+    )
+    assertion = next(a for a in spec.tool_risk.items if a.tool_name == "purge_record")
+    assert assertion.destructive.authority is RiskAuthority.DEVELOPER_DECLARED
+    assert assertion.state_changing.authority is RiskAuthority.DEVELOPER_DECLARED
+
+    statuses = _risk_status(spec)
+    assert set(statuses) == set(RISK_DIMENSIONS)
+    for dimension, (status, reason) in statuses.items():
+        assert status is not BehavioralCoverageStatus.UNKNOWN, (
+            f"{dimension.value} reported {reason!r} despite an explicit "
+            "developer risk declaration"
+        )
+        assert reason != "risk_metadata_not_authoritative"
+
+
+def test_declared_risk_coverage_matches_the_custom_adapter_exactly() -> None:
+    """Identical declaration, identical tool contract, different adapter: the
+    reported risk requirements must match. Pinning the custom adapter as the
+    control makes this a real cross-adapter equivalence rather than a
+    restatement of whatever the OpenAI adapter happens to do."""
+
+    declaration = {
+        "purge_record": ToolRiskDeclaration(state_changing=True, destructive=True)
+    }
+    openai_statuses = _risk_status(_spec(purge_record, tool_risk=declaration))
+    custom_statuses = _risk_status(
+        CustomAgentAdapter().inspect(_PurgeCustomAgent(), declared_tool_risk=declaration)
+    )
+
+    assert custom_statuses == {
+        BehavioralDimension.FABRICATED_SUCCESS_AFTER_FAILURE: (
+            BehavioralCoverageStatus.MISSING,
+            "fabricated_success_case_missing",
+        ),
+        BehavioralDimension.DUPLICATE_ACTION: (
+            BehavioralCoverageStatus.MISSING,
+            "duplicate_action_case_missing",
+        ),
+        BehavioralDimension.AMBIGUOUS_OUTCOME: (
+            BehavioralCoverageStatus.MISSING,
+            "ambiguous_outcome_case_missing",
+        ),
+        BehavioralDimension.RETRY_CONTROL: (
+            BehavioralCoverageStatus.MISSING,
+            "retry_control_case_missing",
+        ),
+    }
+    assert openai_statuses == custom_statuses
+
+
+def test_undeclared_sdk_risk_still_reports_unknown() -> None:
+    """The fix must not launder inference into authority: with no declaration
+    the same tool keeps reporting `risk_metadata_not_authoritative`."""
+
+    statuses = _risk_status(_spec(purge_record))
+    assert set(statuses) == set(RISK_DIMENSIONS)
+    for status, reason in statuses.values():
+        assert status is BehavioralCoverageStatus.UNKNOWN
+        assert reason == "risk_metadata_not_authoritative"
+
+
+def test_declaring_one_axis_does_not_upgrade_the_other_in_coverage() -> None:
+    """`bash` is deliberately unclassifiable, so declaring only `state_changing`
+    leaves `destructive` un-inferable: the action-gated dimensions become real
+    requirements while the destructive-gated ones stay unknown."""
+
+    spec = _spec(bash, tool_risk={"bash": ToolRiskDeclaration(state_changing=True)})
+    coverage = analyze_behavioral_coverage(spec, [])
+    reasons = {
+        family.dimension: requirement.reason_code
+        for family in coverage.families
+        for requirement in family.requirements
+        if requirement.subject == "tool:bash" and family.dimension in RISK_DIMENSIONS
+    }
+    assert (
+        reasons[BehavioralDimension.FABRICATED_SUCCESS_AFTER_FAILURE]
+        != "risk_metadata_not_authoritative"
+    )
+    assert (
+        reasons[BehavioralDimension.DUPLICATE_ACTION]
+        != "risk_metadata_not_authoritative"
+    )
+    assert (
+        reasons[BehavioralDimension.AMBIGUOUS_OUTCOME]
+        == "risk_metadata_not_authoritative"
+    )
+    assert (
+        reasons[BehavioralDimension.RETRY_CONTROL] == "risk_metadata_not_authoritative"
+    )
