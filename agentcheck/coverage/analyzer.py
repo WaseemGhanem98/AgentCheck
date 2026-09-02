@@ -516,29 +516,50 @@ def risk_obligations_for_spec(
 ) -> dict[str, frozenset[BehavioralDimension]]:
     """Which risk dimensions each tool's *declared* risk makes mandatory.
 
-    Authority is read from the spec, never from a coverage status. A coverage
-    status cannot stand in for authority: ``_seed_from_scenarios`` can raise a
-    risk dimension to APPLICABLE from scenario constraints alone, so a tool
-    whose risk is merely inferred can still reach MISSING. Anything consuming
-    "this requirement was required" -- the release gate's evidence floor above
-    all -- must ask the spec, which is the only place the declaration lives.
+    Authority is read from ``spec.tool_risk``, never from a coverage status: a
+    status cannot stand in for authority, because ``_seed_from_scenarios`` can
+    raise a risk dimension to APPLICABLE from scenario constraints alone, so a
+    tool whose risk is merely inferred can still reach MISSING.
 
-    Returns only tools with at least one obligation, so an empty mapping means
-    the target declares no authoritative risk at all.
+    A tool with **no recorded assertion** yields no obligation. That is a
+    deliberate difference from ``_risk_group_applicability``, which falls back
+    to the tool property's ``authoritative`` flag so that specs predating
+    ``tool_risk`` keep their previous coverage behaviour. That flag describes
+    how the tool *schema* was obtained and is unconditionally true on the custom
+    adapter, so honouring it here would let a spec with no declaration at all
+    create an obligation and send a developer to correct a declaration that
+    does not exist. Obligations are strictly the declared subset.
+
+    The predicate comes from the ``ToolDefinition`` -- the same source
+    ``_seed_from_spec``, ``generate`` and the derived policy pack gate on -- and
+    only the *authority* from the assertion, so an obligation can never demand a
+    requirement row that ``_seed_from_spec`` would not have seeded.
+
+    Returns only tools carrying at least one obligation, so an empty mapping
+    means the target declares no authoritative risk.
     """
 
-    groups = _risk_group_applicability(spec)
+    risk_by_name = {item.tool_name: item for item in spec.tool_risk.items}
     obligations: dict[str, frozenset[BehavioralDimension]] = {}
-    for name, (action, destructive) in groups.items():
+    for tool_item in spec.tools.items:
+        tool = tool_item.value
+        assertion = risk_by_name.get(tool.name)
+        if assertion is None:
+            continue
+        state_declared = assertion.state_changing.authority in _AUTHORITATIVE_RISK
+        destructive_declared = assertion.destructive.authority in _AUTHORITATIVE_RISK
+
         dimensions: set[BehavioralDimension] = set()
-        if action is _Applicability.APPLICABLE:
+        if (tool.destructive and destructive_declared) or (
+            tool.state_changing and state_declared
+        ):
             dimensions.update(
                 (
                     BehavioralDimension.FABRICATED_SUCCESS_AFTER_FAILURE,
                     BehavioralDimension.DUPLICATE_ACTION,
                 )
             )
-        if destructive is _Applicability.APPLICABLE:
+        if tool.destructive and destructive_declared:
             dimensions.update(
                 (
                     BehavioralDimension.AMBIGUOUS_OUTCOME,
@@ -546,7 +567,7 @@ def risk_obligations_for_spec(
                 )
             )
         if dimensions:
-            obligations[name] = frozenset(dimensions)
+            obligations[tool.name] = frozenset(dimensions)
     return obligations
 
 

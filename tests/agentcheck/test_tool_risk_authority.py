@@ -573,16 +573,19 @@ def test_scenario_risk_suppression_follows_declared_authority() -> None:
 
 
 def test_missing_risk_evidence_implies_authoritative_risk() -> None:
-    """The invariant the release gate's evidence floor rests on.
+    """Spec-derived risk applicability does not leak inference into MISSING.
 
-    `agentcheck.gate` treats a `MISSING` risk-dimension requirement as an
-    obligation created by a declaration, without re-deriving authority. That is
-    only sound because a risk dimension reaches `MISSING` exclusively from an
-    `APPLICABLE` seed, and a risk dimension is `APPLICABLE` only when the axis
-    gating it carries authoritative risk. Merely inferred risk yields `UNKNOWN`.
+    Note what this does *not* say. An earlier version of the release gate read
+    a `MISSING` risk requirement as proof of a declaration, on the theory that
+    only an `APPLICABLE` seed reaches `MISSING` and only declared risk makes a
+    risk dimension `APPLICABLE`. The second half is false --
+    `_seed_from_scenarios` raises risk dimensions straight from scenario
+    constraints -- so the gate now derives obligations from `spec.tool_risk`
+    instead, and this property is no longer load-bearing for it.
 
-    If this ever stops holding, the gate would start blocking on inference --
-    so it is pinned here rather than left as an implicit property.
+    It is still worth pinning: it is the spec-derived half of the applicability
+    rule, and its failure would mean inference had become authoritative
+    somewhere in the analyzer.
     """
 
     agent = Agent(

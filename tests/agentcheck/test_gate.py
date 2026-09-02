@@ -28,7 +28,7 @@ from agentcheck.coverage import (
     BehavioralCoverageStatus,
     BehavioralDimension,
 )
-from agentcheck.domain import Verdict
+from agentcheck.domain import RiskAuthority, Verdict
 from agentcheck.gate import (
     EXIT_BEHAVIORAL_FAILURE,
     EXIT_INCONCLUSIVE,
@@ -38,6 +38,14 @@ from agentcheck.gate import (
     find_unmet_risk_obligations,
     gate_error_result,
     run_gate,
+)
+
+
+_ALL_RISK_DIMENSIONS = (
+    BehavioralDimension.FABRICATED_SUCCESS_AFTER_FAILURE,
+    BehavioralDimension.DUPLICATE_ACTION,
+    BehavioralDimension.AMBIGUOUS_OUTCOME,
+    BehavioralDimension.RETRY_CONTROL,
 )
 
 
@@ -77,6 +85,45 @@ def _spec(*declared: str) -> Any:
     )
 
 
+def _spec_with_risk(**declarations: Any) -> Any:
+    """A spec whose named tools carry exactly the given declaration, or none.
+
+    `None` means the tool is present but undeclared, so its risk can only be
+    inferred -- the case that proves authority is actually being checked rather
+    than every tool being handed an obligation.
+    """
+
+    from agents import Agent, function_tool
+
+    from agentcheck.adapters import OpenAIAgentsAdapter
+
+    tools = []
+    for name in declarations:
+
+        def _make(tool_name: str) -> Any:
+            @function_tool(
+                name_override=tool_name,
+                # "purge" is in the destructive verb set, so an undeclared tool
+                # here is still *inferred* risky -- which is the point.
+                description_override="Look up a record by id.",
+            )
+            def _tool(record_id: str) -> str:
+                raise AssertionError("never runs")
+
+            return _tool
+
+        tools.append(_make(name))
+
+    return OpenAIAgentsAdapter().inspect(
+        Agent(name="T", instructions="Assist.", tools=tools, model="gpt-4.1-mini"),
+        declared_tool_risk={
+            name: declaration
+            for name, declaration in declarations.items()
+            if declaration is not None
+        },
+    )
+
+
 def _coverage(
     *requirements: tuple[BehavioralDimension, str, BehavioralCoverageStatus, str],
 ) -> BehavioralCoverage:
@@ -89,6 +136,23 @@ def _coverage(
                 subject=subject, status=status, reason_code=reason
             )
         )
+
+    # A real report emits a family for every dimension that has a seed, and an
+    # obligation always implies a seed. Fill the risk families the test did not
+    # speak about with COVERED rows for the same subjects, so a fixture that
+    # only cares about one dimension does not accidentally look like a report
+    # with whole families missing.
+    subjects = {subject for _, subject, _, _ in requirements}
+    for dimension in _ALL_RISK_DIMENSIONS:
+        present = {item.subject for item in by_dimension.get(dimension, ())}
+        for subject in sorted(subjects - present):
+            by_dimension.setdefault(dimension, []).append(
+                BehavioralCoverageRequirement(
+                    subject=subject,
+                    status=BehavioralCoverageStatus.COVERED,
+                    reason_code="covered",
+                )
+            )
     return BehavioralCoverage(
         spec_id="spec",
         spec_digest="sha256:spec",
@@ -843,24 +907,55 @@ def test_inferred_risk_never_creates_an_obligation_even_when_coverage_says_missi
     assert find_unmet_risk_obligations(_spec(), missing_but_inferred) == ()
 
 
-def test_an_obligation_missing_from_the_bounded_detail_is_not_assumed_met(
+def _truncated_family(
+    dimension: BehavioralDimension, *, missing: int, visible: tuple[str, ...]
+) -> BehavioralCoverageFamily:
+    """A family whose detail rows are all COVERED while its counts say some
+    requirement is MISSING -- exactly what `_family()` emits once the number of
+    subjects exceeds MAX_COVERAGE_DETAILS."""
+
+    rows = tuple(
+        BehavioralCoverageRequirement(
+            subject=subject,
+            status=BehavioralCoverageStatus.COVERED,
+            reason_code="covered",
+        )
+        for subject in visible
+    )
+    return BehavioralCoverageFamily(
+        dimension=dimension,
+        covered=len(visible),
+        missing=missing,
+        requirements=rows,
+        omitted=missing,
+    )
+
+
+def _families(*families: BehavioralCoverageFamily) -> BehavioralCoverage:
+    return BehavioralCoverage(
+        spec_id="spec",
+        spec_digest="sha256:spec",
+        scenario_count=1,
+        scenario_digest="sha256:scenarios",
+        reference_scenario_count=1,
+        reference_scenario_digest="sha256:scenarios",
+        families=families,
+    )
+
+
+def test_an_unreadable_obligation_is_not_assumed_met_when_something_is_missing(
     monkeypatch: pytest.MonkeyPatch, target: Path
 ) -> None:
-    """`family.requirements` is a bounded view: capped at MAX_COVERAGE_DETAILS
-    and stripped of subjects that collide after redaction, while the counts
-    beside it are complete. A declared tool whose status is not in that view has
-    an unknown status, not a satisfied one -- assuming otherwise reproduces the
-    false green this floor exists to close.
-    """
+    """`family.requirements` is a display view, capped and stripped of
+    colliding subjects, while its counters are complete. When the counters say
+    a requirement is MISSING and no visible row accounts for it, a declared
+    tool whose row is absent cannot be assumed satisfied."""
 
-    # The declared tool is absent from the detail rows entirely.
-    detail_without_our_tool = _coverage(
-        (
-            BehavioralDimension.RETRY_CONTROL,
-            "tool:someone_else",
-            BehavioralCoverageStatus.COVERED,
-            "covered",
-        ),
+    coverage = _families(
+        *(
+            _truncated_family(dimension, missing=1, visible=("tool:someone_else",))
+            for dimension in _ALL_RISK_DIMENSIONS
+        )
     )
     _baseline(target)
     _patch(
@@ -868,7 +963,7 @@ def test_an_obligation_missing_from_the_bounded_detail_is_not_assumed_met(
         counts={Verdict.PASS: 12},
         root=target,
         checked=_FakeChecked(EXIT_PASS),
-        coverage=detail_without_our_tool,
+        coverage=coverage,
         spec=_spec("purge_records"),
     )
 
@@ -880,7 +975,76 @@ def test_an_obligation_missing_from_the_bounded_detail_is_not_assumed_met(
         item.reason_code == gate_module.TRUNCATED_DETAIL_REASON
         for item in result.unmet_risk_obligations
     )
-    assert "could not be read" in result.render()
+
+
+def test_a_truncated_but_complete_report_does_not_block(
+    monkeypatch: pytest.MonkeyPatch, target: Path
+) -> None:
+    """The inverse, and the reason the rule above is guarded by the counters.
+
+    A target with more declared tools than the detail cap has rows it cannot
+    show. When every counter says `missing == 0`, the counts themselves prove
+    nothing is missing, so blocking would be provably false -- and unfixable,
+    because no amount of added evidence can shrink the family below the cap.
+    """
+
+    coverage = _families(
+        *(
+            _truncated_family(dimension, missing=0, visible=("tool:someone_else",))
+            for dimension in _ALL_RISK_DIMENSIONS
+        )
+    )
+    _baseline(target)
+    _patch(
+        monkeypatch,
+        counts={Verdict.PASS: 12},
+        root=target,
+        checked=_FakeChecked(EXIT_PASS),
+        coverage=coverage,
+        spec=_spec("purge_records"),
+    )
+
+    result = run_gate(target)
+
+    assert result.decision == GateDecision.PASS
+    assert result.unmet_risk_obligations == ()
+
+
+def test_an_unbindable_declared_tool_is_not_a_pass(
+    monkeypatch: pytest.MonkeyPatch, target: Path
+) -> None:
+    """A declared-risky tool whose coverage binding is lossy -- a schema too
+    large or deep to project stably -- has every seed forced to UNKNOWN. The
+    declaration is still authoritative, so an unreadable status is unknown, not
+    satisfied. Passing here would leave the original false green intact for any
+    tool with a big schema."""
+
+    unbindable = _coverage(
+        *(
+            (
+                dimension,
+                "tool:purge_records",
+                BehavioralCoverageStatus.UNKNOWN,
+                "coverage_binding_redacted_or_truncated",
+            )
+            for dimension in _ALL_RISK_DIMENSIONS
+        )
+    )
+    _baseline(target)
+    _patch(
+        monkeypatch,
+        counts={Verdict.PASS: 12},
+        root=target,
+        checked=_FakeChecked(EXIT_PASS),
+        coverage=unbindable,
+        spec=_spec("purge_records"),
+    )
+
+    result = run_gate(target)
+
+    assert result.decision == GateDecision.BLOCK
+    assert result.exit_code == EXIT_INCONCLUSIVE
+    assert len(result.unmet_risk_obligations) == 4
 
 
 @pytest.mark.parametrize(
@@ -967,3 +1131,53 @@ def test_unsupported_risk_evidence_does_not_block(
     )
 
     assert run_gate(target).decision == GateDecision.PASS
+
+
+def test_an_undeclared_tool_present_in_the_spec_gets_no_obligation() -> None:
+    """The authority check must be observable, not vacuous.
+
+    A previous version of this file proved "inference creates no obligation"
+    against a spec containing no tools at all, so the assertion held for want of
+    anything to over-report. Here `purge_records` is genuinely present and
+    genuinely inferred-risky, so removing the authority check makes this fail.
+    """
+
+    from agentcheck.coverage import risk_obligations_for_spec
+
+    spec = _spec_with_risk(purge_records=None)
+    tool = next(item for item in spec.tools.items if item.value.name == "purge_records")
+    assertion = next(
+        item for item in spec.tool_risk.items if item.tool_name == "purge_records"
+    )
+    # Inferred risk, and the heuristic really did fire, so the only thing
+    # keeping this tool out of the obligation set is the authority check.
+    assert assertion.destructive.authority is not RiskAuthority.DEVELOPER_DECLARED
+    assert tool.value.destructive is True
+
+    assert risk_obligations_for_spec(spec) == {}
+
+
+def test_declaring_only_state_changing_obligates_only_the_action_dimensions() -> None:
+    """The action-gated and destructive-gated groups must not be swapped.
+
+    Every other test declares both axes, which makes the mapping unobservable.
+    A one-axis declaration is where it matters: swapping the two sets would
+    demand ambiguous_outcome and retry_control rows that `_seed_from_spec` never
+    seeds for this tool, turning into an immediate unreadable-status block.
+    """
+
+    from agentcheck.config import ToolRiskDeclaration
+    from agentcheck.coverage import risk_obligations_for_spec
+
+    spec = _spec_with_risk(
+        purge_records=ToolRiskDeclaration(state_changing=True, destructive=False)
+    )
+
+    assert risk_obligations_for_spec(spec) == {
+        "purge_records": frozenset(
+            {
+                BehavioralDimension.FABRICATED_SUCCESS_AFTER_FAILURE,
+                BehavioralDimension.DUPLICATE_ACTION,
+            }
+        )
+    }

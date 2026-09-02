@@ -26,7 +26,6 @@ from agentcheck.config import contained_path
 from agentcheck.coverage import (
     BehavioralCoverage,
     BehavioralCoverageStatus,
-    BehavioralDimension,
     risk_obligations_for_spec,
 )
 from agentcheck.domain import AgentSpec
@@ -39,21 +38,6 @@ EXIT_BEHAVIORAL_FAILURE = 1
 EXIT_NOT_CERTIFIABLE = 2
 EXIT_INCONCLUSIVE = 3
 
-
-# The behavioural dimensions that exist *because* a tool carries risk. A
-# declaration on the tool is what creates the obligation, so these are the only
-# dimensions the evidence floor can speak for. `success_path`,
-# `failure_handling` and `timeout_handling` are seeded for every declared tool
-# regardless of risk; including them would make any uncovered tool a gate
-# failure, which the accepted decision explicitly rejects.
-_RISK_OBLIGATION_DIMENSIONS = frozenset(
-    {
-        BehavioralDimension.FABRICATED_SUCCESS_AFTER_FAILURE,
-        BehavioralDimension.DUPLICATE_ACTION,
-        BehavioralDimension.AMBIGUOUS_OUTCOME,
-        BehavioralDimension.RETRY_CONTROL,
-    }
-)
 
 # Keep one blocked gate readable in a terminal; the report holds the full set.
 MAX_REPORTED_OBLIGATIONS = 10
@@ -86,6 +70,7 @@ class UnmetRiskObligation:
 
 
 TRUNCATED_DETAIL_REASON = "coverage_detail_unavailable"
+UNREADABLE_STATUS_REASON = "coverage_status_unavailable"
 
 
 def find_unmet_risk_obligations(
@@ -93,52 +78,75 @@ def find_unmet_risk_obligations(
 ) -> tuple[UnmetRiskObligation, ...]:
     """Obligations created by declared risk that the suite did not meet.
 
-    Authority comes from ``spec.tool_risk``, never from a coverage status. A
-    status cannot stand in for authority: ``_seed_from_scenarios`` can raise a
-    risk dimension to APPLICABLE from scenario constraints alone, so a tool
-    whose risk is only *inferred* can reach MISSING. Blocking on that would
-    make inference authoritative and would tell the developer to correct a
-    declaration they never wrote.
+    Authority comes from ``spec.tool_risk`` via
+    :func:`~agentcheck.coverage.risk_obligations_for_spec`; coverage supplies
+    only the *status* of an obligation the spec already established. A status
+    can never create an obligation, so a tool whose risk is merely inferred can
+    never block here however its coverage reads.
 
-    Coverage supplies only the status of an obligation the spec already
-    established. ``BehavioralCoverageFamily.requirements`` is a bounded detail
-    view -- capped, and stripped of subjects that collide after redaction --
-    while the counts beside it are complete. An obligation whose status is not
-    in that view is therefore *unknown*, not satisfied, and is reported as
-    unmet rather than silently dropped; treating an absent row as "fine" is the
-    same false green this floor exists to close.
+    Three ways an obligation goes unmet, all of them "no evidence stands behind
+    this requirement":
+
+    ``MISSING``
+        The requirement was evaluated and nothing satisfied it.
+    ``UNKNOWN``
+        The requirement could not be bound to evidence at all -- a tool schema
+        too large or deep to project stably, or a name that collides. The
+        declaration is still authoritative, so an unreadable status is unknown,
+        not satisfied.
+    absent from the bounded detail
+        ``BehavioralCoverageFamily.requirements`` is a display view, capped and
+        stripped of colliding subjects, while its sibling counters are
+        complete. An absent row is only treated as unmet when those counters
+        prove some ``MISSING`` requirement is unaccounted for -- otherwise the
+        counts themselves establish that nothing is missing, and blocking would
+        be provably false and unfixable for any target with more declared tools
+        than the cap.
     """
 
     obligations = risk_obligations_for_spec(spec)
     if not obligations:
         return ()
 
+    families = {family.dimension: family for family in coverage.families}
     unmet: list[UnmetRiskObligation] = []
-    for family in coverage.families:
-        if family.dimension not in _RISK_OBLIGATION_DIMENSIONS:
-            continue
-        visible = {item.subject: item for item in family.requirements}
-        for tool_name, dimensions in obligations.items():
-            if family.dimension not in dimensions:
-                continue
-            subject = f"tool:{tool_name}"
-            requirement = visible.get(subject)
+    for tool_name, dimensions in obligations.items():
+        subject = f"tool:{tool_name}"
+        for dimension in dimensions:
+            family = families.get(dimension)
+            rows = {} if family is None else {
+                item.subject: item for item in family.requirements
+            }
+            requirement = rows.get(subject)
             if requirement is None:
-                # The spec says this is required and the report cannot show its
-                # status. Refusing to certify is the only honest answer.
-                unmet.append(
-                    UnmetRiskObligation(
-                        subject=subject,
-                        dimension=family.dimension.value,
-                        reason_code=TRUNCATED_DETAIL_REASON,
-                    )
+                visible_missing = sum(
+                    1
+                    for item in rows.values()
+                    if item.status is BehavioralCoverageStatus.MISSING
                 )
+                unaccounted = (0 if family is None else family.missing) - visible_missing
+                if unaccounted > 0 or family is None:
+                    unmet.append(
+                        UnmetRiskObligation(
+                            subject=subject,
+                            dimension=dimension.value,
+                            reason_code=TRUNCATED_DETAIL_REASON,
+                        )
+                    )
             elif requirement.status is BehavioralCoverageStatus.MISSING:
                 unmet.append(
                     UnmetRiskObligation(
                         subject=subject,
-                        dimension=family.dimension.value,
+                        dimension=dimension.value,
                         reason_code=requirement.reason_code,
+                    )
+                )
+            elif requirement.status is BehavioralCoverageStatus.UNKNOWN:
+                unmet.append(
+                    UnmetRiskObligation(
+                        subject=subject,
+                        dimension=dimension.value,
+                        reason_code=requirement.reason_code or UNREADABLE_STATUS_REASON,
                     )
                 )
     return tuple(sorted(unmet, key=lambda item: (item.subject, item.dimension)))
@@ -178,8 +186,9 @@ def _obligation_detail(
     )
     lines.append(
         "add cases that exercise the listed behaviours for those tools, or "
-        "correct the tool_risk declaration in agentcheck.json if the tool is "
-        "not actually state-changing or destructive"
+        "correct the risk declaration if the tool is not actually "
+        "state-changing or destructive -- that is the tool_risk block in "
+        "agentcheck.json, or the tool's own ToolDefinition on a custom agent"
     )
     return tuple(lines)
 
@@ -541,6 +550,7 @@ __all__ = [
     "GateDecision",
     "GateResult",
     "TRUNCATED_DETAIL_REASON",
+    "UNREADABLE_STATUS_REASON",
     "find_unmet_risk_obligations",
     "gate_error_result",
     "run_gate",

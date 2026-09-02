@@ -67,10 +67,11 @@ This is scoped deliberately:
   risk and are not part of this floor.
 - **A target that declares no risk is unaffected.**
 
-The per-requirement detail in a coverage report is bounded. If a declared
-tool's status cannot be read from it, the gate reports that obligation as unmet
-rather than assuming it was met — an unreadable status is unknown, not
-satisfied.
+An obligation also goes unmet when its status cannot be read at all — a tool
+schema too large or deep to bind stably, or a requirement outside the bounded
+per-requirement detail while the report's own counters say something is still
+missing. An unreadable status is unknown, not satisfied. Where those counters
+show nothing missing, they settle the question and the gate does not block.
 
 To resolve a block: add cases exercising the listed behaviours, or correct the
 `tool_risk` declaration if the tool is not actually state-changing or
