@@ -12,7 +12,12 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
-## Unreleased
+## 0.5.4 (2026-09-02)
+
+A gate-correctness patch. `agentcheck gate` could return `PASS` for a target
+whose declared-destructive tool was never tested. It now refuses, and says
+which tool, which requirement, and what to do about it. Nothing about
+generation, containment, or framework support changes.
 
 ### Fixed
 

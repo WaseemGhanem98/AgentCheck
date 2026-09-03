@@ -11,4 +11,4 @@ __all__ = [
     "TurnResult",
     "load_config",
 ]
-__version__ = "0.5.3"
+__version__ = "0.5.4"
