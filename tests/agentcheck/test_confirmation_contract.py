@@ -393,3 +393,84 @@ def test_the_evidence_record_omits_the_vacuous_claim() -> None:
     assert all(
         "confirmed_before_every_call" not in (item.data or {}) for item in evidence
     )
+
+
+def test_a_withheld_scenario_does_not_indict_an_unrelated_guarded_tool() -> None:
+    """The withheld signal is scoped to the tool the scenario actually bans.
+
+    A pack attaches its rule to every guarded tool a scenario mentions, so a
+    negative case about withholding consent for one tool would otherwise
+    manufacture a violation for a second guarded tool it merely uses -- failing
+    an agent for acting where the scenario establishes nothing about consent,
+    which is the defect this whole contract exists to remove.
+    """
+
+    from agentcheck.evaluate.engine import _confirmation_context
+    from agentcheck.generate.mutations import MutationKind, mutate_scenario
+    from agentcheck.generate.templates import build_account_support_suite
+
+    parent = next(
+        item
+        for item in build_account_support_suite()
+        if item.scenario_id == "confirmed_cancel"
+    )
+    kind = next(item for item in MutationKind if "WITHHOLD" in item.name)
+    scenario = getattr(mutate_scenario(parent, kind, seed=1729), "scenario", None)
+
+    # It bans cancel_subscription, and says nothing at all about delete_account.
+    assert _confirmation_context(scenario, "cancel_subscription") == "withheld"
+    assert _confirmation_context(scenario, "delete_account") == "absent"
+
+
+def test_a_withhold_mutant_without_a_policy_tag_is_still_decidable() -> None:
+    """A mutant inherits its parent's tags, and not every parent carries a
+    policy tag: `destructive_ambiguous_timeout` carries none. Keying only on the
+    two authored policy tags left that shape `absent`, so the confirmation
+    rule's own oracle went blind for it while the base release still failed it.
+    The machine-generated `mutation:withhold_confirmation` tag closes that.
+    """
+
+    from agentcheck.evaluate.engine import _confirmation_context
+    from agentcheck.generate.mutations import MutationKind, mutate_scenario
+    from agentcheck.generate.templates import build_account_support_suite
+
+    parent = next(
+        item
+        for item in build_account_support_suite()
+        if item.scenario_id == "destructive_ambiguous_timeout"
+    )
+    kind = next(item for item in MutationKind if "WITHHOLD" in item.name)
+    scenario = getattr(mutate_scenario(parent, kind, seed=1729), "scenario", None)
+
+    assert "policy:missing_confirmation" not in scenario.dimension_tags
+    assert "policy:explicit_confirmation" not in scenario.dimension_tags
+    assert _confirmation_context(scenario, "delete_account") == "withheld"
+
+
+def test_a_forbidden_constraint_can_declare_the_confirmation_requirement() -> None:
+    """`confirmation_required_before_call` is honoured wherever it is declared.
+
+    The engine scans required, allowed and forbidden tool behaviour, matching
+    what `coverage.analyzer` already does. Nothing in the repo sets the flag on
+    a forbidden constraint today, so without this the widening is unverified
+    and could be dropped silently.
+    """
+
+    from agentcheck.evaluate.engine import _confirmation_context
+
+    scenario = _scenario(consent_turn=False, declares_requirement=False)
+    declared_on_forbidden = scenario.model_copy(
+        update={
+            "forbidden_tool_behavior": (
+                ToolBehaviorConstraint(
+                    criterion_id="case:forbidden",
+                    tool_name=TOOL,
+                    max_calls=0,
+                    confirmation_required_before_call=True,
+                    oracle_ids=(ORACLE,),
+                ),
+            )
+        }
+    )
+
+    assert _confirmation_context(declared_on_forbidden, TOOL) == "withheld"
