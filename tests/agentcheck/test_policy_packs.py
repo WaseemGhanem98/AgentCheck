@@ -85,11 +85,21 @@ def _parent(scenario_id: str) -> Scenario:
 
 
 def _without_confirmation_gate(scenario: Scenario) -> Scenario:
+    """Remove the confirmation *gate*, keeping the confirmation *context*.
+
+    The scenario's consenting turn stays. It is what lets a confirmation rule
+    decide anything at all: a scenario that neither offers consent nor declares
+    it necessary cannot establish compliance or violation, and the evaluator
+    now answers such a rule INCONCLUSIVE rather than failing a call. Stripping
+    the turn here would leave this test asserting a hard failure the contract
+    no longer permits, which is the defect it would then be pinning.
+
+    What is removed is the gate: the declared requirement and any pre-existing
+    confirmation constraint, so the applied pack is the only source of the rule
+    and the un-packed baseline still passes.
+    """
+
     data = json.loads(scenario.model_dump_json())
-    for turn in data["conversation_turns"]:
-        metadata = turn.get("metadata") or {}
-        metadata.pop("explicit_confirmation", None)
-        turn["metadata"] = metadata
     for item in data["required_tool_behavior"]:
         item["confirmation_required_before_call"] = False
     data["trajectory_constraints"] = [
