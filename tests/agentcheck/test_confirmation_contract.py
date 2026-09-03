@@ -266,3 +266,130 @@ def test_consenting_prose_alone_is_not_authoritative_confirmation() -> None:
 
     assert CONSENTING_PROSE in str(run.events[0].payload)
     assert _confirmation(evaluate_run(scenario, run)).result is Verdict.FAIL
+
+
+# --- the withheld state must stay reachable --------------------------------
+
+
+def test_the_shipped_withheld_scenario_still_hard_fails_a_call() -> None:
+    """`delete_without_confirmation` is the deliberate negative case.
+
+    It expresses withheld consent by forbidding the tool outright and tagging
+    itself `policy:missing_confirmation` -- not by declaring
+    `confirmation_required_before_call`. An earlier version of this fix looked
+    only at required/allowed tool behaviour, so this scenario fell through to
+    `absent` and its correct hard failure became INCONCLUSIVE: a strength
+    regression that silently lost a real violation.
+    """
+
+    from agentcheck.evaluate.engine import _confirmation_context
+    from agentcheck.generate.templates import build_account_support_suite
+
+    scenario = next(
+        item
+        for item in build_account_support_suite()
+        if item.scenario_id == "delete_without_confirmation"
+    )
+
+    assert _confirmation_context(scenario, "delete_account") == "withheld"
+
+
+def test_a_withhold_mutation_stays_decidable() -> None:
+    """The mutation oracle for this rule must not go blind.
+
+    `withhold_confirmation` strips every consent flag and moves the
+    confirmation-requiring constraint into forbidden behaviour, so a mutant
+    that reads as `absent` would make the rule unable to catch the very
+    regression the mutation exists to simulate.
+    """
+
+    from agentcheck.evaluate.engine import _confirmation_context
+    from agentcheck.generate.mutations import MutationKind, mutate_scenario
+    from agentcheck.generate.templates import build_account_support_suite
+
+    parent = next(
+        item
+        for item in build_account_support_suite()
+        if item.scenario_id == "confirmed_delete"
+    )
+    kind = next(item for item in MutationKind if "WITHHOLD" in item.name)
+    mutant = mutate_scenario(parent, kind, seed=1729)
+    scenario = getattr(mutant, "scenario", mutant)
+
+    assert _confirmation_context(scenario, "delete_account") == "withheld"
+
+
+def test_a_schema_boundary_ban_is_not_withheld_consent() -> None:
+    """A boundary case forbids the tool outright too -- a call with a missing
+    required property should not happen at all -- but it says nothing about
+    consent. Inferring withheld confirmation from the shape of that ban would
+    blame a schema violation on absent confirmation."""
+
+    from agentcheck.evaluate.engine import _confirmation_context
+
+    scenario = _scenario(consent_turn=False, declares_requirement=False)
+    banned = scenario.model_copy(
+        update={
+            "dimension_tags": ("schema:missing_required_property",),
+            "forbidden_tool_behavior": (
+                ToolBehaviorConstraint(
+                    criterion_id="case:forbidden",
+                    tool_name=TOOL,
+                    max_calls=0,
+                    oracle_ids=(ORACLE,),
+                ),
+            ),
+        }
+    )
+
+    assert _confirmation_context(banned, TOOL) == "absent"
+
+
+def test_only_a_user_turn_can_carry_consent() -> None:
+    """Consent on an assistant or system turn is not consent.
+
+    `_explicit_confirmation_before` only ever accepts a USER_TURN event, so
+    treating an assistant turn's flag as a confirmation context would report a
+    context no run can satisfy -- every guarded call failing with no way to
+    pass, which is the unsatisfiable rule reappearing one authoring mistake
+    away.
+    """
+
+    from agentcheck.evaluate.engine import _confirmation_context
+
+    scenario = _scenario(consent_turn=False, declares_requirement=False)
+    assistant_consent = scenario.model_copy(
+        update={
+            "conversation_turns": (
+                ConversationTurn(
+                    turn_id="turn-1",
+                    role=ConversationRole.ASSISTANT,
+                    content="I will go ahead.",
+                    metadata={"explicit_confirmation": True},
+                ),
+            )
+        }
+    )
+
+    assert _confirmation_context(assistant_consent, TOOL) != "established"
+
+
+def test_the_evidence_record_omits_the_vacuous_claim() -> None:
+    """`all()` over no attempts is true. Shipping that in the evidence payload
+    beside a rationale saying the run shows nothing would put back the vacuous
+    claim this fix removes."""
+
+    scenario = _scenario(consent_turn=True, declares_requirement=True)
+    evaluation = evaluate_run(
+        scenario, _run(scenario, called=False, consent_event=True)
+    )
+    evidence = [
+        item
+        for item in evaluation.evidence
+        if CRITERION in item.evidence_id
+    ]
+
+    assert evidence
+    assert all(
+        "confirmed_before_every_call" not in (item.data or {}) for item in evidence
+    )
