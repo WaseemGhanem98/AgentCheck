@@ -10,6 +10,7 @@ from __future__ import annotations
 from agentcheck.baseline.build import baseline_from_loaded
 from agentcheck.baseline.compare import compare_baselines
 from agentcheck.baseline.contract import ComparisonItem, EvaluationBaseline
+from agentcheck.domain import AgentSpec, RiskAuthority
 from agentcheck.errors import ConfigurationError
 from agentcheck.report.load import LoadedRun
 
@@ -163,8 +164,11 @@ def _caveats(
     # Every binding below comes from what each run recorded for itself. The
     # configured spec and frozen suite files can postdate either run, so they
     # are never comparison inputs.
-    if base_snapshot.spec_id != head_snapshot.spec_id or (
-        base.behavioral_coverage.spec_digest != head.behavioral_coverage.spec_digest
+    if (
+        base_snapshot.spec_id != head_snapshot.spec_id
+        or base.behavioral_coverage.spec_digest
+        != head.behavioral_coverage.spec_digest
+        or _risk_authority(base.spec) != _risk_authority(head.spec)
     ):
         caveats.append(ComparabilityCaveat.SPEC_CHANGED)
     # The scenario digest is always recorded and hashes the evaluated
@@ -192,6 +196,32 @@ def _caveats(
     elif base.git_revision == head.git_revision:
         caveats.append(ComparabilityCaveat.SOURCE_REVISION_UNCHANGED)
     return tuple(caveats)
+
+
+def _risk_authority(spec: AgentSpec) -> tuple[tuple[str, bool, bool], ...]:
+    """Coverage's per-axis authority, from this run's recorded specification.
+
+    The v1 coverage digest omits ``tool_risk``. Compare its effective authority
+    separately without rewriting stored digests or relaxing source validation.
+    As in coverage, predicates come from ToolDefinition (already digest-bound);
+    assertion values, confidence, and evidence text do not supply authority.
+    A missing assertion retains the legacy tool-schema authority fallback.
+    """
+
+    authoritative = {
+        RiskAuthority.DEVELOPER_DECLARED,
+        RiskAuthority.FRAMEWORK_AUTHORITATIVE,
+    }
+    assertions = {item.tool_name: item for item in spec.tool_risk.items}
+    axes: list[tuple[str, bool, bool]] = []
+    for tool in spec.tools.items:
+        assertion = assertions.get(tool.value.name)
+        state = destructive = tool.authoritative
+        if assertion is not None:
+            state = assertion.state_changing.authority in authoritative
+            destructive = assertion.destructive.authority in authoritative
+        axes.append((tool.value.name, state, destructive))
+    return tuple(sorted(axes))
 
 
 def _deselected_ids(head: LoadedRun) -> frozenset[str]:

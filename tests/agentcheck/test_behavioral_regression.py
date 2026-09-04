@@ -33,12 +33,17 @@ from agentcheck.domain import (
     InstructionsSpec,
     InterfaceSpec,
     ObservabilitySpec,
+    RiskAuthority,
+    RiskAxis,
     RunTermination,
     RuntimeSpec,
     Scenario,
     SourceKind,
     SourceReference,
     SpecEvidence,
+    ToolDefinition,
+    ToolRiskAssertion,
+    ToolRiskSpec,
     ToolsSpec,
     Verdict,
     utc_now,
@@ -183,6 +188,47 @@ def _evaluation(
         completed_at=now,
         summary=verdict.value,
         infrastructure_error=infrastructure_error,
+    )
+
+
+def _risk_spec(
+    *,
+    authorities: tuple[RiskAuthority, RiskAuthority] | None,
+    state_changing: bool = True,
+    destructive: bool = True,
+    schema_authoritative: bool = False,
+    tool_name: str = "purge_records",
+) -> AgentSpec:
+    tool = _property(
+        ToolDefinition(
+            name=tool_name,
+            input_schema={"type": "object"},
+            state_changing=state_changing,
+            destructive=destructive,
+            replaceable=True,
+        )
+    ).model_copy(update={"authoritative": schema_authoritative})
+    assertions = (
+        (
+            ToolRiskAssertion(
+                tool_name=tool_name,
+                state_changing=RiskAxis(
+                    value=state_changing, authority=authorities[0], confidence=0.9
+                ),
+                destructive=RiskAxis(
+                    value=destructive, authority=authorities[1], confidence=0.9
+                ),
+                evidence=(SpecEvidence(evidence_id="risk", summary="Declared risk."),),
+            ),
+        )
+        if authorities is not None
+        else ()
+    )
+    return _spec().model_copy(
+        update={
+            "tools": ToolsSpec(items=(tool,)),
+            "tool_risk": ToolRiskSpec(items=assertions),
+        }
     )
 
 
@@ -616,6 +662,183 @@ def test_a_changed_spec_is_disclosed_but_shared_identities_still_compare(
     # runs, so its verdict change is still real evidence.
     assert _item(checked.comparison, suite[0].scenario_id).category == "new_regression"
     assert "different agent" in checked.summary
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    ("state_changing", "destructive", "before", "after"),
+    [
+        (
+            True, True,
+            (RiskAuthority.INFERRED, RiskAuthority.INFERRED),
+            (RiskAuthority.DEVELOPER_DECLARED, RiskAuthority.DEVELOPER_DECLARED),
+        ),
+        (
+            True, False,
+            (RiskAuthority.INFERRED, RiskAuthority.UNKNOWN),
+            (RiskAuthority.DEVELOPER_DECLARED, RiskAuthority.UNKNOWN),
+        ),
+        (
+            False, True,
+            (RiskAuthority.UNKNOWN, RiskAuthority.INFERRED),
+            (RiskAuthority.UNKNOWN, RiskAuthority.FRAMEWORK_AUTHORITATIVE),
+        ),
+        (
+            False, False,
+            (RiskAuthority.UNKNOWN, RiskAuthority.UNKNOWN),
+            (RiskAuthority.DEVELOPER_DECLARED, RiskAuthority.DEVELOPER_DECLARED),
+        ),
+    ],
+    ids=["both-axes", "state-only", "destructive-only", "declared-false-vs-unknown"],
+)
+def test_risk_authority_change_is_disclosed_with_identical_v1_digests(
+    tmp_path: Path,
+    suite: tuple[Scenario, ...],
+    reverse: bool,
+    state_changing: bool,
+    destructive: bool,
+    before: tuple[RiskAuthority, RiskAuthority],
+    after: tuple[RiskAuthority, RiskAuthority],
+) -> None:
+    base_spec = _risk_spec(
+        authorities=before, state_changing=state_changing, destructive=destructive
+    )
+    head_spec = _risk_spec(
+        authorities=after, state_changing=state_changing, destructive=destructive
+    )
+    if reverse:
+        base_spec, head_spec = head_spec, base_spec
+    cases = tuple((scenario, Verdict.PASS) for scenario in suite)
+    base_dir = _write_run(tmp_path, "base", cases, spec=base_spec)
+    head_dir = _write_run(
+        tmp_path, "head", cases, spec=head_spec, git_revision="revision-b"
+    )
+    base = load_stored_run(tmp_path, run_id="base")
+    head = load_stored_run(tmp_path, run_id="head")
+    assert base.spec.spec_id == head.spec.spec_id
+    assert base.behavioral_coverage.spec_digest == head.behavioral_coverage.spec_digest
+    if state_changing and destructive:
+        # Recorded by the v1 writer at main@43148134, before this correction.
+        assert base.behavioral_coverage.spec_digest == (
+            "sha256:6d0ee564eb4c52e3c7cc166ac0615f6c817c1fee45a7288ba8d91692e9dba6db"
+        )
+    assert base.behavioral_coverage.families != head.behavioral_coverage.families
+    original = {
+        path: path.read_bytes()
+        for directory in (base_dir, head_dir)
+        for path in directory.iterdir()
+        if path.is_file()
+    }
+
+    checked = compare_stored_runs(tmp_path, base_run_id="base", head_run_id="head")
+
+    assert checked.comparison.caveats == (ComparabilityCaveat.SPEC_CHANGED,)
+    assert checked.comparison.comparability is Comparability.COMPARABLE
+    assert all(item.category == "unchanged" for item in checked.comparison.items)
+    assert checked.exit_code == 0  # A disclosure is not a behavioral regression.
+    assert "specification changed" in checked.summary
+    assert {path: path.read_bytes() for path in original} == original
+
+
+@pytest.mark.parametrize("schema_authoritative", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("recorded_coverage", [False, True])
+def test_risk_authority_comparison_preserves_absent_assertion_fallback(
+    tmp_path: Path,
+    suite: tuple[Scenario, ...],
+    schema_authoritative: bool,
+    reverse: bool,
+    recorded_coverage: bool,
+) -> None:
+    legacy = _risk_spec(authorities=None, schema_authoritative=schema_authoritative)
+    matched = (
+        RiskAuthority.DEVELOPER_DECLARED
+        if schema_authoritative
+        else RiskAuthority.INFERRED
+    )
+    different = (
+        RiskAuthority.INFERRED
+        if schema_authoritative
+        else RiskAuthority.DEVELOPER_DECLARED
+    )
+    cases = tuple((scenario, Verdict.PASS) for scenario in suite)
+    legacy_dir = _write_run(tmp_path, "legacy", cases, spec=legacy)
+    # Specs predating risk provenance did not serialize an empty section.
+    spec_path = legacy_dir / "agent-spec.json"
+    spec_document = json.loads(spec_path.read_text(encoding="utf-8"))
+    del spec_document["tool_risk"]
+    spec_path.write_text(json.dumps(spec_document), encoding="utf-8")
+    if not recorded_coverage:
+        summary_path = legacy_dir / "summary.json"
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        del summary["behavioral_coverage"]
+        summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    for run_id, authority, expected_change in (
+        ("matched", matched, False), ("different", different, True)
+    ):
+        _write_run(
+            tmp_path, run_id, cases, git_revision="revision-b",
+            spec=_risk_spec(
+                authorities=(authority, authority),
+                schema_authoritative=schema_authoritative,
+            ),
+        )
+        base_id, head_id = (run_id, "legacy") if reverse else ("legacy", run_id)
+        checked = compare_stored_runs(
+            tmp_path, base_run_id=base_id, head_run_id=head_id
+        )
+        changed = ComparabilityCaveat.SPEC_CHANGED in checked.comparison.caveats
+        assert changed is expected_change
+        assert checked.exit_code == 0
+
+
+def test_risk_authority_comparison_ignores_equivalent_provenance_and_order(
+    tmp_path: Path, suite: tuple[Scenario, ...]
+) -> None:
+    declared = _risk_spec(
+        authorities=(RiskAuthority.DEVELOPER_DECLARED, RiskAuthority.DEVELOPER_DECLARED)
+    )
+    unknown = _risk_spec(
+        authorities=(RiskAuthority.UNKNOWN, RiskAuthority.UNKNOWN),
+        state_changing=False, destructive=False, tool_name="lookup_records",
+    )
+    base_spec = declared.model_copy(update={
+        "tools": ToolsSpec(items=declared.tools.items + unknown.tools.items),
+        "tool_risk": ToolRiskSpec(items=declared.tool_risk.items + unknown.tool_risk.items),
+    })
+    declared_assertion = declared.tool_risk.items[0]
+    unknown_assertion = unknown.tool_risk.items[0]
+    changed_assertions = tuple(
+        assertion.model_copy(update={
+            "state_changing": assertion.state_changing.model_copy(update={
+                "authority": authority, "confidence": confidence,
+            }),
+            "destructive": assertion.destructive.model_copy(update={
+                "authority": authority, "confidence": confidence,
+            }),
+            "evidence": (SpecEvidence(evidence_id="changed", summary="Different provenance."),),
+            "conflicts": ("Different recorded conflict.",),
+        })
+        for assertion, authority, confidence in (
+            (unknown_assertion, RiskAuthority.INFERRED, 0.5),
+            (declared_assertion, RiskAuthority.FRAMEWORK_AUTHORITATIVE, 1.0),
+        )
+    )
+    head_spec = base_spec.model_copy(update={
+        "tools": ToolsSpec(items=tuple(reversed(base_spec.tools.items))),
+        "tool_risk": ToolRiskSpec(items=changed_assertions),
+    })
+    assert analyze_behavioral_coverage(
+        base_spec, suite
+    ) == analyze_behavioral_coverage(head_spec, suite)
+    cases = tuple((scenario, Verdict.PASS) for scenario in suite)
+    _write_run(tmp_path, "base", cases, spec=base_spec)
+    _write_run(tmp_path, "head", cases, spec=head_spec, git_revision="revision-b")
+
+    checked = compare_stored_runs(tmp_path, base_run_id="base", head_run_id="head")
+
+    assert checked.comparison.caveats == ()
+    assert checked.exit_code == 0
 
 
 def test_a_changed_seed_is_disclosed(

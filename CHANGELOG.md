@@ -12,6 +12,18 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## Unreleased
+
+### Fixed
+
+- Stored-run comparison now reports `spec_changed` when a tool's risk changes
+  between inferred and authoritative, even if its resolved risk values and
+  recorded coverage digest stay the same. Each run's recorded specification
+  supplies the authority; existing artifacts, scenario classifications, and
+  comparison exit codes are unchanged.
+
+  **Suite identity:** unchanged.
+
 ## 0.5.4 (2026-09-02)
 
 A gate-correctness patch. `agentcheck gate` could return `PASS` for a target
