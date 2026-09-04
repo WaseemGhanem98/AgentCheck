@@ -115,6 +115,31 @@ authentication. Binding checks independently recompute the spec,
 actual-scenario, reference-scenario, and frozen-suite identities when those
 source documents are available.
 
+New reports identify their specification binding as
+`coverage-spec.v2:sha256:<digest>`. It includes the historical tool/schema and
+policy projection plus each declared tool's effective state-changing and
+destructive authority. Missing risk assertions retain the tool-schema authority
+fallback; inferred/unknown and declared/framework authority remain distinct.
+Equivalent authority tiers and display-only provenance do not change this
+binding. The algorithm identifier is itself hashed; malformed or unknown
+algorithms are rejected, never guessed or downgraded.
+
+**Compatibility restriction:** historical `sha256:<digest>` specification
+bindings omitted risk authority. Such recorded coverage is accepted only when
+the complete reference scenario set is available for semantic rederivation,
+with the original checksum and denominator intact. Previously readable legacy
+selected runs whose larger reference set was not persisted are now rejected
+with `legacy_spec_digest_requires_complete_reference_scenarios`. This also
+blocks stored-report rendering, comparison, baseline creation and finding
+review from that unverifiable run. Re-run to create newly bound evidence, or
+verify with the exact original reference documents through the binding API;
+current configured files are not substitutes for recorded sources. Do not
+remove embedded coverage or rewrite its counts/digest to evade this refusal.
+Fully rederivable legacy coverage and summaries that originally had no coverage
+field remain supported. Existing files are never upgraded in place. New reports
+require a reader that understands the v2 specification-binding algorithm;
+older readers reject their binding rather than silently misinterpreting it.
+
 Coverage-sensitive tool identifiers or input schemas that cannot survive
 mandatory artifact redaction or truncation losslessly are reported
 `UNKNOWN`, never `COVERED`. The normalized spec ID is a display/source hint,
@@ -129,8 +154,8 @@ cannot evaluate offline — an unresolvable local reference, for instance — yi
 no controlled reach rather than an escaping error, so the affected behavior is
 reported missing rather than covered.
 
-For a stored selected run, embedded coverage can retain the digest of the full
-reference universe. The loader can verify the coverage checksum and surviving
+For a stored selected run using the new binding, embedded coverage retains the
+digest of the full reference universe. The loader can verify the coverage checksum and surviving
 actual scenario documents, but it cannot independently reconstruct excluded
 scenario fingerprints. When an older summary lacks embedded coverage and only
 selected scenarios remain, AgentCheck derives

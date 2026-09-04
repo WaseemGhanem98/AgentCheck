@@ -10,6 +10,7 @@ classification inputs.
 from __future__ import annotations
 
 import hmac
+import re
 from collections import Counter
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -310,8 +311,8 @@ def _scenario_digest(scenarios: Sequence[Scenario]) -> str:
     return canonical_hash(_artifact_normalize(identities))
 
 
-def _spec_digest(spec: AgentSpec) -> str:
-    """Bind exactly the declared spec fields that determine coverage meaning."""
+def _legacy_spec_digest(spec: AgentSpec) -> str:
+    """The historical projection, retained only to verify existing artifacts."""
 
     projection = {
         "tools": [
@@ -342,6 +343,46 @@ def _spec_digest(spec: AgentSpec) -> str:
         ],
     }
     return canonical_hash(_artifact_normalize(projection))
+
+
+_SPEC_DIGEST_ALGORITHM = "coverage-spec.v2"
+
+
+def behavioral_coverage_spec_digest(spec: AgentSpec) -> str:
+    """Bind coverage's declared fields and effective per-axis risk authority.
+
+    The algorithm lives in the digest itself, leaving historical coverage
+    checksum payloads intact. The nested historical digest preserves its exact
+    normalization and ordering rules; new writers never emit that weaker form.
+    """
+
+    authoritative = {
+        RiskAuthority.DEVELOPER_DECLARED,
+        RiskAuthority.FRAMEWORK_AUTHORITATIVE,
+    }
+    assertions = {item.tool_name: item for item in spec.tool_risk.items}
+    axes: list[tuple[str, bool, bool]] = []
+    for tool in spec.tools.items:
+        assertion = assertions.get(tool.value.name)
+        state = destructive = tool.authoritative
+        if assertion is not None:
+            state = assertion.state_changing.authority in authoritative
+            destructive = assertion.destructive.authority in authoritative
+        axes.append((tool.value.name, state, destructive))
+    digest = canonical_hash(_artifact_normalize({
+        "algorithm": _SPEC_DIGEST_ALGORITHM,
+        "legacy_spec_digest": _legacy_spec_digest(spec),
+        "risk_authority": sorted(axes),
+    }))
+    return f"{_SPEC_DIGEST_ALGORITHM}:{digest}"
+
+
+def _is_legacy_spec_digest(digest: str) -> bool:
+    if re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
+        return True
+    if re.fullmatch(r"coverage-spec\.v2:sha256:[0-9a-f]{64}", digest):
+        return False
+    raise ValueError("unsupported or malformed behavioral coverage spec_digest algorithm")
 
 
 def _add_seed(
@@ -2345,7 +2386,7 @@ def analyze_behavioral_coverage(
     )
     return BehavioralCoverage(
         spec_id=spec.spec_id,
-        spec_digest=_spec_digest(spec),
+        spec_digest=behavioral_coverage_spec_digest(spec),
         scenario_count=len(actual),
         scenario_digest=_scenario_digest(actual),
         reference_scenario_count=len(reference),
@@ -2423,6 +2464,11 @@ def verify_behavioral_coverage_binding(
 ) -> None:
     """Fail closed when derived coverage is presented for different sources."""
 
+    legacy = _is_legacy_spec_digest(coverage.spec_digest)
+    expected_spec_digest = (
+        _legacy_spec_digest(spec)
+        if legacy else behavioral_coverage_spec_digest(spec)
+    )
     actual = tuple(scenarios)
     complete_reference: tuple[Scenario, ...] | None = (
         actual
@@ -2432,7 +2478,7 @@ def verify_behavioral_coverage_binding(
     mismatches: list[str] = []
     if coverage.spec_id != redact_log_text(spec.spec_id):
         mismatches.append("spec_id")
-    if coverage.spec_digest != _spec_digest(spec):
+    if coverage.spec_digest != expected_spec_digest:
         mismatches.append("spec_digest")
     if coverage.scenario_count != len(actual):
         mismatches.append("scenario_count")
@@ -2479,6 +2525,11 @@ def verify_behavioral_coverage_binding(
         suite_fingerprint, _UnspecifiedSuiteFingerprint
     ) and coverage.suite_fingerprint != expected_suite_fingerprint:
         mismatches.append("suite_fingerprint")
+    if legacy and complete_reference is None:
+        # A v1 digest omits risk authority. Without every reference document,
+        # no semantic rederivation can establish that the recorded rows match
+        # this spec. Never certify those rows or shrink their denominator.
+        mismatches.append("legacy_spec_digest_requires_complete_reference_scenarios")
     if complete_reference is not None:
         try:
             rederived = analyze_behavioral_coverage(
@@ -2491,6 +2542,14 @@ def verify_behavioral_coverage_binding(
         except ValueError:
             mismatches.append("derived_coverage")
         else:
+            if legacy:
+                # Compare against the original algorithm/checksum envelope in
+                # memory only; never rewrite or upgrade the stored artifact.
+                rederived = BehavioralCoverage.model_validate({
+                    **rederived.model_dump(),
+                    "spec_digest": expected_spec_digest,
+                    "fingerprint": "",
+                })
             if coverage != rederived:
                 mismatches.append("derived_coverage")
 
@@ -2504,6 +2563,7 @@ def verify_behavioral_coverage_binding(
 __all__ = [
     "UnmetRiskObligation",
     "analyze_behavioral_coverage",
+    "behavioral_coverage_spec_digest",
     "risk_obligations_for_spec",
     "unmet_risk_obligations",
     "verify_behavioral_coverage_binding",

@@ -24,6 +24,19 @@ identity**.
 
   **Suite identity:** unchanged.
 
+- Coverage now binds effective per-axis tool-risk authority using a versioned
+  specification digest. Existing checksums, scenario denominators and source
+  checks are retained. Unknown digest algorithms fail closed; mixed-algorithm
+  comparisons do not report a spec change merely because the algorithm differs.
+
+  **Compatibility restriction:** older selected-run coverage with an omitted
+  reference set cannot prove its recorded authority and is now rejected by
+  stored-run consumers. Fully rederivable legacy coverage and summaries that
+  originally lacked coverage remain readable. No stored file is rewritten;
+  see `docs/behavioral-coverage.md` for recovery and the remaining reference limits.
+
+  **Suite identity:** unchanged. New coverage digests/checksums intentionally change.
+
 ## 0.5.4 (2026-09-02)
 
 A gate-correctness patch. `agentcheck gate` could return `PASS` for a target

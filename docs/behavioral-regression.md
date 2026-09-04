@@ -63,6 +63,7 @@ such binding is reported as an explicit caveat rather than silently ignored:
   axis is authoritative, even when the resolved risk values are unchanged.
   Authority comes from each run's recorded specification; provenance-only
   changes with equivalent authority do not add this caveat.
+  Changing only a validated coverage digest's algorithm does not add it either.
 - `scenario_set_changed` — the runs evaluated different scenario sets, so added
   and removed scenarios are expected.
 - `suite_fingerprint_changed` — both runs recorded a frozen suite fingerprint
