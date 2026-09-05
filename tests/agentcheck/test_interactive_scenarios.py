@@ -88,16 +88,19 @@ BUILT_IN_FINGERPRINTS_SEED_7 = {
 
 # A generated suite for a target with no confirmation-required tool declares no
 # follow-up anywhere, so its whole document stays byte-identical within the
-# current generation semantics.
+# explicitly pinned generation semantics.
 #
 # This pin used to move on every release, because provenance recorded the
 # package version: the 0.1.1 bump moved it once for no behavioural reason.
 # Provenance now records GENERATOR_COMPATIBILITY_VERSION instead, so from here
-# the only thing that may move this value is a deliberate change to how suites
-# are generated. If a release moves it again, that is the regression.
-NO_FOLLOWUP_SUITE_FINGERPRINT = (
-    "sha256:b5285d2503fc63f5dc02a9f7bdd559fd465c02b7aaa2b53f88b3b9cf0fff4732"
-)
+# the only thing that may move identity is a deliberate generation change.
+# Version 2 changes authored-argument authority. This read-only target's cases
+# are unchanged; its suite identity moves only with recorded generator version.
+# Keep the version-1 pin instead of silently replacing historical evidence.
+NO_FOLLOWUP_SUITE_FINGERPRINTS = {
+    "1": "sha256:b5285d2503fc63f5dc02a9f7bdd559fd465c02b7aaa2b53f88b3b9cf0fff4732",
+    "2": "sha256:934cda7b001a984fcf392d47eae4515f06abc59fe6580a3f65aad5b3e54f2ae9",
+}
 # Likewise for a scenario embedded in a parent contract: a replay manifest over
 # the built-in suite, digested by the tree before ``followup_turns`` existed.
 NO_FOLLOWUP_MANIFEST_FINGERPRINT = (
@@ -855,8 +858,9 @@ def test_built_in_scenario_fingerprints_have_not_moved() -> None:
     } == BUILT_IN_FINGERPRINTS_SEED_7
 
 
+@pytest.mark.parametrize("generator_version", NO_FOLLOWUP_SUITE_FINGERPRINTS)
 def test_a_generated_suite_with_no_followup_is_fingerprint_identical(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, generator_version: str,
 ) -> None:
     """Pinned against the fingerprinting algorithm, not the installed SDK.
 
@@ -869,8 +873,10 @@ def test_a_generated_suite_with_no_followup_is_fingerprint_identical(
     """
 
     import agentcheck.adapters.openai_agents as openai_agents_adapter
+    import agentcheck.generate.suite as suite_module
 
     monkeypatch.setattr(openai_agents_adapter, "_sdk_version", lambda: "0.20.0")
+    monkeypatch.setattr(suite_module, "GENERATOR_COMPATIBILITY_VERSION", generator_version)
 
     @function_tool
     def lookup_record(record_id: str) -> str:
@@ -893,7 +899,8 @@ def test_a_generated_suite_with_no_followup_is_fingerprint_identical(
 
     suite = build_frozen_suite(spec, AgentCheckConfig(), seed=SEED)
 
-    assert suite.fingerprint == NO_FOLLOWUP_SUITE_FINGERPRINT
+    assert suite.provenance.generator_version == generator_version
+    assert suite.fingerprint == NO_FOLLOWUP_SUITE_FINGERPRINTS[generator_version]
     assert all(
         not case.scenario.followup_turns for case in suite.cases
     )
