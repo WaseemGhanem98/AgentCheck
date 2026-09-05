@@ -59,6 +59,79 @@ def _read_only_permissions(value: Any) -> bool:
     )
 
 
+def release_artifact_gate_failures(release: Mapping[Any, Any]) -> list[str]:
+    """Keep the exact-wheel gate fail-closed, not merely present by name."""
+    failures: list[str] = []
+    jobs = release.get("jobs") or {}
+    build = jobs.get("build") or {}
+    publish = jobs.get("publish") or {}
+    # This is a guard for the reviewed two-job pipeline, not a universal shell
+    # verifier. Inherited shells/workdirs can bypass the otherwise exact step.
+    if set(jobs) != {"build", "publish"}:
+        failures.append("release.yml must retain only its reviewed build and publish jobs")
+    for label, item in (("workflow", release), ("build", build), ("publish", publish)):
+        if "defaults" in item:
+            failures.append(f"release.yml:{label} must not override inherited run defaults")
+    steps = build.get("steps") or []
+    gates = [i for i, step in enumerate(steps) if step.get("id") == "qualify_artifacts"]
+    uploads = [i for i, step in enumerate(steps)
+               if str(step.get("uses", "")).startswith("actions/upload-artifact@")]
+    builds = [i for i, step in enumerate(steps)
+              if str(step.get("run", "")).strip() == "python -m build"]
+    audits = [i for i, step in enumerate(steps)
+              if "python scripts/check_distribution.py" in
+              str(step.get("run", "")).splitlines()]
+    if not all(len(items) == 1 for items in (gates, uploads, builds, audits)):
+        return ["release.yml must have one build/audit/qualification/upload chain"]
+    gate, upload = steps[gates[0]], steps[uploads[0]]
+    command = (
+        'python -I scripts/check_release_artifact.py \\\n'
+        '  --dist-dir dist --version "${RELEASE_TAG#v}" --source-sha "$RELEASE_SHA"'
+    )
+    if str(gate.get("run", "")).strip() != command:
+        failures.append("release.yml must execute the exact artifact qualification command")
+    if gate.get("env") != {
+        "RELEASE_SHA": "${{ github.sha }}",
+        "RELEASE_TAG": "${{ github.event.release.tag_name }}",
+    }:
+        failures.append("release.yml qualification must bind the release source and version")
+    if not (builds[0] < audits[0] < gates[0] == uploads[0] - 1 == len(steps) - 2):
+        failures.append("release.yml must qualify after audit, immediately before final upload")
+    for label, item in (("build", build), ("qualification", gate), ("upload", upload),
+                        ("publish", publish)):
+        if item.get("continue-on-error", False) is not False:
+            failures.append(f"release.yml:{label} must not ignore failure")
+    for label, item in (("qualification", gate), ("upload", upload)):
+        if any(key in item for key in ("if", "shell", "working-directory")):
+            failures.append(f"release.yml:{label} must retain default successful-step gating")
+    if build.get("timeout-minutes") != 15:
+        failures.append("release.yml build must retain its 15 minute budget")
+    if upload.get("with", {}).get("path") != "dist/":
+        failures.append("release.yml must upload the qualified dist directory")
+    if upload.get("with", {}).get("name") != "python-package-distributions":
+        failures.append("release.yml qualified artifact name changed")
+    if upload.get("with", {}).get("if-no-files-found") != "error":
+        failures.append("release.yml missing distributions must fail upload")
+    if upload.get("with", {}).get("overwrite", False) is not False:
+        failures.append("release.yml qualified artifact producer must not overwrite another artifact")
+    if publish.get("needs") != "build" or publish.get("if") != (
+        "${{ github.event.release.prerelease == false }}"
+    ):
+        failures.append("release.yml publish must depend on a successful non-prerelease build")
+    publication = publish.get("steps") or []
+    if len(publication) != 2 or not (
+        str(publication[0].get("uses", "")).startswith("actions/download-artifact@")
+        and publication[0].get("with") == {
+            "name": "python-package-distributions", "path": "dist/",
+        }
+        and str(publication[1].get("uses", "")).startswith("pypa/gh-action-pypi-publish@")
+        and all("run" not in step and "if" not in step
+                and step.get("continue-on-error", False) is False for step in publication)
+    ):
+        failures.append("release.yml publish must download unchanged artifacts without rebuilding")
+    return failures
+
+
 def main() -> int:
     failures: list[str] = []
     paths = _workflow_paths()
@@ -210,6 +283,7 @@ def main() -> int:
         )
         if environment_name != "pypi":
             failures.append("release.yml:publish must use the pypi environment")
+        failures.extend(release_artifact_gate_failures(release))
 
     disabled = WORKFLOW_DIRECTORY / "ci-public.yml.disabled"
     if disabled.exists():

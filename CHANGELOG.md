@@ -12,9 +12,25 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
-## Unreleased
+## 0.5.5 (2026-09-05)
+
+An evidence-correctness patch: scenario-aware confirmation, authority-bound
+coverage, and exact-wheel release qualification. The compatibility restrictions
+below intentionally refuse evidence that cannot support its recorded claims.
+Generation, framework support, containment and existing baselines are unchanged.
 
 ### Fixed
+
+- Confirmation-before-tool evaluation now distinguishes scenario-supplied,
+  tool-scoped consent, deliberate withholding, and absent context. Compliant
+  completed withholding and optional action refusal can pass without claiming
+  consent was exercised; absent context remains inconclusive with or without
+  a call. Positive consent must bind to a delivered user turn before every
+  consistently recorded call. Prose, run-only flags, ambiguous scope and
+  incomplete no-call evidence cannot produce a pass. This intentionally tightens
+  acceptance of historical unbound consent evidence; see `docs/behavioral-policies.md`.
+
+  **Suite identity:** unchanged; no generated cases, obligations or denominators removed.
 
 - Stored-run comparison now reports `spec_changed` when a tool's risk changes
   between inferred and authoritative, even if its resolved risk values and
@@ -36,6 +52,16 @@ identity**.
   see `docs/behavioral-coverage.md` for recovery and the remaining reference limits.
 
   **Suite identity:** unchanged. New coverage digests/checksums intentionally change.
+
+### Release qualification
+
+- Publishing now qualifies the already-built wheel before uploading release
+  artifacts. Clean base, OpenAI Agents and PydanticAI extra environments check
+  direct-wheel hashes, installed import/version identity, missing-extra refusal
+  and small offline confirmation-contract probes. Artifact bytes are checked
+  again afterward; publishing still downloads those same artifacts without a
+  rebuild. These are release gates, not a substitute for source review or proof
+  of arbitrary target behavior.
 
 ## 0.5.4 (2026-09-02)
 

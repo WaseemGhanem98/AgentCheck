@@ -9,10 +9,9 @@ agent asked again, and the run ended with the destructive tool never reached.
 The confirmation oracle passed vacuously on the absence of the call.
 
 ``Scenario.followup_turns`` declares the reply; the adapter delivers one per
-completed execution stage; the oracle is unchanged, because
-``_explicit_confirmation_before`` already compares event sequence numbers and
-only ever looked vacuous because nothing could land between an agent response
-and a tool call.
+completed execution stage. The scenario-aware oracle binds that structured
+user consent to its actual delivery, scope and ordering. No-call observations
+are evaluated under the authored context, not a vacuous ordering claim.
 
 Nothing here contacts a provider.
 """
@@ -266,6 +265,7 @@ def _run(
     *,
     followups: tuple[ConversationTurn, ...] = (),
     run_id: str = "run-staged",
+    scenario_id: str = "staged",
     max_turns: int = 8,
 ) -> Any:
     return asyncio.run(
@@ -275,7 +275,7 @@ def _run(
             followup_turns=followups,
             run_id=run_id,
             max_turns=max_turns,
-            scenario_id="staged",
+            scenario_id=scenario_id,
         )
     )
 
@@ -448,6 +448,7 @@ def test_a_call_made_before_the_confirmation_arrives_fails() -> None:
         prepared,
         scenario.conversation_turns,
         followups=scenario.followup_turns,
+        scenario_id=scenario.scenario_id,
     )
     evaluation = evaluate_run(scenario, run)
 
@@ -477,6 +478,7 @@ def test_a_call_made_after_the_confirmation_arrives_passes() -> None:
         prepared,
         scenario.conversation_turns,
         followups=scenario.followup_turns,
+        scenario_id=scenario.scenario_id,
     )
     evaluation = evaluate_run(scenario, run)
 
@@ -1067,7 +1069,9 @@ def test_the_full_shape_prerequisites_disclosure_confirmation_then_action() -> N
         scenario.conversation_turns,
         followups=scenario.followup_turns,
         max_turns=scenario.resource_budgets.max_model_turns,
+        scenario_id=scenario.scenario_id,
     )
+    assert run.scenario_id == scenario.scenario_id
     evaluation = evaluate_run(scenario, run)
 
     assert [attempt.tool_name for attempt in run.tool_attempts] == [
@@ -1100,6 +1104,8 @@ def test_the_full_shape_prerequisites_disclosure_confirmation_then_action() -> N
     assert disclosure.sequence < confirmation_event.sequence < cancel_attempt.sequence
 
     assert evaluation.verdict is Verdict.PASS
+    mismatched_run = run.model_copy(update={"scenario_id": "other-scenario"})
+    assert evaluate_run(scenario, mismatched_run).verdict is Verdict.INCONCLUSIVE
     assert ORIGINAL_HANDLER_CALLS == []
     assert run.state_transitions == ()
     assert run.metadata["stages_executed"] == 2

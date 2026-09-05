@@ -102,6 +102,15 @@ jobs:
           print(f"validated release artifacts: {sorted(actual)!r}")
           PY
 
+      - name: Qualify exact release artifacts
+        id: qualify_artifacts
+        env:
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python -I scripts/check_release_artifact.py \
+            --dist-dir dist --version "${RELEASE_TAG#v}" --source-sha "$RELEASE_SHA"
+
       - name: Upload validated distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
