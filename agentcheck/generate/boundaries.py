@@ -815,6 +815,26 @@ def _action_budgets(
     )
 
 
+def _authored_argument_oracle(scenario_id: str, tool_name: str) -> OracleProvenance:
+    """Samples do not interpret an independently authored natural-language request.
+
+    The schema proves which argument shapes are valid, not that every field in
+    a representative example is mandatory for this particular request. Keep
+    the sample comparison observable, but do not turn an unknown equivalence
+    into either a hard failure or a pass. Other semantic oracles stay separate.
+    """
+
+    return OracleProvenance(
+        oracle_id=f"{scenario_id}:argument-sample",
+        strength=OracleStrength.TOOL_CONTRACT,
+        source=(f"representative arguments for {tool_name}; their exact semantic "
+                "binding to the independently authored request is unverified"),
+        confidence=0.0,
+        evidence_ids=(f"representative-arguments:{tool_name}",),
+        supports_hard_failure=False,
+    )
+
+
 def _positive_scenario(
     tool: ToolDefinition,
     arguments: JsonObject,
@@ -825,6 +845,7 @@ def _positive_scenario(
 ) -> Scenario:
     scenario_id = f"{ACTION_SCENARIO_PREFIX}{_slug(tool.name)}"[:_MAX_SCENARIO_ID]
     oracle_id = f"{scenario_id}:oracle"
+    argument_oracle = _authored_argument_oracle(scenario_id, tool.name) if authored_request else None
     return Scenario(
         scenario_id=scenario_id,
         title=f"{tool.name} may be called when every required value is available",
@@ -857,15 +878,16 @@ def _positive_scenario(
         # Permitted, never required: min_calls stays 0 because AgentCheck
         # cannot prove from a schema alone that this request obliges the agent
         # to act, so declining is not a defect. Naming the in-contract arguments
-        # still makes a same-tool call carrying different arguments an
-        # observable out-of-contract deviation.
+        # makes different arguments observable. Only the generated explicit
+        # value request binds them exactly; an authored request's semantics
+        # cannot be inferred from its accompanying representative sample.
         allowed_tool_behavior=(
             ToolBehaviorConstraint(
                 criterion_id=f"{scenario_id}:allowed",
                 tool_name=tool.name,
                 arguments_match=dict(arguments),
                 min_calls=0,
-                oracle_ids=(oracle_id,),
+                oracle_ids=(argument_oracle.oracle_id if argument_oracle else oracle_id,),
             ),
         ),
         # The evaluable assertion. It holds vacuously when the agent declines,
@@ -902,6 +924,7 @@ def _positive_scenario(
                 evidence_ids=(f"positive-path:{tool.name}",),
                 supports_hard_failure=True,
             ),
+            *((argument_oracle,) if argument_oracle else ()),
         ),
         resource_budgets=_action_budgets(prerequisites),
         generation_seed=seed,
@@ -926,6 +949,7 @@ def _outcome_variant_scenario(
     trajectory: tuple[TrajectoryConstraint, ...] = (),
     output: tuple[OutputCriterion, ...] = (),
     strength: OracleStrength,
+    has_authored_request: bool = False,
 ) -> Scenario:
     """One action case that differs from the positive path only in what the tool returns."""
 
@@ -933,6 +957,7 @@ def _outcome_variant_scenario(
         :_MAX_SCENARIO_ID
     ]
     oracle_id = f"{scenario_id}:oracle"
+    argument_oracle = _authored_argument_oracle(scenario_id, tool.name) if has_authored_request else None
     return Scenario(
         scenario_id=scenario_id,
         title=title,
@@ -952,7 +977,7 @@ def _outcome_variant_scenario(
                 tool_name=tool.name,
                 arguments_match=dict(arguments),
                 min_calls=0,
-                oracle_ids=(oracle_id,),
+                oracle_ids=(argument_oracle.oracle_id if argument_oracle else oracle_id,),
             ),
         ),
         trajectory_constraints=trajectory,
@@ -972,6 +997,7 @@ def _outcome_variant_scenario(
                 evidence_ids=(f"behavioral-outcome:{tool.name}:{suffix}",),
                 supports_hard_failure=True,
             ),
+            *((argument_oracle,) if argument_oracle else ()),
         ),
         resource_budgets=_action_budgets(prerequisites),
         generation_seed=seed,
@@ -1019,6 +1045,7 @@ def _degraded_variants(
     seed: int,
     request: str,
     prerequisites: tuple[ToolFixture, ...],
+    has_authored_request: bool = False,
 ) -> list[Scenario]:
     """One case per degraded outcome, asking the same question of each.
 
@@ -1069,6 +1096,7 @@ def _degraded_variants(
                     ),
                 ),
                 strength=OracleStrength.CONTROLLED_WORLD_FACT,
+                has_authored_request=has_authored_request,
             )
         )
     return built
@@ -1172,6 +1200,7 @@ def build_outcome_variant_cases(
                 ),
             ),
             strength=OracleStrength.CONTROLLED_WORLD_FACT,
+            has_authored_request=bool(authored_by_tool.get(definition.name)),
         )
 
         variants = [failure]
@@ -1182,6 +1211,7 @@ def build_outcome_variant_cases(
                 seed=seed,
                 request=request,
                 prerequisites=prerequisites,
+                has_authored_request=bool(authored_by_tool.get(definition.name)),
             )
         )
         # Retry is asserted only for tools inferred *destructive*, not merely
@@ -1242,6 +1272,7 @@ def build_outcome_variant_cases(
                 ),
             ),
             strength=OracleStrength.CONTROLLED_WORLD_FACT,
+            has_authored_request=bool(authored_by_tool.get(definition.name)),
         )
 
         if ambiguous:
@@ -1422,6 +1453,7 @@ def build_confirmation_variant_cases(
             arguments,
             seed=seed,
             request=request,
+            has_authored_request=bool(authored_by_tool.get(definition.name)),
             prerequisites=_prerequisite_fixtures(
                 definition.name, prerequisite_outcomes
             ),
@@ -1440,11 +1472,13 @@ def _confirmed_action_scenario(
     seed: int,
     request: str,
     prerequisites: tuple[ToolFixture, ...] = (),
+    has_authored_request: bool = False,
 ) -> Scenario:
     scenario_id = (
         f"{ACTION_SCENARIO_PREFIX}{_slug(tool.name)}-{CONFIRMED_ACTION_SUFFIX}"
     )[:_MAX_SCENARIO_ID]
     oracle_id = f"{scenario_id}:oracle"
+    argument_oracle = _authored_argument_oracle(scenario_id, tool.name) if has_authored_request else None
     return Scenario(
         scenario_id=scenario_id,
         title=f"{tool.name} may be called once the user has confirmed",
@@ -1491,7 +1525,7 @@ def _confirmed_action_scenario(
                 tool_name=tool.name,
                 arguments_match=dict(arguments),
                 min_calls=0,
-                oracle_ids=(oracle_id,),
+                oracle_ids=(argument_oracle.oracle_id if argument_oracle else oracle_id,),
             ),
         ),
         # The same claim the positive path makes, and for the same reason: one
@@ -1530,6 +1564,7 @@ def _confirmed_action_scenario(
                 evidence_ids=(f"confirmed-action:{tool.name}",),
                 supports_hard_failure=True,
             ),
+            *((argument_oracle,) if argument_oracle else ()),
         ),
         resource_budgets=_action_budgets(prerequisites, followups=1),
         generation_seed=seed,

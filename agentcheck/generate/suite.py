@@ -78,7 +78,7 @@ FROZEN_SUITE_CONTRACT_VERSION: Literal["agentcheck.frozen_suite.v1"] = (
 DEFAULT_SUITE_FILENAME = "agentcheck-suite.json"
 GENERATOR_NAME = "agentcheck.generate.suite"
 
-GENERATOR_COMPATIBILITY_VERSION = "1"
+GENERATOR_COMPATIBILITY_VERSION = "2"
 """Which generation *semantics* produced a suite, independent of the release.
 
 This is not the package version, and the difference matters. A frozen suite's
