@@ -63,7 +63,7 @@ pydantic-ai = [
     # 2.32 through 2.35 verified: identical private-attribute surface and full
     # pydantic_ai adapter test suite passing on every minor in range. See
     # SUPPORTED_SDK_MINOR_RANGE in agentcheck/adapters/pydantic_ai.py.
-    "pydantic-ai-slim>=2.32,<2.36",
+    "pydantic-ai-slim>=2.32,<2.37",
 ]
 all = [
     "agentcheck-ai[openai-agents]",
