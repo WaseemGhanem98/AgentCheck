@@ -10,6 +10,7 @@ from __future__ import annotations
 from agentcheck.baseline.build import baseline_from_loaded
 from agentcheck.baseline.compare import compare_baselines
 from agentcheck.baseline.contract import ComparisonItem, EvaluationBaseline
+from agentcheck.coverage import behavioral_coverage_spec_digest
 from agentcheck.domain import AgentSpec, RiskAuthority
 from agentcheck.errors import ConfigurationError
 from agentcheck.report.load import LoadedRun
@@ -166,8 +167,15 @@ def _caveats(
     # are never comparison inputs.
     if (
         base_snapshot.spec_id != head_snapshot.spec_id
-        or base.behavioral_coverage.spec_digest
-        != head.behavioral_coverage.spec_digest
+        or (
+            base.behavioral_coverage.spec_digest
+            != head.behavioral_coverage.spec_digest
+            # Both runs have already passed binding validation. Normalize
+            # their own recorded specs, so a digest-algorithm upgrade alone
+            # does not masquerade as a specification change.
+            and behavioral_coverage_spec_digest(base.spec)
+            != behavioral_coverage_spec_digest(head.spec)
+        )
         or _risk_authority(base.spec) != _risk_authority(head.spec)
     ):
         caveats.append(ComparabilityCaveat.SPEC_CHANGED)

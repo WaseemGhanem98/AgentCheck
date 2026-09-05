@@ -3,6 +3,7 @@
 from .analyzer import (
     UnmetRiskObligation,
     analyze_behavioral_coverage,
+    behavioral_coverage_spec_digest,
     risk_obligations_for_spec,
     unmet_risk_obligations,
     verify_behavioral_coverage_binding,
@@ -27,6 +28,7 @@ __all__ = [
     "BehavioralDimension",
     "UnmetRiskObligation",
     "analyze_behavioral_coverage",
+    "behavioral_coverage_spec_digest",
     "risk_obligations_for_spec",
     "unmet_risk_obligations",
     "verify_behavioral_coverage_binding",

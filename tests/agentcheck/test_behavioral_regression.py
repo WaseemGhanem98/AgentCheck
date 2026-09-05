@@ -15,9 +15,13 @@ import pytest
 from agentcheck.artifacts import ArtifactStore
 from agentcheck.cli import main
 from agentcheck.coverage import (
+    BehavioralCoverage,
     BehavioralCoverageReferenceScope,
     analyze_behavioral_coverage,
+    behavioral_coverage_spec_digest,
+    verify_behavioral_coverage_binding,
 )
+from agentcheck.coverage.analyzer import _legacy_spec_digest
 from agentcheck.domain import (
     AgentProperty,
     AgentSpec,
@@ -46,6 +50,7 @@ from agentcheck.domain import (
     ToolRiskSpec,
     ToolsSpec,
     Verdict,
+    canonical_hash,
     utc_now,
 )
 from agentcheck.errors import ConfigurationError
@@ -242,6 +247,8 @@ def _write_run(
     git_revision: str | None = "revision-a",
     selection: SelectionPlan | None = None,
     assertion_id: str = "a1",
+    coverage: BehavioralCoverage | None = None,
+    legacy_coverage: bool = False,
 ) -> Path:
     spec = spec or _spec()
     scenarios = tuple(scenario for scenario, _ in cases)
@@ -273,9 +280,11 @@ def _write_run(
         if selection is not None and selection.excluded_ids
         else BehavioralCoverageReferenceScope.COMPLETE
     )
-    coverage = analyze_behavioral_coverage(
+    coverage = coverage or analyze_behavioral_coverage(
         spec, scenarios, reference_scope=reference_scope
     )
+    if legacy_coverage:
+        coverage = _as_legacy_coverage(coverage, spec)
     artifacts = ArtifactStore(root, ".agentcheck", run_id)
     artifacts.write_json("agent-spec.json", spec)
     artifacts.write_json(
@@ -315,6 +324,18 @@ def _write_run(
     artifacts.write_json("summary.json", summary)
     artifacts.write_text("report.html", "<html><body>placeholder</body></html>")
     return artifacts.root
+
+
+def _as_legacy_coverage(
+    coverage: BehavioralCoverage, spec: AgentSpec
+) -> BehavioralCoverage:
+    # Preserve the historical payload shape, checksum and semantic rows. The
+    # original F1 test below independently pins the pre-fix writer's digest.
+    return BehavioralCoverage.model_validate({
+        **coverage.model_dump(),
+        "spec_digest": _legacy_spec_digest(spec),
+        "fingerprint": "",
+    })
 
 
 def _selection_for(selected: Sequence[str], excluded: Sequence[str]) -> SelectionPlan:
@@ -709,9 +730,12 @@ def test_risk_authority_change_is_disclosed_with_identical_v1_digests(
     if reverse:
         base_spec, head_spec = head_spec, base_spec
     cases = tuple((scenario, Verdict.PASS) for scenario in suite)
-    base_dir = _write_run(tmp_path, "base", cases, spec=base_spec)
+    base_dir = _write_run(
+        tmp_path, "base", cases, spec=base_spec, legacy_coverage=True
+    )
     head_dir = _write_run(
-        tmp_path, "head", cases, spec=head_spec, git_revision="revision-b"
+        tmp_path, "head", cases, spec=head_spec, git_revision="revision-b",
+        legacy_coverage=True,
     )
     base = load_stored_run(tmp_path, run_id="base")
     head = load_stored_run(tmp_path, run_id="head")
@@ -1049,3 +1073,255 @@ def test_comparison_never_reads_the_configured_suite_file(
 
     after = _compare(tmp_path, "base", "head")
     assert after == before
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("axes", [(0,), (1,), (0, 1)])
+@pytest.mark.parametrize("risk_value", [False, True])
+def test_selected_v2_coverage_binds_each_effective_authority_axis(
+    suite: tuple[Scenario, ...], reverse: bool, axes: tuple[int, ...],
+    risk_value: bool,
+) -> None:
+    non_authoritative = RiskAuthority.INFERRED if risk_value else RiskAuthority.UNKNOWN
+    before = [non_authoritative, non_authoritative]
+    after = before.copy()
+    for axis in axes:
+        after[axis] = RiskAuthority.DEVELOPER_DECLARED
+    specs = [
+        _risk_spec(
+            authorities=(values[0], values[1]),
+            state_changing=risk_value, destructive=risk_value,
+        )
+        for values in (before, after)
+    ]
+    if reverse:
+        specs.reverse()
+    actual, reference = suite[:1], suite[:2]
+    coverage = analyze_behavioral_coverage(
+        specs[0], actual, reference_scenarios=reference
+    )
+    original = coverage.canonical_json()
+    assert coverage.spec_digest.startswith("coverage-spec.v2:sha256:")
+    assert _legacy_spec_digest(specs[0]) == _legacy_spec_digest(specs[1])
+    verify_behavioral_coverage_binding(coverage, specs[0], actual)
+    with pytest.raises(ValueError, match="spec_digest"):
+        verify_behavioral_coverage_binding(coverage, specs[1], actual)
+    assert coverage.reference_scenario_count == 2
+    assert coverage.canonical_json() == original
+
+
+def test_v2_digest_pins_algorithm_and_historical_projection() -> None:
+    spec = _risk_spec(authorities=(RiskAuthority.DEVELOPER_DECLARED,) * 2)
+    expected = canonical_hash({
+        "algorithm": "coverage-spec.v2",
+        "legacy_spec_digest": "sha256:6d0ee564eb4c52e3c7cc166ac0615f6c817c1fee45a7288ba8d91692e9dba6db",
+        "risk_authority": [["purge_records", True, True]],
+    })
+    assert behavioral_coverage_spec_digest(spec) == f"coverage-spec.v2:{expected}"
+
+
+def test_v2_authority_binding_ignores_only_equivalent_metadata() -> None:
+    legacy_fallback = _risk_spec(authorities=None, schema_authoritative=True)
+    declared = _risk_spec(
+        authorities=(RiskAuthority.DEVELOPER_DECLARED,) * 2,
+        schema_authoritative=True,
+    )
+    framework = _risk_spec(
+        authorities=(RiskAuthority.FRAMEWORK_AUTHORITATIVE,) * 2,
+        schema_authoritative=True,
+    )
+    assert behavioral_coverage_spec_digest(legacy_fallback) == (
+        behavioral_coverage_spec_digest(declared)
+    ) == behavioral_coverage_spec_digest(framework)
+    unknown = _risk_spec(
+        authorities=(RiskAuthority.UNKNOWN,) * 2, state_changing=False, destructive=False
+    )
+    inferred = _risk_spec(
+        authorities=(RiskAuthority.INFERRED,) * 2, state_changing=False, destructive=False
+    )
+    declared_false = _risk_spec(
+        authorities=(RiskAuthority.DEVELOPER_DECLARED,) * 2,
+        state_changing=False, destructive=False,
+    )
+    assert behavioral_coverage_spec_digest(unknown) == behavioral_coverage_spec_digest(inferred)
+    assert behavioral_coverage_spec_digest(unknown) != behavioral_coverage_spec_digest(declared_false)
+    orphan = inferred.tool_risk.items[0].model_copy(update={"tool_name": "not-declared"})
+    with_orphan = inferred.model_copy(update={"tool_risk": ToolRiskSpec(
+        items=(*inferred.tool_risk.items, orphan)
+    )})
+    assert behavioral_coverage_spec_digest(inferred) == behavioral_coverage_spec_digest(with_orphan)
+    doubled = inferred.model_copy(update={"tools": ToolsSpec(
+        items=(*inferred.tools.items, *inferred.tools.items)
+    )})
+    assert behavioral_coverage_spec_digest(inferred) != behavioral_coverage_spec_digest(doubled)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("changed_authority", [False, True])
+def test_mixed_digest_algorithms_compare_validated_semantics(
+    tmp_path: Path, suite: tuple[Scenario, ...], reverse: bool,
+    changed_authority: bool,
+) -> None:
+    first = _risk_spec(authorities=(RiskAuthority.INFERRED,) * 2)
+    second = _risk_spec(authorities=(
+        RiskAuthority.DEVELOPER_DECLARED if changed_authority else RiskAuthority.INFERRED,
+    ) * 2)
+    cases = tuple((scenario, Verdict.PASS) for scenario in suite)
+    _write_run(tmp_path, "legacy", cases, spec=first, legacy_coverage=True)
+    _write_run(tmp_path, "current", cases, spec=second, git_revision="revision-b")
+    original = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    base, head = ("current", "legacy") if reverse else ("legacy", "current")
+    result = compare_stored_runs(tmp_path, base_run_id=base, head_run_id=head)
+    assert (ComparabilityCaveat.SPEC_CHANGED in result.comparison.caveats) is changed_authority
+    assert result.exit_code == 0
+    assert all(item.category == "unchanged" for item in result.comparison.items)
+    assert {path: path.read_bytes() for path in original} == original
+
+
+def test_legacy_reference_rederivation_preserves_checksum_and_denominator(
+    suite: tuple[Scenario, ...],
+) -> None:
+    spec = _risk_spec(authorities=(RiskAuthority.INFERRED,) * 2)
+    actual, reference = suite[:1], suite[:2]
+    coverage = _as_legacy_coverage(analyze_behavioral_coverage(
+        spec, actual, reference_scenarios=reference, suite_fingerprint="frozen-reference"
+    ), spec)
+    original = coverage.canonical_json()
+    with pytest.raises(ValueError, match="legacy_spec_digest_requires_complete_reference"):
+        verify_behavioral_coverage_binding(coverage, spec, actual)
+    verify_behavioral_coverage_binding(
+        coverage, spec, actual, reference_scenarios=tuple(reversed(reference)),
+        suite_fingerprint="frozen-reference",
+    )
+    for wrong_reference in (actual, (reference[0], reference[0]), suite):
+        with pytest.raises(ValueError, match="reference"):
+            verify_behavioral_coverage_binding(
+                coverage, spec, actual, reference_scenarios=wrong_reference
+            )
+    with pytest.raises(ValueError, match="suite_fingerprint"):
+        verify_behavioral_coverage_binding(
+            coverage, spec, actual, reference_scenarios=reference,
+            suite_fingerprint="wrong-frozen-reference",
+        )
+    substituted = _risk_spec(authorities=(RiskAuthority.DEVELOPER_DECLARED,) * 2)
+    with pytest.raises(ValueError, match="derived_coverage"):
+        verify_behavioral_coverage_binding(
+            coverage, substituted, actual, reference_scenarios=reference
+        )
+    assert coverage.reference_scenario_count == 2
+    assert coverage.canonical_json() == original
+
+
+@pytest.mark.parametrize("algorithm", [
+    "coverage-spec.v3:sha256:", "coverage-spec.v2:SHA256:",
+    "coverage-spec.v2:", "SHA256:", "sha256:", "",
+])
+def test_unknown_or_malformed_digest_algorithm_never_falls_back(
+    tmp_path: Path, suite: tuple[Scenario, ...], algorithm: str,
+) -> None:
+    spec = _risk_spec(authorities=(RiskAuthority.DEVELOPER_DECLARED,) * 2)
+    coverage = analyze_behavioral_coverage(spec, suite)
+    suffix = "f" * (63 if algorithm == "sha256:" else 64)
+    malformed = BehavioralCoverage.model_validate({
+        **coverage.model_dump(), "spec_digest": algorithm + suffix, "fingerprint": "",
+    })
+    directory = _write_run(
+        tmp_path, "unknown-algorithm", tuple((s, Verdict.PASS) for s in suite),
+        spec=spec, coverage=malformed,
+    )
+    original = {path: path.read_bytes() for path in directory.iterdir() if path.is_file()}
+    with pytest.raises(ConfigurationError, match="spec_digest algorithm"):
+        load_stored_run(tmp_path, run_id="unknown-algorithm")
+    assert {path: path.read_bytes() for path in original} == original
+
+
+def test_v2_cannot_downgrade_or_ignore_a_corrupt_checksum(
+    suite: tuple[Scenario, ...],
+) -> None:
+    spec = _risk_spec(authorities=(RiskAuthority.DEVELOPER_DECLARED,) * 2)
+    actual, reference = suite[:1], suite[:2]
+    coverage = analyze_behavioral_coverage(spec, actual, reference_scenarios=reference)
+    downgrade = _as_legacy_coverage(coverage, spec)
+    with pytest.raises(ValueError, match="legacy_spec_digest_requires_complete_reference"):
+        verify_behavioral_coverage_binding(downgrade, spec, actual)
+    wrong_digest = BehavioralCoverage.model_validate({
+        **coverage.model_dump(),
+        "spec_digest": _legacy_spec_digest(spec).replace("sha256:", "coverage-spec.v2:sha256:"),
+        "fingerprint": "",
+    })
+    with pytest.raises(ValueError, match="spec_digest"):
+        verify_behavioral_coverage_binding(wrong_digest, spec, actual)
+    # model_copy deliberately bypasses contract validation: the binding gate
+    # must still independently verify an already-instantiated object's checksum.
+    corrupt = coverage.model_copy(update={"fingerprint": "sha256:" + "0" * 64})
+    with pytest.raises(ValueError, match="fingerprint"):
+        verify_behavioral_coverage_binding(corrupt, spec, actual)
+
+
+@pytest.mark.parametrize("consumer", ["load", "render", "baseline", "baseline-check", "finding", "compare"])
+@pytest.mark.parametrize("failure", ["legacy-selected", "authority-substitution"])
+def test_unverifiable_selected_coverage_is_rejected_by_all_stored_consumers(
+    tmp_path: Path, suite: tuple[Scenario, ...], consumer: str, failure: str,
+) -> None:
+    from agentcheck.baseline.service import check_baseline, create_baseline
+    from agentcheck.report.load import render_stored_run
+    from agentcheck.review.service import record_finding_review
+
+    spec = _risk_spec(authorities=(RiskAuthority.INFERRED,) * 2)
+    actual, reference = suite[:1], suite[:2]
+    coverage = analyze_behavioral_coverage(spec, actual, reference_scenarios=reference)
+    directory = _write_run(
+        tmp_path, "selected", ((actual[0], Verdict.PASS),), spec=spec,
+        coverage=coverage, legacy_coverage=failure == "legacy-selected",
+        selection=_selection_for([actual[0].scenario_id], [reference[1].scenario_id]),
+    )
+    if failure == "authority-substitution":
+        assert load_stored_run(tmp_path, run_id="selected").behavioral_coverage == coverage
+        substituted = _risk_spec(authorities=(RiskAuthority.DEVELOPER_DECLARED,) * 2)
+        (directory / "agent-spec.json").write_text(substituted.canonical_json())
+    if consumer == "baseline-check":
+        _write_run(tmp_path, "baseline-source", ((actual[0], Verdict.PASS),), spec=spec)
+        create_baseline(tmp_path, run_id="baseline-source", out="comparison-baseline.json")
+    original = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    reason = "legacy_spec_digest_requires_complete_reference" if failure == "legacy-selected" else "spec_digest"
+    with pytest.raises(ConfigurationError, match=reason):
+        if consumer == "load":
+            load_stored_run(tmp_path, run_id="selected")
+        elif consumer == "render":
+            render_stored_run(tmp_path, run_id="selected")
+        elif consumer == "baseline":
+            create_baseline(tmp_path, run_id="selected")
+        elif consumer == "baseline-check":
+            check_baseline(
+                tmp_path, baseline_path="comparison-baseline.json", run_id="selected"
+            )
+        elif consumer == "finding":
+            record_finding_review(
+                tmp_path, run_id="selected", finding_id="not-reached", decision="accepted"
+            )
+        else:
+            compare_stored_runs(tmp_path, base_run_id="selected", head_run_id="selected")
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == original
+
+
+def test_selected_summary_originally_without_coverage_remains_explicitly_limited(
+    tmp_path: Path, suite: tuple[Scenario, ...],
+) -> None:
+    spec = _risk_spec(authorities=None, schema_authoritative=True)
+    actual, reference = suite[:1], suite[:2]
+    directory = _write_run(
+        tmp_path, "pre-coverage-summary", ((actual[0], Verdict.PASS),), spec=spec,
+        selection=_selection_for([actual[0].scenario_id], [reference[1].scenario_id]),
+    )
+    # Construct the historical pre-coverage summary shape, not a recovery path
+    # for a recorded larger denominator; the product never erases this field.
+    path = directory / "summary.json"
+    summary = json.loads(path.read_text())
+    summary.pop("behavioral_coverage")
+    path.write_text(json.dumps(summary))
+    original = {path: path.read_bytes() for path in directory.iterdir() if path.is_file()}
+    coverage = load_stored_run(tmp_path, run_id="pre-coverage-summary").behavioral_coverage
+    assert coverage.reference_scope is BehavioralCoverageReferenceScope.AVAILABLE_SCENARIOS_ONLY
+    assert coverage.reference_scenario_count == coverage.scenario_count == 1
+    assert coverage.spec_digest.startswith("coverage-spec.v2:sha256:")
+    assert {path: path.read_bytes() for path in original} == original
