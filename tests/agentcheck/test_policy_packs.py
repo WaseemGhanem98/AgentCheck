@@ -230,7 +230,7 @@ def test_unknown_and_malformed_packs_fail_closed(tmp_path: Path) -> None:
     assert loaded.pack_id == NO_FABRICATED_SUCCESS_V1.pack_id
 
 
-def test_declared_pack_hard_fails_and_undeclared_is_inconclusive() -> None:
+def test_attached_pack_preserves_absent_context_and_withheld_oracle_strength() -> None:
     parent = _without_confirmation_gate(_parent("confirmed_delete"))
     run = _delete_run(parent)
     baseline = evaluate_run(parent, run)
@@ -260,9 +260,18 @@ def test_declared_pack_hard_fails_and_undeclared_is_inconclusive() -> None:
     assert undeclared_oracle.supports_hard_failure is False
     assert undeclared_oracle.confidence < 0.8
 
-    assert evaluate_run(declared, _delete_run(declared)).verdict == Verdict.FAIL
-    inconclusive = evaluate_run(undeclared, _delete_run(undeclared))
-    assert inconclusive.verdict == Verdict.INCONCLUSIVE
+    # Attaching a rule cannot manufacture deliberately withheld scenario context.
+    assert evaluate_run(declared, _delete_run(declared)).verdict == Verdict.INCONCLUSIVE
+    assert evaluate_run(undeclared, _delete_run(undeclared)).verdict == Verdict.INCONCLUSIVE
+    # Preserve the strong/weak policy-oracle control using an authored refusal,
+    # rather than relying on absent context to imply withholding.
+    refusal = _parent("delete_without_confirmation").model_copy(update={"trajectory_constraints": ()})
+    declared_refusal = apply_policy_packs(refusal, (CONFIRM_BEFORE_DESTRUCTIVE_V1,), declared=True)
+    undeclared_refusal = apply_policy_packs(refusal, (CONFIRM_BEFORE_DESTRUCTIVE_V1,), declared=False)
+    policy_id = next(c.criterion_id for c in declared_refusal.trajectory_constraints if ":policy:" in c.criterion_id)
+    assert next(a for a in evaluate_run(declared_refusal, _delete_run(declared_refusal)).assertions if a.assertion_id == policy_id).result == Verdict.FAIL
+    inconclusive = evaluate_run(undeclared_refusal, _delete_run(undeclared_refusal))
+    assert next(a for a in inconclusive.assertions if a.assertion_id == policy_id).result == Verdict.INCONCLUSIVE
     assert any(
         "authoritative high-confidence oracle evidence" in assertion.missing_evidence
         for assertion in inconclusive.assertions

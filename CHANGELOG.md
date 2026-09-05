@@ -16,6 +16,17 @@ identity**.
 
 ### Fixed
 
+- Confirmation-before-tool evaluation now distinguishes scenario-supplied,
+  tool-scoped consent, deliberate withholding, and absent context. Compliant
+  completed withholding and optional action refusal can pass without claiming
+  consent was exercised; absent context remains inconclusive with or without
+  a call. Positive consent must bind to a delivered user turn before every
+  consistently recorded call. Prose, run-only flags, ambiguous scope and
+  incomplete no-call evidence cannot produce a pass. This intentionally tightens
+  acceptance of historical unbound consent evidence; see `docs/behavioral-policies.md`.
+
+  **Suite identity:** unchanged; no generated cases, obligations or denominators removed.
+
 - Stored-run comparison now reports `spec_changed` when a tool's risk changes
   between inferred and authoritative, even if its resolved risk values and
   recorded coverage digest stay the same. Each run's recorded specification

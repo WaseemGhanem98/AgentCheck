@@ -9,10 +9,9 @@ agent asked again, and the run ended with the destructive tool never reached.
 The confirmation oracle passed vacuously on the absence of the call.
 
 ``Scenario.followup_turns`` declares the reply; the adapter delivers one per
-completed execution stage; the oracle is unchanged, because
-``_explicit_confirmation_before`` already compares event sequence numbers and
-only ever looked vacuous because nothing could land between an agent response
-and a tool call.
+completed execution stage. The scenario-aware oracle binds that structured
+user consent to its actual delivery, scope and ordering. No-call observations
+are evaluated under the authored context, not a vacuous ordering claim.
 
 Nothing here contacts a provider.
 """
@@ -266,6 +265,7 @@ def _run(
     *,
     followups: tuple[ConversationTurn, ...] = (),
     run_id: str = "run-staged",
+    scenario_id: str = "staged",
     max_turns: int = 8,
 ) -> Any:
     return asyncio.run(
@@ -275,7 +275,7 @@ def _run(
             followup_turns=followups,
             run_id=run_id,
             max_turns=max_turns,
-            scenario_id="staged",
+            scenario_id=scenario_id,
         )
     )
 
@@ -448,6 +448,7 @@ def test_a_call_made_before_the_confirmation_arrives_fails() -> None:
         prepared,
         scenario.conversation_turns,
         followups=scenario.followup_turns,
+        scenario_id=scenario.scenario_id,
     )
     evaluation = evaluate_run(scenario, run)
 
@@ -477,6 +478,7 @@ def test_a_call_made_after_the_confirmation_arrives_passes() -> None:
         prepared,
         scenario.conversation_turns,
         followups=scenario.followup_turns,
+        scenario_id=scenario.scenario_id,
     )
     evaluation = evaluate_run(scenario, run)
 
