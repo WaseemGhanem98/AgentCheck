@@ -12,9 +12,22 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
-## Unreleased
+## 0.5.6 (2026-09-05)
 
 ### Fixed
+
+- Ambiguous-timeout retry evaluation no longer certifies PASS when a missing
+  earlier matching call's outcome could change the verdict. It now reports
+  INCONCLUSIVE with the missing attempt IDs. A positively observed retry still
+  fails when later outcomes are absent; optional no-call cases and unrelated
+  missing outcomes retain their existing behavior. Infrastructure precedence,
+  oracle authority, argument comparison and retry ordering are unchanged.
+
+  **Compatibility restriction:** partial public run records previously accepted
+  as PASS can now be inconclusive. No stored artifact is rewritten, and no claim
+  is made that a supported adapter produced these incomplete records.
+
+  This evaluator-only retry correction does not change generation or denominators.
 
 - Generated action, fault and confirmed-action cases no longer treat
   representative argument values as an authoritative interpretation of an
@@ -24,10 +37,18 @@ identity**.
   violations keep their separate authority. No tool-specific normalization or
   guessed optional/default semantics is introduced.
 
-  **Suite identity:** generator compatibility version changes from1 to2.
+  **Suite identity for this release:** generator compatibility changes from 1 to 2
+  because of the authored-request argument-provenance correction above.
   Corrected generated cases carry distinct argument-sample provenance. Existing
   frozen suites, stored runs and baselines are not rewritten; regenerate and
   review a suite to adopt the change. No framework or containment expansion.
+
+### Release qualification
+
+- The existing same-wheel installed probe additionally checks incomplete retry
+  evidence and authored-request argument authority, including retained strict
+  argument/schema failures and known timeout violations. Build, installation,
+  hashing, network denial, receipt binding and publishing transport are unchanged.
 
 ## 0.5.5 (2026-09-05)
 

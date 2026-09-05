@@ -384,6 +384,7 @@ def test_semantic_smoke_enforces_fixed_verdict_and_evidence_expectations(monkeyp
     import agentcheck.evaluate
 
     authored = gate.confirmation_fixture
+    actual_evaluate = agentcheck.evaluate.evaluate_run
     state = {}
 
     def fixture(context, call, **kwargs):
@@ -395,6 +396,8 @@ def test_semantic_smoke_enforces_fixed_verdict_and_evidence_expectations(monkeyp
         return result
 
     def evaluate(scenario, record):
+        if record.run_id != "release-smoke":
+            return actual_evaluate(scenario, record)
         context, call = state["context"], state["call"]
         expected = "INCONCLUSIVE" if context == "absent" else (
             "FAIL" if context == "withheld" and call else "PASS"
@@ -416,6 +419,138 @@ def test_semantic_smoke_enforces_fixed_verdict_and_evidence_expectations(monkeyp
         )
 
     monkeypatch.setattr(gate, "confirmation_fixture", fixture)
+    monkeypatch.setattr(agentcheck.evaluate, "evaluate_run", evaluate)
+    if mutation == "none":
+        assert gate.semantic_smoke() == list(gate.SEMANTIC_CASES)
+    else:
+        with pytest.raises(ValueError):
+            gate.semantic_smoke()
+
+
+@pytest.mark.parametrize("omitted", [None, 0, 1])
+def test_retry_fixture_is_coherent_and_omits_only_the_named_outcome(omitted):
+    from agentcheck.evaluate.confirmation import observed_completion, tool_evidence_is_consistent
+
+    scenario, record = gate.ambiguous_retry_fixture(omitted)
+    assert tool_evidence_is_consistent(scenario, record)
+    assert observed_completion(scenario, record)
+    assert len(record.tool_attempts) == 2
+    assert [o.attempt_id for o in record.tool_outcomes] == [f"a{i}" for i in (0, 1) if i != omitted]
+    assert [o.status.value for o in record.tool_outcomes] == [s for i, s in enumerate(("timeout", "success")) if i != omitted]
+    assert {e.event_id for e in record.events if e.event_type.value == "tool_result"} == {o.event_id for o in record.tool_outcomes}
+    if omitted != 0:
+        assert record.tool_outcomes[0].error.code == "ambiguous_timeout"
+
+
+@pytest.mark.parametrize("mutation", ["none", "false-pass", "missing-evidence",
+                                      "lost-known-fail", "missing-criterion", "missing-retry-id"])
+def test_retry_release_smoke_rejects_wrong_verdicts_and_missing_evidence(monkeypatch, mutation):
+    import agentcheck.evaluate
+    from agentcheck.domain import Verdict
+
+    actual = agentcheck.evaluate.evaluate_run
+
+    def evaluate(scenario, record):
+        result = actual(scenario, record)
+        if scenario.scenario_id != "release-ambiguous-retry" or mutation == "none":
+            return result
+        assertion = next(a for a in result.assertions if a.assertion_id == "retry")
+        missing_first = [o.attempt_id for o in record.tool_outcomes] == ["a1"]
+        missing_second = [o.attempt_id for o in record.tool_outcomes] == ["a0"]
+        verdict = result.verdict
+        if missing_first and mutation == "false-pass":
+            verdict = Verdict.PASS
+            assertion = assertion.model_copy(update={"result": verdict})
+        if missing_first and mutation == "missing-evidence":
+            assertion = assertion.model_copy(update={"missing_evidence": ()})
+        if missing_second and mutation == "lost-known-fail":
+            verdict = Verdict.INCONCLUSIVE
+            assertion = assertion.model_copy(update={"result": verdict})
+        assertions = tuple(assertion if a.assertion_id == "retry" else a for a in result.assertions)
+        if mutation == "missing-criterion":
+            assertions = tuple(a for a in assertions if a.assertion_id != "retry")
+        evidence = result.evidence
+        if mutation == "missing-retry-id" and not missing_first:
+            evidence = tuple(e.model_copy(update={"data": {**e.data, "retry_attempt_ids": []}})
+                             if e.evidence_id in assertion.supporting_evidence_ids else e for e in evidence)
+        return result.model_copy(update={"verdict": verdict, "assertions": assertions, "evidence": evidence})
+
+    monkeypatch.setattr(agentcheck.evaluate, "evaluate_run", evaluate)
+    if mutation == "none":
+        assert gate.semantic_smoke() == [
+            "withheld-no-call", "withheld-call", "absent-no-call", "absent-call",
+            "prose-not-consent", "established-consent", "established-no-call",
+            "ambiguous-retry-complete", "ambiguous-retry-missing-origin",
+            "ambiguous-retry-known-violation",
+            "authored-sample-mismatch", "generated-exact-mismatch", "authored-schema-failure",
+            "authored-retry-missing-origin", "authored-retry-known-violation",
+        ]
+    else:
+        with pytest.raises(ValueError):
+            gate.semantic_smoke()
+
+
+@pytest.mark.parametrize("kind", [
+    "authored-sample-mismatch", "generated-exact-mismatch", "authored-schema-failure",
+    "authored-retry-missing-origin", "authored-retry-known-violation",
+])
+def test_argument_authority_release_fixtures_bind_generated_contract_and_record(kind):
+    from agentcheck.evaluate.confirmation import observed_completion, tool_evidence_is_consistent
+
+    scenario, record = gate.argument_authority_fixture(kind)
+    assert tool_evidence_is_consistent(scenario, record)
+    assert observed_completion(scenario, record)
+    sample_oracles = [o for o in scenario.oracle_provenance if o.oracle_id.endswith(":argument-sample")]
+    assert len(sample_oracles) == (0 if kind == "generated-exact-mismatch" else 1)
+    if sample_oracles:
+        assert not sample_oracles[0].supports_hard_failure and sample_oracles[0].confidence == 0.0
+        assert scenario.allowed_tool_behavior[0].oracle_ids == (sample_oracles[0].oracle_id,)
+    assert record.tool_attempts[0].arguments == {
+        "record_id": 3 if kind == "authored-schema-failure" else "record-1", "note": "", "labels": None,
+    }
+    if "retry" in kind:
+        expected_ids = ["a1"] if kind == "authored-retry-missing-origin" else ["a0"]
+        assert [o.attempt_id for o in record.tool_outcomes] == expected_ids
+        assert len(record.tool_attempts) == 2
+
+
+@pytest.mark.parametrize("mutation", [
+    "none", "hard-sample", "false-pass", "missing-criterion", "missing-evidence",
+    "missing-values", "missing-schema", "missing-retry", "missing-retry-data",
+])
+def test_argument_authority_release_smoke_rejects_wrong_verdicts_and_missing_evidence(monkeypatch, mutation):
+    import agentcheck.evaluate
+    from agentcheck.domain import Verdict
+
+    actual = agentcheck.evaluate.evaluate_run
+
+    def evaluate(scenario, record):
+        result = actual(scenario, record)
+        if record.run_id != "release-authority" or mutation == "none":
+            return result
+        criterion = "tool_contract:cancel_record:unexpected_arguments"
+        assertions, evidence, verdict = list(result.assertions), list(result.evidence), result.verdict
+        for index, assertion in enumerate(assertions):
+            if assertion.assertion_id == criterion:
+                if mutation in {"hard-sample", "false-pass"}:
+                    verdict = Verdict.FAIL if mutation == "hard-sample" else Verdict.PASS
+                    assertions[index] = assertion.model_copy(update={"result": verdict})
+                if mutation == "missing-evidence":
+                    assertions[index] = assertion.model_copy(update={"missing_evidence": ()})
+                if mutation == "missing-values":
+                    evidence = [e.model_copy(update={"data": {}})
+                                if e.evidence_id in assertion.supporting_evidence_ids else e for e in evidence]
+            if mutation == "missing-retry-data" and assertion.assertion_id.endswith(":no_retry"):
+                evidence = [e.model_copy(update={"data": {}})
+                            if e.evidence_id in assertion.supporting_evidence_ids else e for e in evidence]
+        if mutation == "missing-criterion":
+            assertions = [a for a in assertions if a.assertion_id != criterion]
+        if mutation == "missing-schema":
+            assertions = [a for a in assertions if not a.assertion_id.startswith("schema:")]
+        if mutation == "missing-retry":
+            assertions = [a for a in assertions if not a.assertion_id.endswith(":no_retry")]
+        return result.model_copy(update={"verdict": verdict, "assertions": tuple(assertions), "evidence": tuple(evidence)})
+
     monkeypatch.setattr(agentcheck.evaluate, "evaluate_run", evaluate)
     if mutation == "none":
         assert gate.semantic_smoke() == list(gate.SEMANTIC_CASES)

@@ -225,3 +225,28 @@ def test_separately_authored_exact_argument_contract_remains_strict() -> None:
     result = evaluate_run(scenario, _run(scenario, (ALTERNATIVE,)))
     assertion = next(a for a in result.assertions if a.assertion_id.endswith(":unexpected_arguments"))
     assert assertion.result is Verdict.FAIL and result.verdict is Verdict.FAIL
+
+
+@pytest.mark.parametrize("omitted,expected", [
+    ((0,), Verdict.INCONCLUSIVE), ((0, 1), Verdict.INCONCLUSIVE), ((1,), Verdict.FAIL),
+])
+def test_sample_uncertainty_does_not_mask_missing_origin_or_known_retry(omitted, expected) -> None:
+    scenario = _case("ambiguous-outcome")
+    complete = _run(scenario, (ALTERNATIVE, ALTERNATIVE))
+    removed_ids = {complete.tool_outcomes[i].event_id for i in omitted}
+    data = complete.model_dump(mode="json")
+    data["tool_outcomes"] = [o for i, o in enumerate(data["tool_outcomes"]) if i not in omitted]
+    data["events"] = [e for e in data["events"] if e["event_id"] not in removed_ids]
+    record = CanonicalRun.model_validate_json(json.dumps(data))
+    assert tool_evidence_is_consistent(scenario, record) and observed_completion(scenario, record)
+    result = evaluate_run(scenario, record)
+    arguments = next(a for a in result.assertions if a.assertion_id.endswith(":unexpected_arguments"))
+    retry = next(a for a in result.assertions if a.assertion_id.endswith(":no_retry"))
+    assert arguments.result is Verdict.INCONCLUSIVE and arguments.missing_evidence
+    assert retry.result is expected and result.verdict is expected
+    evidence = next(e for e in result.evidence if e.evidence_id in retry.supporting_evidence_ids)
+    if expected is Verdict.INCONCLUSIVE:
+        assert retry.missing_evidence and evidence.data["missing_outcome_attempt_ids"] == ["a0"]
+        assert evidence.data["retry_attempt_ids"] == []
+    else:
+        assert not retry.missing_evidence and evidence.data["retry_attempt_ids"] == ["a1"]

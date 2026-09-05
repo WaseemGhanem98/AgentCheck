@@ -148,6 +148,49 @@ def test_ambiguous_case_leaves_the_outcome_unknown_then_allows_a_retry() -> None
     assert TrajectoryConstraintKind.NO_RETRY_AFTER_AMBIGUOUS_TIMEOUT in kinds
 
 
+def test_generated_ambiguous_case_evaluates_observed_and_missing_outcomes() -> None:
+    """Use the actual generated fixtures and gateway, never the original tool."""
+    from agentcheck.domain import (
+        CanonicalEvent, CanonicalEventType, CanonicalRun, RunTermination, Verdict, utc_now,
+    )
+    from agentcheck.evaluate import evaluate_run
+    from agentcheck.evaluate.confirmation import observed_completion, tool_evidence_is_consistent
+    from agentcheck.runner import ToolGateway
+
+    spec = _spec(cancel_reservation)
+    scenario = next(s for s in build_outcome_variant_cases(spec, seed=SEED)
+                    if s.scenario_id.endswith("ambiguous-outcome"))
+    now = utc_now()
+    gateway = ToolGateway([item.value for item in spec.tools.items], scenario.tool_fixtures,
+                          budgets=scenario.resource_budgets, run_id="generated", now=lambda: now)
+    for _ in range(2):
+        gateway.invoke("cancel_reservation", scenario.allowed_tool_behavior[0].arguments_match)
+    turn = scenario.conversation_turns[0]
+    events = (CanonicalEvent(
+        event_id="user", run_id="generated", sequence=0, timestamp=now,
+        event_type=CanonicalEventType.USER_TURN,
+        payload={"turn_id": turn.turn_id, "text": turn.content}, metadata={"scenario_input": True},
+    ), *(e.model_copy(update={"sequence": e.sequence + 1}) for e in gateway.events), CanonicalEvent(
+        event_id="final", run_id="generated", sequence=len(gateway.events) + 1, timestamp=now,
+        event_type=CanonicalEventType.FINAL_OUTPUT, payload={"text": "Outcome not established."},
+    ))
+    complete = CanonicalRun(
+        run_id="generated", scenario_id=scenario.scenario_id, target_id="trusted-generated-control",
+        started_at=now, ended_at=now, termination=RunTermination.COMPLETED, events=events,
+        tool_attempts=tuple(a.model_copy(update={"sequence": i}) for i, a in enumerate(gateway.attempts)),
+        tool_outcomes=gateway.outcomes, final_output="Outcome not established.",
+    )
+    for omitted, expected in [(None, Verdict.FAIL), (0, Verdict.INCONCLUSIVE), (1, Verdict.FAIL)]:
+        outcome = complete.tool_outcomes[omitted] if omitted is not None else None
+        record = CanonicalRun.model_validate(complete.model_copy(update={
+            "tool_outcomes": tuple(o for o in complete.tool_outcomes if o != outcome),
+            "events": tuple(e for e in complete.events if outcome is None or e.event_id != outcome.event_id),
+        }).model_dump())
+        assert tool_evidence_is_consistent(scenario, record)
+        assert observed_completion(scenario, record)
+        assert evaluate_run(scenario, record).verdict is expected
+
+
 def test_calling_is_optional_so_declining_is_never_a_defect() -> None:
     """Every oracle here holds vacuously when the agent does not act."""
 
