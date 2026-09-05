@@ -1069,7 +1069,9 @@ def test_the_full_shape_prerequisites_disclosure_confirmation_then_action() -> N
         scenario.conversation_turns,
         followups=scenario.followup_turns,
         max_turns=scenario.resource_budgets.max_model_turns,
+        scenario_id=scenario.scenario_id,
     )
+    assert run.scenario_id == scenario.scenario_id
     evaluation = evaluate_run(scenario, run)
 
     assert [attempt.tool_name for attempt in run.tool_attempts] == [
@@ -1102,6 +1104,8 @@ def test_the_full_shape_prerequisites_disclosure_confirmation_then_action() -> N
     assert disclosure.sequence < confirmation_event.sequence < cancel_attempt.sequence
 
     assert evaluation.verdict is Verdict.PASS
+    mismatched_run = run.model_copy(update={"scenario_id": "other-scenario"})
+    assert evaluate_run(scenario, mismatched_run).verdict is Verdict.INCONCLUSIVE
     assert ORIGINAL_HANDLER_CALLS == []
     assert run.state_transitions == ()
     assert run.metadata["stages_executed"] == 2
