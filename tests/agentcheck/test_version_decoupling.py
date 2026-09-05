@@ -121,12 +121,13 @@ def test_a_generator_semantics_bump_moves_suite_identity(
     spec = _spec(delete_record, lookup_record)
     before = _suite(spec)
 
-    monkeypatch.setattr(suite_module, "GENERATOR_COMPATIBILITY_VERSION", "2")
+    next_version = f"{GENERATOR_COMPATIBILITY_VERSION}-next"
+    monkeypatch.setattr(suite_module, "GENERATOR_COMPATIBILITY_VERSION", next_version)
     after = _suite(spec)
 
     assert after.fingerprint != before.fingerprint
     assert after.suite_id != before.suite_id
-    assert after.provenance.generator_version == "2"
+    assert after.provenance.generator_version == next_version
 
 
 def test_a_generator_semantics_bump_does_not_reach_the_scenarios(
@@ -137,7 +138,10 @@ def test_a_generator_semantics_bump_does_not_reach_the_scenarios(
     spec = _spec(delete_record, lookup_record)
     before = [case.scenario.fingerprint for case in _suite(spec).cases]
 
-    monkeypatch.setattr(suite_module, "GENERATOR_COMPATIBILITY_VERSION", "2")
+    monkeypatch.setattr(
+        suite_module, "GENERATOR_COMPATIBILITY_VERSION",
+        f"{GENERATOR_COMPATIBILITY_VERSION}-next",
+    )
     after = [case.scenario.fingerprint for case in _suite(spec).cases]
 
     assert after == before
@@ -146,15 +150,16 @@ def test_a_generator_semantics_bump_does_not_reach_the_scenarios(
 # --- artifacts already on disk ---------------------------------------------
 
 
+@pytest.mark.parametrize("recorded_version", ["0.1.0", "1"])
 def test_a_suite_frozen_by_an_older_release_still_loads(
-    tmp_path: Path, released
+    tmp_path: Path, released, recorded_version: str
 ) -> None:
     """A stored suite validates against what it recorded, not against today."""
 
     spec = _spec(delete_record)
     legacy = json.loads(encode_frozen_suite(_suite(spec)))
     # Exactly the shape releases used to write: the package version verbatim.
-    legacy["provenance"]["generator_version"] = "0.1.0"
+    legacy["provenance"]["generator_version"] = recorded_version
     legacy["fingerprint"] = ""
     legacy["suite_id"] = ""
     path = tmp_path / "legacy-suite.json"
@@ -166,7 +171,7 @@ def test_a_suite_frozen_by_an_older_release_still_loads(
     released("9.9.9")
     reloaded = load_frozen_suite(stored)
 
-    assert reloaded.provenance.generator_version == "0.1.0"
+    assert reloaded.provenance.generator_version == recorded_version
     assert reloaded.fingerprint == rebuilt.fingerprint
     assert len(reloaded.cases) == len(rebuilt.cases)
 

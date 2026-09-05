@@ -12,6 +12,23 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## Unreleased
+
+### Fixed
+
+- Generated action, fault and confirmed-action cases no longer treat
+  representative argument values as an authoritative interpretation of an
+  independently authored `user_request`. Sample mismatches remain visible as
+  INCONCLUSIVE. The equality matcher and explicit argument contracts remain
+  strict; schema errors, confirmation, ordering, duplicate-action and retry
+  violations keep their separate authority. No tool-specific normalization or
+  guessed optional/default semantics is introduced.
+
+  **Suite identity:** generator compatibility version changes from1 to2.
+  Corrected generated cases carry distinct argument-sample provenance. Existing
+  frozen suites, stored runs and baselines are not rewritten; regenerate and
+  review a suite to adopt the change. No framework or containment expansion.
+
 ## 0.5.5 (2026-09-05)
 
 An evidence-correctness patch: scenario-aware confirmation, authority-bound
