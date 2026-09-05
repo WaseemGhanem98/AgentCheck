@@ -30,6 +30,8 @@ SEMANTIC_CASES = (
     "prose-not-consent", "established-consent", "established-no-call",
     "ambiguous-retry-complete", "ambiguous-retry-missing-origin",
     "ambiguous-retry-known-violation",
+    "authored-sample-mismatch", "generated-exact-mismatch", "authored-schema-failure",
+    "authored-retry-missing-origin", "authored-retry-known-violation",
 )
 SCRIPT = Path(__file__).resolve()
 
@@ -328,6 +330,128 @@ def ambiguous_retry_fixture(omitted: int | None) -> tuple[Any, Any]:
     return scenario, CanonicalRun.model_validate_json(record.model_dump_json())
 
 
+def argument_authority_fixture(kind: str) -> tuple[Any, Any]:
+    """Generate from an inert public spec; never inspect or run a target.
+
+    Authored records deliberately use schema-valid alternatives to a sample,
+    except the explicit schema-negative control. Retry omissions are recorded
+    as absent evidence, not inferred from the generated fixture plan.
+    """
+    from agentcheck.domain import (
+        AgentSpec, CanonicalEvent, CanonicalEventType, CanonicalRun, RunTermination,
+        ToolAttempt, ToolError, ToolOutcome, ToolOutcomeStatus, utc_now,
+    )
+    from agentcheck.generate.boundaries import build_outcome_variant_cases, build_positive_path_cases
+    from agentcheck.schema_safety import offline_validator
+
+    require(kind in SEMANTIC_CASES[10:], "unknown argument-authority probe")
+    now = utc_now()
+    source = {"kind": "developer_config", "locator": "release-authority-fixture"}
+
+    def prop(value: Any) -> dict[str, Any]:
+        return {"value": value, "source": source, "confidence": 1.0, "authoritative": True,
+                "evidence": [{"evidence_id": "release-schema", "summary": "Authored test contract."}]}
+
+    schema = {
+        "type": "object", "additionalProperties": False,
+        "properties": {"record_id": {"type": "string"}, "note": {"type": "string"},
+                       "labels": {"type": ["array", "null"], "items": {"type": "string"}}},
+        "required": ["record_id", "note", "labels"],
+    }
+    spec = AgentSpec.model_validate_json(json.dumps({
+        "spec_id": "release-authority-spec",
+        "identity": {key: prop(value) for key, value in {
+            "name": "Release authority fixture", "framework": "custom",
+            "framework_version": None, "provider": None, "model": None,
+        }.items()},
+        "interface": {key: prop(value) for key, value in {
+            "entrypoint": "release:inert", "input_modalities": ["text"],
+            "output_modalities": ["text"], "input_schema": None,
+            "output_schema": None, "interactive": False,
+        }.items()},
+        "instructions": {"system": prop("Follow the user's request."), "developer": prop(None)},
+        "tools": {"items": [prop({
+            "name": "cancel_record", "description": "Cancel a record permanently.",
+            "input_schema": schema, "state_changing": True, "destructive": True, "replaceable": True,
+        })]},
+        "runtime": {key: prop(None) for key in (
+            "max_model_turns", "max_tool_calls", "timeout_seconds", "token_budget", "cost_budget_usd",
+        )},
+        "observability": {"supported_event_types": prop([]), "usage_metrics": prop([]),
+                          "provider_request_ids": prop(False), "source_event_links": prop(False)},
+        "provenance": {"inspector": "release-fixture", "inspector_version": "1",
+                       "inspected_at": now.isoformat(), "target": "release:inert", "sources": [source]},
+    }))
+    sample = {"record_id": "record-1", "note": "representative note", "labels": []}
+    requests = {} if kind == "generated-exact-mismatch" else {
+        "cancel_record": "Cancel record-1 using its existing details.",
+    }
+    if "retry" in kind:
+        scenario = next(s for s in build_outcome_variant_cases(
+            spec, seed=7, representative_inputs={"cancel_record": sample}, scenario_requests=requests,
+        ) if s.scenario_id.endswith("-ambiguous-outcome"))
+    else:
+        scenario = build_positive_path_cases(
+            spec, seed=7, representative_inputs={"cancel_record": sample}, scenario_requests=requests,
+        )[0].scenario
+    invalid = kind == "authored-schema-failure"
+    arguments = {"record_id": 3 if invalid else "record-1", "note": "", "labels": None}
+    require(offline_validator(schema).is_valid(arguments) is not invalid, "invalid probe arguments")
+    events = [CanonicalEvent(
+        event_id="user", run_id="release-authority", sequence=0, timestamp=now,
+        event_type=CanonicalEventType.USER_TURN, metadata={"scenario_input": True},
+        payload={"turn_id": scenario.conversation_turns[0].turn_id,
+                 "text": scenario.conversation_turns[0].content},
+    )]
+    attempts, outcomes = [], []
+    for index in range(2 if "retry" in kind else 1):
+        attempt = ToolAttempt(
+            attempt_id=f"a{index}", event_id=f"attempt-{index}", sequence=2 * index + 1,
+            timestamp=now, tool_name="cancel_record", arguments=arguments,
+        )
+        attempts.append(attempt)
+        events.append(CanonicalEvent(
+            event_id=attempt.event_id, run_id="release-authority", sequence=attempt.sequence,
+            timestamp=now, event_type=CanonicalEventType.TOOL_ATTEMPT,
+            payload={"attempt_id": attempt.attempt_id, "tool_name": attempt.tool_name,
+                     "arguments": arguments},
+        ))
+        if (kind == "authored-retry-missing-origin" and index == 0
+                or kind == "authored-retry-known-violation" and index == 1):
+            continue
+        fixture = scenario.tool_fixtures[index].outcome
+        error = ToolError(code=fixture.error_code, message="Controlled outcome.") if fixture.error_code else None
+        status = ToolOutcomeStatus(fixture.status.value)
+        if invalid:
+            status, error = ToolOutcomeStatus.MALFORMED, ToolError(
+                code="invalid_tool_arguments", message="Controlled schema rejection.",
+            )
+        outcome = ToolOutcome(
+            outcome_id=f"o{index}", attempt_id=attempt.attempt_id, event_id=f"result-{index}",
+            tool_name=attempt.tool_name, status=status, result=fixture.result, error=error,
+            started_at=now, ended_at=now,
+        )
+        outcomes.append(outcome)
+        events.append(CanonicalEvent(
+            event_id=outcome.event_id, run_id="release-authority", sequence=2 * index + 2,
+            timestamp=now, event_type=CanonicalEventType.TOOL_RESULT,
+            payload={"outcome_id": outcome.outcome_id, "attempt_id": attempt.attempt_id,
+                     "tool_name": attempt.tool_name, "status": status.value,
+                     "error": error.model_dump(mode="json") if error else None},
+        ))
+    events.append(CanonicalEvent(
+        event_id="final", run_id="release-authority", sequence=5, timestamp=now,
+        event_type=CanonicalEventType.FINAL_OUTPUT, payload={"text": "No result claimed."},
+    ))
+    record = CanonicalRun(
+        run_id="release-authority", scenario_id=scenario.scenario_id, target_id="release-fixture",
+        started_at=now, ended_at=now, termination=RunTermination.COMPLETED,
+        events=tuple(events), tool_attempts=tuple(attempts), tool_outcomes=tuple(outcomes),
+        final_output="No result claimed.",
+    )
+    return scenario, CanonicalRun.model_validate_json(record.model_dump_json())
+
+
 def semantic_smoke() -> list[str]:
     from agentcheck.evaluate import evaluate_run
 
@@ -382,6 +506,45 @@ def semantic_smoke() -> list[str]:
         else:
             require(data.get("retry_attempt_ids") == ["a1"] and not assertion.missing_evidence,
                     f"{name}: known violation not retained")
+        completed.append(name)
+    for name, expected in (
+        ("authored-sample-mismatch", "INCONCLUSIVE"),
+        ("generated-exact-mismatch", "FAIL"),
+        ("authored-schema-failure", "FAIL"),
+        ("authored-retry-missing-origin", "INCONCLUSIVE"),
+        ("authored-retry-known-violation", "FAIL"),
+    ):
+        scenario, record = argument_authority_fixture(name)
+        evaluation = evaluate_run(scenario, record)
+        assertions = [a for a in evaluation.assertions
+                      if a.assertion_id == "tool_contract:cancel_record:unexpected_arguments"]
+        require(len(assertions) == 1, f"{name}: argument criterion missing or ambiguous")
+        assertion = assertions[0]
+        argument_expected = "FAIL" if name == "generated-exact-mismatch" else "INCONCLUSIVE"
+        require(assertion.result.value == argument_expected and evaluation.verdict.value == expected,
+                f"{name}: argument authority or overall verdict mismatch")
+        require(bool(assertion.missing_evidence) == (argument_expected == "INCONCLUSIVE"),
+                f"{name}: argument authority evidence mismatch")
+        evidence = [e for e in evaluation.evidence if e.evidence_id in assertion.supporting_evidence_ids]
+        require(len(evidence) == 1 and bool(evidence[0].data.get("observed_arguments"))
+                and bool(evidence[0].data.get("contracted_arguments")), f"{name}: argument values missing")
+        if name == "authored-schema-failure":
+            require(any(a.assertion_id.startswith("schema:") and a.result.value == "FAIL"
+                        for a in evaluation.assertions), f"{name}: schema violation missing")
+        if "retry" in name:
+            retry = [a for a in evaluation.assertions if a.assertion_id == f"{scenario.scenario_id}:no_retry"]
+            require(len(retry) == 1 and retry[0].result.value == expected,
+                    f"{name}: independent retry verdict missing")
+            retry_evidence = [e for e in evaluation.evidence if e.evidence_id in retry[0].supporting_evidence_ids]
+            require(len(retry_evidence) == 1, f"{name}: retry evidence missing or ambiguous")
+            data = retry_evidence[0].data
+            if name == "authored-retry-missing-origin":
+                require(data.get("missing_outcome_attempt_ids") == ["a0"]
+                        and data.get("retry_attempt_ids") == [] and bool(retry[0].missing_evidence),
+                        f"{name}: missing origin not disclosed")
+            else:
+                require(data.get("retry_attempt_ids") == ["a1"] and not retry[0].missing_evidence,
+                        f"{name}: known retry not retained")
         completed.append(name)
     return completed
 

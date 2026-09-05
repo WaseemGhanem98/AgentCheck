@@ -88,6 +88,31 @@ Missing unrelated or later outcomes do not by themselves make this rule
 inconclusive. This tightens evaluation of incomplete public run records; it
 does not rewrite artifacts, require optional actions or change call identity.
 
+## Representative arguments and authored requests
+
+The fixture pack's `tools.<name>.arguments` supplies representative input
+values. If `user_request` replaces the generated request, those samples do not
+prove which exact argument values that independent prose requires. A valid call
+can use defaults or an alternative representation without contradicting the
+tool's schema. AgentCheck does not infer that equivalence from tool names,
+parameter names, or natural-language instructions.
+
+Newly generated positive, fault and confirmed-action cases keep the argument
+comparison and its observed/expected values, but give that sample comparison
+separate, non-authoritative provenance. A mismatch is `INCONCLUSIVE`, not a
+hard `FAIL` and not `PASS`. A wrong identifier is not certified either. Schema
+violations, declared ordering and confirmation rules, duplicate actions, and
+known timeout retries retain their independent authority. Explicitly authored
+exact argument contracts and generated requests that enumerate exact values
+are unchanged.
+
+This changes generation semantics: generator compatibility version is **2**.
+Existing frozen suites retain their recorded assertions and fingerprints; they
+are not rewritten or silently reinterpreted. Generate and review a new suite to
+use the corrected provenance. Do not create a trusted baseline from known
+misclassified results. This change does not drop confirmation policy from
+schema-boundary cases or invent missing supporting-tool fixtures.
+
 ## What is not asserted
 
 These cases ask one narrow question: having been handed an unusable result, did

@@ -27,14 +27,28 @@ identity**.
   as PASS can now be inconclusive. No stored artifact is rewritten, and no claim
   is made that a supported adapter produced these incomplete records.
 
-  **Suite identity:** unchanged; generation, denominators and baselines are unchanged.
+  This evaluator-only retry correction does not change generation or denominators.
+
+- Generated action, fault and confirmed-action cases no longer treat
+  representative argument values as an authoritative interpretation of an
+  independently authored `user_request`. Sample mismatches remain visible as
+  INCONCLUSIVE. The equality matcher and explicit argument contracts remain
+  strict; schema errors, confirmation, ordering, duplicate-action and retry
+  violations keep their separate authority. No tool-specific normalization or
+  guessed optional/default semantics is introduced.
+
+  **Suite identity for this release:** generator compatibility changes from 1 to 2
+  because of the authored-request argument-provenance correction above.
+  Corrected generated cases carry distinct argument-sample provenance. Existing
+  frozen suites, stored runs and baselines are not rewritten; regenerate and
+  review a suite to adopt the change. No framework or containment expansion.
 
 ### Release qualification
 
-- The existing same-wheel installed probe additionally checks complete
-  ambiguous-timeout violations, missing origin evidence and retained known
-  violations with later outcomes absent. Build, installation, hashing, network
-  denial, receipt binding and publishing transport are unchanged.
+- The existing same-wheel installed probe additionally checks incomplete retry
+  evidence and authored-request argument authority, including retained strict
+  argument/schema failures and known timeout violations. Build, installation,
+  hashing, network denial, receipt binding and publishing transport are unchanged.
 
 ## 0.5.5 (2026-09-05)
 
