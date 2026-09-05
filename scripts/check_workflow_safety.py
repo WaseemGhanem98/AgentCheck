@@ -65,6 +65,13 @@ def release_artifact_gate_failures(release: Mapping[Any, Any]) -> list[str]:
     jobs = release.get("jobs") or {}
     build = jobs.get("build") or {}
     publish = jobs.get("publish") or {}
+    # This is a guard for the reviewed two-job pipeline, not a universal shell
+    # verifier. Inherited shells/workdirs can bypass the otherwise exact step.
+    if set(jobs) != {"build", "publish"}:
+        failures.append("release.yml must retain only its reviewed build and publish jobs")
+    for label, item in (("workflow", release), ("build", build), ("publish", publish)):
+        if "defaults" in item:
+            failures.append(f"release.yml:{label} must not override inherited run defaults")
     steps = build.get("steps") or []
     gates = [i for i, step in enumerate(steps) if step.get("id") == "qualify_artifacts"]
     uploads = [i for i, step in enumerate(steps)
@@ -95,7 +102,7 @@ def release_artifact_gate_failures(release: Mapping[Any, Any]) -> list[str]:
         if item.get("continue-on-error", False) is not False:
             failures.append(f"release.yml:{label} must not ignore failure")
     for label, item in (("qualification", gate), ("upload", upload)):
-        if "if" in item or "shell" in item:
+        if any(key in item for key in ("if", "shell", "working-directory")):
             failures.append(f"release.yml:{label} must retain default successful-step gating")
     if build.get("timeout-minutes") != 15:
         failures.append("release.yml build must retain its 15 minute budget")
@@ -105,6 +112,8 @@ def release_artifact_gate_failures(release: Mapping[Any, Any]) -> list[str]:
         failures.append("release.yml qualified artifact name changed")
     if upload.get("with", {}).get("if-no-files-found") != "error":
         failures.append("release.yml missing distributions must fail upload")
+    if upload.get("with", {}).get("overwrite", False) is not False:
+        failures.append("release.yml qualified artifact producer must not overwrite another artifact")
     if publish.get("needs") != "build" or publish.get("if") != (
         "${{ github.event.release.prerelease == false }}"
     ):

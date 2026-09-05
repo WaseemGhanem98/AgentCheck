@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from scripts import check_release_artifact as gate
+from scripts import check_workflow_safety as workflow_checker
 from scripts.check_workflow_safety import release_artifact_gate_failures
 
 
@@ -355,12 +356,127 @@ def test_checks_are_not_disabled_by_python_optimization():
     assert "must fail" in result.stderr
 
 
+@pytest.mark.parametrize("context", ["withheld", "absent", "established"])
+@pytest.mark.parametrize("call", [False, True])
+def test_confirmation_fixture_has_authored_context_and_complete_public_records(context, call):
+    scenario, record = gate.confirmation_fixture(context, call)
+    assert scenario.allowed_tool_behavior[0].min_calls == 0
+    assert scenario.allowed_tool_behavior[0].confirmation_required_before_call == (context == "withheld")
+    assert bool(scenario.followup_turns) == (context == "established")
+    assert bool(record.tool_attempts) is call
+    assert record.events[-1].payload["text"] == record.final_output
+    assert record.termination.value == "completed"
+    for turn, event in zip((*scenario.conversation_turns, *scenario.followup_turns), record.events):
+        assert event.event_type.value == "user_turn"
+        assert event.payload == {"turn_id": turn.turn_id, "text": turn.content}
+        assert event.metadata == {**turn.metadata, "scenario_input": True}
+    if call:
+        attempt = record.tool_attempts[0]
+        event = record.events[attempt.sequence]
+        assert event.event_id == attempt.event_id
+        assert event.payload["arguments"] == attempt.arguments
+        assert event.payload["tool_name"] == attempt.tool_name
+
+
+@pytest.mark.parametrize("mutation", ["none", "false-pass", "false-fail", "missing-criterion",
+                                      "unmeasured", "vacuous-evidence"])
+def test_semantic_smoke_enforces_fixed_verdict_and_evidence_expectations(monkeypatch, mutation):
+    import agentcheck.evaluate
+
+    authored = gate.confirmation_fixture
+    state = {}
+
+    def fixture(context, call, **kwargs):
+        state.update(context=context, call=call)
+        result = authored(context, call, **kwargs)
+        if kwargs.get("prose"):
+            assert result[0].conversation_turns[0].metadata == {}
+            assert result[0].followup_turns == ()
+        return result
+
+    def evaluate(scenario, record):
+        context, call = state["context"], state["call"]
+        expected = "INCONCLUSIVE" if context == "absent" else (
+            "FAIL" if context == "withheld" and call else "PASS"
+        )
+        if mutation == "false-pass" and context == "absent":
+            expected = "PASS"
+        if mutation == "false-fail" and context == "withheld" and not call:
+            expected = "FAIL"
+        result = SimpleNamespace(value=expected)
+        data = {"confirmation_context": context, "confirmation_exercised": call}
+        if mutation == "unmeasured":
+            data["confirmation_exercised"] = None
+        if mutation == "vacuous-evidence":
+            data["confirmed_before_every_call"] = True
+        assertion = SimpleNamespace(assertion_id="confirm", result=result, supporting_evidence_ids=("e",))
+        return SimpleNamespace(
+            verdict=result, assertions=[] if mutation == "missing-criterion" else [assertion],
+            evidence=[SimpleNamespace(evidence_id="e", data=data)],
+        )
+
+    monkeypatch.setattr(gate, "confirmation_fixture", fixture)
+    monkeypatch.setattr(agentcheck.evaluate, "evaluate_run", evaluate)
+    if mutation == "none":
+        assert gate.semantic_smoke() == list(gate.SEMANTIC_CASES)
+    else:
+        with pytest.raises(ValueError):
+            gate.semantic_smoke()
+
+
 def release_workflow():
     return yaml.safe_load((ROOT / ".github/workflows/release.yml").read_text())
 
 
 def test_release_workflow_has_executable_same_artifact_gate():
     assert release_artifact_gate_failures(release_workflow()) == []
+
+
+@pytest.mark.parametrize("scope", ["workflow", "build"])
+@pytest.mark.parametrize("setting", ["shell", "working-directory"])
+def test_release_guard_rejects_inherited_execution_defaults(scope, setting):
+    workflow = release_workflow()
+    target = workflow if scope == "workflow" else workflow["jobs"]["build"]
+    value = "bash -c 'bash {0}; exit 0'" if setting == "shell" else "other-checkout"
+    target["defaults"] = {"run": {setting: value}}
+    assert release_artifact_gate_failures(workflow)
+
+
+@pytest.mark.parametrize("mutation", ["extra-producer", "overwrite"])
+def test_release_guard_requires_sole_non_overwriting_producer(mutation):
+    workflow = release_workflow()
+    upload = workflow["jobs"]["build"]["steps"][-1]
+    if mutation == "extra-producer":
+        upload = deepcopy(upload)
+        upload["with"]["path"] = "different-artifacts/"
+        workflow["jobs"]["replacement"] = {
+            "runs-on": "ubuntu-latest", "needs": "build",
+            "permissions": {"contents": "read"}, "steps": [upload],
+        }
+    upload["with"]["overwrite"] = True
+    assert release_artifact_gate_failures(workflow)
+
+
+@pytest.mark.parametrize("mutation", ["workflow-defaults", "build-defaults", "replacement-producer"])
+def test_full_workflow_checker_rejects_reviewed_bypasses(monkeypatch, mutation):
+    workflow = release_workflow()
+    if mutation == "replacement-producer":
+        upload = deepcopy(workflow["jobs"]["build"]["steps"][-1])
+        upload["with"].update(path="different-artifacts/", overwrite=True)
+        workflow["jobs"]["replacement"] = {
+            "runs-on": "ubuntu-latest", "permissions": {"contents": "read"},
+            "needs": "build", "steps": [upload],
+        }
+    else:
+        target = workflow if mutation == "workflow-defaults" else workflow["jobs"]["build"]
+        target["defaults"] = {"run": {"shell": "bash -c 'bash {0}; exit 0'"}}
+    directory = ROOT / ".github/workflows"
+    text = (directory / "release.yml").read_text()
+    original = yaml.safe_load
+    monkeypatch.setattr(workflow_checker, "WORKFLOW_DIRECTORY", directory)
+    monkeypatch.setattr(workflow_checker.yaml, "safe_load", lambda value:
+                        deepcopy(workflow) if value == text else original(value))
+    assert workflow_checker.main() == 1
 
 
 @pytest.mark.parametrize("mutation", ["remove", "noop", "ignore", "conditional", "after-upload",
