@@ -784,6 +784,42 @@ def _evaluate_trajectory(builder: _EvaluationBuilder, constraint: TrajectoryCons
         ]
         passed = not retries
         data["retry_attempt_ids"] = retries
+        outcome_attempt_ids = {
+            outcome.attempt_id for outcome in builder.run.tool_outcomes
+        }
+        # Only an earlier matching call can change this retry decision. A
+        # missing later/unrelated outcome is not a reason to discard a known
+        # violation or require outcomes globally on legitimate partial traces.
+        missing_outcome_attempt_ids = [
+            origin.attempt_id
+            for origin in attempts
+            if origin.attempt_id not in outcome_attempt_ids
+            and any(
+                attempt.sequence > origin.sequence
+                and attempt.tool_name == origin.tool_name
+                and _semantic_arguments(attempt.arguments)
+                == _semantic_arguments(origin.arguments)
+                for attempt in attempts
+            )
+        ]
+        if not retries and missing_outcome_attempt_ids:
+            data["missing_outcome_attempt_ids"] = missing_outcome_attempt_ids
+            evidence_id = builder.add_evidence(
+                constraint.criterion_id, EvidenceKind.TOOL_ATTEMPT,
+                constraint.description, [attempt.attempt_id for attempt in attempts], data,
+            )
+            builder.add_assertion(
+                constraint.criterion_id, constraint.description, Verdict.INCONCLUSIVE,
+                constraint.oracle_ids,
+                "An earlier matching call has no recorded outcome, so whether "
+                "a later call retried an ambiguous timeout is unknown.",
+                (evidence_id,), required=constraint.required,
+                missing=tuple(
+                    f"recorded outcome for earlier matching attempt {attempt_id}"
+                    for attempt_id in missing_outcome_attempt_ids
+                ),
+            )
+            return
     elif constraint.kind == TrajectoryConstraintKind.MAX_RETRIES:
         maximum = int(constraint.parameters.get("max_retries", 0))
         passed = max(0, len(attempts) - 1) <= maximum

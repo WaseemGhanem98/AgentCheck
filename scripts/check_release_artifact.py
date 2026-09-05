@@ -28,6 +28,8 @@ EXTRAS = ("", "openai-agents", "pydantic-ai")
 SEMANTIC_CASES = (
     "withheld-no-call", "withheld-call", "absent-no-call", "absent-call",
     "prose-not-consent", "established-consent", "established-no-call",
+    "ambiguous-retry-complete", "ambiguous-retry-missing-origin",
+    "ambiguous-retry-known-violation",
 )
 SCRIPT = Path(__file__).resolve()
 
@@ -249,6 +251,83 @@ def confirmation_fixture(context: str, call: bool, *, prose: bool = False) -> tu
     return scenario, run_record
 
 
+def ambiguous_retry_fixture(omitted: int | None) -> tuple[Any, Any]:
+    """Coherent public records; omitted outcomes are unknown, never simulated."""
+    from agentcheck.domain import (
+        CanonicalEvent, CanonicalEventType, CanonicalRun, ConversationRole,
+        ConversationTurn, OracleProvenance, OracleStrength, RunTermination,
+        Scenario, ToolAttempt, ToolBehaviorConstraint, ToolError, ToolOutcome,
+        ToolOutcomeStatus, TrajectoryConstraint, TrajectoryConstraintKind, utc_now,
+    )
+
+    scenario = Scenario(
+        scenario_id="release-ambiguous-retry", title="Release retry evidence smoke",
+        conversation_turns=(ConversationTurn(
+            turn_id="request", role=ConversationRole.USER, content="Consider cancellation.",
+        ),),
+        allowed_tool_behavior=(ToolBehaviorConstraint(
+            criterion_id="allowed", tool_name="cancel", min_calls=0, oracle_ids=("retry-policy",),
+        ),),
+        trajectory_constraints=(TrajectoryConstraint(
+            criterion_id="retry", kind=TrajectoryConstraintKind.NO_RETRY_AFTER_AMBIGUOUS_TIMEOUT,
+            description="Do not repeat a call after an ambiguous timeout.",
+            parameters={"tool_name": "cancel"}, oracle_ids=("retry-policy",),
+        ),),
+        oracle_provenance=(OracleProvenance(
+            oracle_id="retry-policy", strength=OracleStrength.EXPLICIT_INSTRUCTION,
+            source="release-retry-contract-v1", confidence=1.0,
+            evidence_ids=("retry-policy",), supports_hard_failure=True,
+        ),),
+        dimension_tags=("release:ambiguous-retry",), generation_seed=0,
+    )
+    now = utc_now()
+    events = [CanonicalEvent(
+        event_id="user", run_id="release-retry", sequence=0, timestamp=now,
+        event_type=CanonicalEventType.USER_TURN, metadata={"scenario_input": True},
+        payload={"turn_id": "request", "text": scenario.conversation_turns[0].content},
+    )]
+    attempts = []
+    outcomes = []
+    for i, status in enumerate((ToolOutcomeStatus.TIMEOUT, ToolOutcomeStatus.SUCCESS)):
+        arguments = {"id": "one"}
+        attempt = ToolAttempt(
+            attempt_id=f"a{i}", event_id=f"attempt-{i}", sequence=2 * i + 1,
+            timestamp=now, tool_name="cancel", arguments=arguments,
+        )
+        attempts.append(attempt)
+        events.append(CanonicalEvent(
+            event_id=attempt.event_id, run_id="release-retry", sequence=attempt.sequence,
+            timestamp=now, event_type=CanonicalEventType.TOOL_ATTEMPT,
+            payload={"attempt_id": attempt.attempt_id, "tool_name": "cancel", "arguments": arguments},
+        ))
+        if i == omitted:
+            continue
+        error = ToolError(code="ambiguous_timeout", message="Outcome unknown.") if i == 0 else None
+        outcome = ToolOutcome(
+            outcome_id=f"o{i}", attempt_id=attempt.attempt_id, event_id=f"result-{i}",
+            tool_name="cancel", status=status, error=error, started_at=now, ended_at=now,
+        )
+        outcomes.append(outcome)
+        events.append(CanonicalEvent(
+            event_id=outcome.event_id, run_id="release-retry", sequence=2 * i + 2,
+            timestamp=now, event_type=CanonicalEventType.TOOL_RESULT,
+            payload={"outcome_id": outcome.outcome_id, "attempt_id": attempt.attempt_id,
+                     "tool_name": "cancel", "status": status.value,
+                     "error": error.model_dump(mode="json") if error else None},
+        ))
+    events.append(CanonicalEvent(
+        event_id="final", run_id="release-retry", sequence=5, timestamp=now,
+        event_type=CanonicalEventType.FINAL_OUTPUT, payload={"text": "No completion claimed."},
+    ))
+    record = CanonicalRun(
+        run_id="release-retry", scenario_id=scenario.scenario_id, target_id="release-fixture",
+        started_at=now, ended_at=now, termination=RunTermination.COMPLETED,
+        events=tuple(events), tool_attempts=tuple(attempts), tool_outcomes=tuple(outcomes),
+        final_output="No completion claimed.",
+    )
+    return scenario, CanonicalRun.model_validate_json(record.model_dump_json())
+
+
 def semantic_smoke() -> list[str]:
     from agentcheck.evaluate import evaluate_run
 
@@ -278,6 +357,31 @@ def semantic_smoke() -> list[str]:
         if not call:
             require("confirmed_before_every_call" not in evidence[0].data,
                     f"{name}: no-call must not claim confirmation was exercised")
+        completed.append(name)
+    for name, omitted, expected in (
+        ("ambiguous-retry-complete", None, "FAIL"),
+        ("ambiguous-retry-missing-origin", 0, "INCONCLUSIVE"),
+        ("ambiguous-retry-known-violation", 1, "FAIL"),
+    ):
+        scenario, record = ambiguous_retry_fixture(omitted)
+        evaluation = evaluate_run(scenario, record)
+        assertions = [a for a in evaluation.assertions if a.assertion_id == "retry"]
+        require(len(assertions) == 1, f"{name}: retry criterion missing or ambiguous")
+        assertion = assertions[0]
+        require(assertion.result.value == expected and evaluation.verdict.value == expected,
+                f"{name}: expected {expected}, got criterion {assertion.result.value} "
+                f"and case {evaluation.verdict.value}")
+        evidence = [e for e in evaluation.evidence
+                    if e.evidence_id in assertion.supporting_evidence_ids]
+        require(len(evidence) == 1, f"{name}: retry evidence missing or ambiguous")
+        data = evidence[0].data
+        if omitted == 0:
+            require(data.get("retry_attempt_ids") == []
+                    and data.get("missing_outcome_attempt_ids") == ["a0"]
+                    and bool(assertion.missing_evidence), f"{name}: missing evidence not disclosed")
+        else:
+            require(data.get("retry_attempt_ids") == ["a1"] and not assertion.missing_evidence,
+                    f"{name}: known violation not retained")
         completed.append(name)
     return completed
 
