@@ -103,6 +103,18 @@ the agent can actually reach it. See the prerequisites section of the quickstart
 
 ## Same-stage duplicates vs later retries
 
+From generator compatibility version **3**, generated confirmed-action cases
+include indexed copies of their own abstract, stateless focal success fixture
+through the existing `max_tool_calls`. This includes the prerequisite allowance:
+an agent can skip a prerequisite and spend those slots on the focal tool.
+In-budget duplicates therefore reach the duplicate oracle instead of exhausting
+one fixture. This does not authorize repeated actions or increase any budget.
+Prerequisite and independently authored/stateful/error/timeout fixtures remain
+single-use as declared; genuine missing outcomes retain infrastructure precedence.
+Frozen version-2 suites are verified and replayed unchanged, including their
+original fixture limits. Generate and review a new suite to adopt version 3;
+existing stored runs and baselines are not rewritten.
+
 A model response can carry several tool calls, decided together before any of
 them has a result. `no_duplicate_side_effect` flags any repeated identical
 call anywhere in a run, whether the repeat happened in that same decision

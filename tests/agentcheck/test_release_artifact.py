@@ -484,6 +484,8 @@ def test_retry_release_smoke_rejects_wrong_verdicts_and_missing_evidence(monkeyp
             "ambiguous-retry-known-violation",
             "authored-sample-mismatch", "generated-exact-mismatch", "authored-schema-failure",
             "authored-retry-missing-origin", "authored-retry-known-violation",
+            "confirmed-duplicate-budget", "confirmed-duplicate-prerequisite-budget",
+            "confirmed-authored-exhaustion",
         ]
     else:
         with pytest.raises(ValueError):
@@ -656,3 +658,81 @@ def test_release_workflow_gate_mutations_fail(mutation):
     else:
         build["timeout-minutes"] = 30
     assert release_artifact_gate_failures(workflow), mutation
+
+
+@pytest.mark.parametrize("kind,count,expected", [
+    ("confirmed-duplicate-budget", 4, "FAIL"),
+    ("confirmed-duplicate-prerequisite-budget", 5, "FAIL"),
+    ("confirmed-authored-exhaustion", 2, "INFRA_ERROR"),
+])
+def test_confirmed_release_probe_records_real_gateway_consumption(kind, count, expected):
+    from agentcheck.evaluate import evaluate_run
+    from agentcheck.evaluate.confirmation import observed_completion, tool_evidence_is_consistent
+
+    scenario, record = gate.confirmed_gateway_fixture(kind)
+    assert len(record.tool_attempts) == len(record.tool_outcomes) == count
+    assert all(a.tool_name == "cancel_record" for a in record.tool_attempts)
+    assert tool_evidence_is_consistent(scenario, record) and observed_completion(scenario, record)
+    assert evaluate_run(scenario, record).verdict.value == expected
+    if expected == "FAIL":
+        assert all(o.status.value == "success" for o in record.tool_outcomes)
+    else:
+        assert record.tool_outcomes[-1].error.code == "fixture_not_found"
+        assert record.tool_outcomes[-1].result is None
+
+
+@pytest.mark.parametrize("mutation", ["none", "lost-duplicate", "lost-consent", "lost-infra"])
+def test_confirmed_release_smoke_rejects_lost_observation_or_infrastructure(monkeypatch, mutation):
+    import agentcheck.evaluate
+    from agentcheck.domain import Verdict
+
+    actual = agentcheck.evaluate.evaluate_run
+
+    def evaluate(scenario, record):
+        result = actual(scenario, record)
+        if record.run_id != "release-confirmed-gateway":
+            return result
+        if mutation == "lost-infra" and result.verdict is Verdict.INFRA_ERROR:
+            return result.model_copy(update={"verdict": Verdict.FAIL})
+        assertions = tuple(a.model_copy(update={"result": Verdict.PASS})
+                           if mutation == "lost-duplicate" and a.assertion_id.endswith(":no_duplicate")
+                           else a.model_copy(update={"result": Verdict.FAIL})
+                           if mutation == "lost-consent" and a.assertion_id.endswith(":policy:consent")
+                           else a for a in result.assertions)
+        return result.model_copy(update={"assertions": assertions})
+
+    monkeypatch.setattr(agentcheck.evaluate, "evaluate_run", evaluate)
+    if mutation == "none":
+        assert gate.semantic_smoke() == list(gate.SEMANTIC_CASES)
+        assert len(gate.SEMANTIC_CASES) == 18
+    else:
+        with pytest.raises(ValueError, match="observable|infrastructure"):
+            gate.semantic_smoke()
+
+
+@pytest.mark.parametrize("mutation", ["constant-four", "unindexed", "stateful", "wrong-version"])
+def test_confirmed_release_smoke_refuses_incomplete_or_wrong_fixture_contract(monkeypatch, mutation):
+    import agentcheck.generate.boundaries as boundaries
+    import agentcheck.generate.suite as suite_module
+    from agentcheck.domain import Scenario
+
+    actual = boundaries._confirmed_action_scenario
+
+    def build(*args, **kwargs):
+        data = actual(*args, **kwargs).model_dump(mode="json")
+        focal = [f for f in data["tool_fixtures"] if f["tool_name"] == "cancel_record"]
+        if mutation == "constant-four":
+            data["tool_fixtures"] = [f for f in data["tool_fixtures"] if f not in focal[4:]]
+        elif mutation == "unindexed":
+            for fixture in focal:
+                fixture["invocation_index"] = None
+        elif mutation == "stateful":
+            focal[0]["outcome"]["state_effects"] = [{"path": "record", "before": None, "after": True}]
+        data["fingerprint"] = ""
+        return Scenario.model_validate_json(json.dumps(data))
+
+    monkeypatch.setattr(boundaries, "_confirmed_action_scenario", build)
+    if mutation == "wrong-version":
+        monkeypatch.setattr(suite_module, "GENERATOR_COMPATIBILITY_VERSION", "2")
+    with pytest.raises(ValueError, match="fixture slots|fixture case|generator identity"):
+        gate.semantic_smoke()

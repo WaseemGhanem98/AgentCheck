@@ -6,6 +6,7 @@ include CONTRIBUTING.md
 include SECURITY.md
 include AGENTS.md
 recursive-include tests *.py
+include tests/agentcheck/fixtures/confirmed-generator-v2.json
 recursive-include examples *.py *.json *.md
 recursive-include scripts *.py
 recursive-include docs *.md

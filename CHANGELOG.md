@@ -12,6 +12,36 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## 0.5.7 (2026-09-06)
+
+### Fixed
+
+- Generated confirmed-action cases now supply explicitly indexed copies of
+  their abstract, stateless focal success fixture through the existing tool-call
+  budget. Duplicate calls within that budget can reach their behavioral oracle
+  instead of being hidden by fixture exhaustion. The full allowance is covered
+  even when a declared prerequisite is skipped. Budgets and prerequisite
+  outcomes are unchanged; authored, stateful, error and timeout fixtures are
+  not repeated, and genuine fixture gaps remain infrastructure errors.
+
+  Confirmation delivery/order, authored-request argument authority and ambiguous
+  retry evaluation are unchanged. This does not prove real tools succeeded or
+  change the generic gateway's single-use fixture behavior.
+
+  **Suite identity:** generator compatibility changes from 2 to 3 because the
+  confirmed-case fixture wiring changes. Existing frozen suites retain their
+  recorded fixtures, fingerprints and behavior, including legacy fixture gaps.
+  Generate and review a new suite to adopt the correction; stored runs and
+  baselines are not rewritten. No cases or obligations are removed.
+
+### Release qualification
+
+- The same-wheel installed probe additionally consumes generated confirmed
+  fixtures through the inert gateway, including a prerequisite-adjusted budget,
+  and checks duplicate failures and genuine authored-fixture exhaustion.
+  The prior 15 semantic controls and the build/install/hash/network/receipt
+  protocol are retained. The release workflow and publishing transport are unchanged.
+
 ## 0.5.6 (2026-09-05)
 
 ### Fixed
