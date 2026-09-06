@@ -26,6 +26,7 @@ from agentcheck.domain.run import (
     ToolOutcomeStatus,
 )
 from agentcheck.schema_safety import UnsafeSchemaReference, offline_validator
+from agentcheck.json_values import json_values_equal
 
 from .budgets import BudgetExceeded, BudgetTracker
 from .world import WorldSimulator, WorldStateError, WorldTransition
@@ -204,9 +205,7 @@ def _recursive_subset(expected: Any, actual: Any) -> bool:
             key in actual and _recursive_subset(value, actual[key])
             for key, value in expected.items()
         )
-    if isinstance(expected, list):
-        return isinstance(actual, list) and expected == actual
-    return expected == actual
+    return json_values_equal(expected, actual)
 
 
 def _status(value: Any) -> ToolOutcomeStatus:
@@ -591,7 +590,7 @@ class ToolGateway:
                 continue
             if fixture.expected_arguments is not None:
                 matches = (
-                    fixture.expected_arguments == arguments
+                    json_values_equal(fixture.expected_arguments, arguments)
                     if fixture.exact_arguments
                     else _recursive_subset(fixture.expected_arguments, arguments)
                 )

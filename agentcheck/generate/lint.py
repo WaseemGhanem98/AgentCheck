@@ -18,6 +18,7 @@ from agentcheck.domain import (
     TrajectoryConstraintKind,
 )
 from agentcheck.schema_safety import UnsafeSchemaReference, offline_validator
+from agentcheck.json_values import json_values_equal
 from agentcheck.runner.world import WorldSimulator, WorldStateError
 
 
@@ -61,7 +62,9 @@ _SUPPORTED_OUTPUT_KINDS = {
 def _compatible_arguments(left: Mapping[str, Any], right: Mapping[str, Any]) -> bool:
     """Return whether two subset matchers can both match one invocation."""
 
-    return all(left[key] == right[key] for key in left.keys() & right.keys())
+    # Keep the existing shared-top-level-key topology; do not conflate JSON
+    # booleans with numbers inside the complete values compared at those keys.
+    return all(json_values_equal(left[key], right[key]) for key in left.keys() & right.keys())
 
 
 def _argument_specificity(value: Any) -> int:

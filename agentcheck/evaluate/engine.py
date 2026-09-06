@@ -34,6 +34,7 @@ from agentcheck.evaluate.confirmation import (
     tool_evidence_is_consistent,
 )
 from agentcheck.schema_safety import UnsafeSchemaReference, offline_validator
+from agentcheck.json_values import json_values_equal
 from agentcheck.runner.world import WorldSimulator, WorldStateError
 
 
@@ -188,7 +189,12 @@ def _contains_value(value: Any, expected: Any) -> bool | None:
 
 
 def _arguments_match(arguments: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
-    return all(key in arguments and arguments[key] == value for key, value in expected.items())
+    """Match named top-level keys; nested values remain complete JSON values."""
+
+    return all(
+        key in arguments and json_values_equal(arguments[key], value)
+        for key, value in expected.items()
+    )
 
 
 def _phrase_signals(text: str, phrases: Iterable[str]) -> tuple[bool, bool]:

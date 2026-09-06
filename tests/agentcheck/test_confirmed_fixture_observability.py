@@ -244,9 +244,9 @@ def test_frozen_v2_is_verified_without_fixture_migration():
         FrozenSuite.model_validate_json(json.dumps(tampered))
 
 
-def test_new_generation_records_v3_and_explicit_bounded_stateless_slots():
+def test_new_generation_records_v4_and_explicit_bounded_stateless_slots():
     _, suite, case = _generated(True)
-    assert suite.provenance.generator_version == "3"
+    assert suite.provenance.generator_version == "4"
     focal = [f for f in case.tool_fixtures if f.tool_name == "archive_ticket"]
     assert [f.invocation_index for f in focal] == list(range(1, 6))
     assert len({f.fixture_id for f in focal}) == 5

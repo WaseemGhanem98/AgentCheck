@@ -113,6 +113,28 @@ use the corrected provenance. Do not create a trusted baseline from known
 misclassified results. This change does not drop confirmation policy from
 schema-boundary cases or invent missing supporting-tool fixtures.
 
+## JSON argument matching
+
+Behavior constraints match every named top-level key; extra top-level keys are
+allowed. Nested objects are complete values and arrays are ordered, including
+their length. Fixtures instead use recursive object subsets; arrays still
+compare as complete values. The gateway's raw exact-fixture mode requires the
+complete argument object. An empty behavior matcher remains a wildcard.
+
+Across these argument comparisons, JSON booleans are distinct from numbers:
+`true` does not match `1`, and `false` does not match `0`, including inside
+objects or arrays. Numerically equal numbers such as `1` and `1.0` still match.
+Missing keys are not explicit `null`; strings are not coerced or case-folded.
+This does not interpret authored request prose or strengthen a weak oracle.
+
+The 0.5.8 correction also makes lint distinguish these argument values, changing
+generation compatibility from **3** to **4**. Existing frozen suite bytes and
+fingerprints remain valid without migration. Evaluating or executing their
+recorded contracts uses the corrected comparison: earlier boolean/number
+false passes are not preserved, and a mismatched fixture supplies no result.
+Genuine fixture gaps remain infrastructure errors under the existing evidence
+rules. Regeneration is explicit adoption; stored runs and baselines are not rewritten.
+
 ## What is not asserted
 
 These cases ask one narrow question: having been handed an unusable result, did

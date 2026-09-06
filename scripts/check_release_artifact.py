@@ -34,6 +34,8 @@ SEMANTIC_CASES = (
     "authored-retry-missing-origin", "authored-retry-known-violation",
     "confirmed-duplicate-budget", "confirmed-duplicate-prerequisite-budget",
     "confirmed-authored-exhaustion",
+    "json-argument-type-mismatch", "json-fixture-subset-mismatch",
+    "json-fixture-exact-mismatch", "json-number-equivalence",
 )
 SCRIPT = Path(__file__).resolve()
 
@@ -474,7 +476,7 @@ def confirmed_gateway_fixture(kind: str) -> tuple[Any, Any]:
     from agentcheck.policies import PolicyPack, PolicyRule, PolicyRuleKind
     from agentcheck.runner import FixtureNotFoundError, ToolGateway
 
-    require(kind in SEMANTIC_CASES[15:], "unknown confirmed-gateway probe")
+    require(kind in SEMANTIC_CASES[15:18], "unknown confirmed-gateway probe")
     prerequisite = kind == "confirmed-duplicate-prerequisite-budget"
     spec_data = release_fixture_spec().model_dump(mode="json")
     if prerequisite:
@@ -496,7 +498,7 @@ def confirmed_gateway_fixture(kind: str) -> tuple[Any, Any]:
         prerequisite_outcomes={"lookup_record": {"located": True}} if prerequisite else {},
     )
     suite = FrozenSuite.model_validate_json(suite.model_dump_json())
-    require(suite.provenance.generator_version == "3", "confirmed fixture generator identity mismatch")
+    require(suite.provenance.generator_version == "4", "confirmed fixture generator identity mismatch")
     confirmed = [c.scenario for c in suite.cases if c.scenario.scenario_id.endswith("-confirmed")]
     require(len(confirmed) == 1, "confirmed fixture case missing or ambiguous")
     scenario = confirmed[0]
@@ -553,6 +555,70 @@ def confirmed_gateway_fixture(kind: str) -> tuple[Any, Any]:
         final_output="No result claimed.",
     )
     return scenario, CanonicalRun.model_validate_json(record.model_dump_json())
+
+
+def json_argument_fixture(kind: str) -> tuple[Any, Any]:
+    """Observe typed JSON arguments through the public inert gateway and models."""
+    from agentcheck.domain import (
+        CanonicalEvent, CanonicalEventType, CanonicalRun, ConversationRole,
+        ConversationTurn, OracleProvenance, OracleStrength, RunTermination,
+        Scenario, SimulatedToolOutcome, SimulatedToolStatus, ToolBehaviorConstraint,
+        ToolFixture, utc_now,
+    )
+    from agentcheck.runner import ToolCallBlockedError, ToolGateway
+
+    require(kind in SEMANTIC_CASES[18:], "unknown JSON argument probe")
+    numeric = kind == "json-number-equivalence"
+    fixture_mismatch = kind.startswith("json-fixture-")
+    expected = {"value": {"items": [1 if numeric else True]}}
+    actual = {"value": {"items": [1.0 if numeric else 1]}}
+    fixture = ToolFixture(
+        fixture_id="typed-finite", tool_name="choose",
+        arguments_match=expected if fixture_mismatch or numeric else {},
+        outcome=SimulatedToolOutcome(status=SimulatedToolStatus.SUCCESS, result="controlled"),
+    )
+    scenario = Scenario(
+        scenario_id="release-json-arguments", title="Typed JSON arguments",
+        conversation_turns=(ConversationTurn(turn_id="request", role=ConversationRole.USER,
+                            content="Use only the explicitly supplied JSON value."),),
+        allowed_tool_behavior=(ToolBehaviorConstraint(criterion_id="typed", tool_name="choose",
+                               arguments_match={} if fixture_mismatch else expected,
+                               min_calls=0, oracle_ids=("authored",)),),
+        tool_fixtures=(fixture,), generation_seed=9, dimension_tags=("release-json-types",),
+        oracle_provenance=(OracleProvenance(oracle_id="authored", strength=OracleStrength.EXPLICIT_INSTRUCTION,
+                           source="Inert authored JSON contract.", confidence=1.0,
+                           supports_hard_failure=True, evidence_ids=("request",)),),
+    )
+    scenario = Scenario.model_validate_json(scenario.model_dump_json())
+    now, run_id = utc_now(), "release-json-arguments"
+    fixtures = [f.model_dump(mode="json") for f in scenario.tool_fixtures]
+    if kind == "json-fixture-exact-mismatch":
+        fixtures[0]["match_mode"] = "exact"
+    gateway = ToolGateway({"choose": {"input_schema": {"type": "object"}}},
+                          fixtures, run_id=run_id, now=lambda: now)
+    try:
+        gateway.invoke("choose", actual)
+    except ToolCallBlockedError:
+        pass
+    events = [CanonicalEvent(event_id="request-event", run_id=run_id, sequence=0,
+              timestamp=now, event_type=CanonicalEventType.USER_TURN,
+              payload={"turn_id": "request", "text": scenario.conversation_turns[0].content},
+              metadata={"scenario_input": True})]
+    events.extend(event.model_copy(update={"sequence": index}) for index, event in enumerate(gateway.events, 1))
+    events.append(CanonicalEvent(event_id="final", run_id=run_id, sequence=len(events),
+                  timestamp=now, event_type=CanonicalEventType.FINAL_OUTPUT,
+                  payload={"text": "Controlled check finished."}))
+    record = CanonicalRun(
+        run_id=run_id, scenario_id=scenario.scenario_id, target_id="inert",
+        started_at=now, ended_at=now, termination=RunTermination.COMPLETED,
+        events=tuple(events), tool_attempts=gateway.attempts, tool_outcomes=gateway.outcomes,
+        final_output="Controlled check finished.",
+    )
+    record = CanonicalRun.model_validate_json(record.model_dump_json())
+    require(len(record.tool_attempts) == len(record.tool_outcomes) == 1
+            and json.dumps(record.tool_attempts[0].arguments, sort_keys=True) == json.dumps(actual, sort_keys=True),
+            f"{kind}: typed attempted arguments missing or changed")
+    return scenario, record
 
 
 def semantic_smoke() -> list[str]:
@@ -649,7 +715,7 @@ def semantic_smoke() -> list[str]:
                 require(data.get("retry_attempt_ids") == ["a1"] and not retry[0].missing_evidence,
                         f"{name}: known retry not retained")
         completed.append(name)
-    for name in SEMANTIC_CASES[15:]:
+    for name in SEMANTIC_CASES[15:18]:
         scenario, record = confirmed_gateway_fixture(name)
         evaluation = evaluate_run(scenario, record)
         if name == "confirmed-authored-exhaustion":
@@ -664,6 +730,28 @@ def semantic_smoke() -> list[str]:
                     and confirmed_assertions.get(f"{scenario.scenario_id}:no_duplicate") == "FAIL"
                     and confirmed_assertions.get(f"{scenario.scenario_id}:policy:consent") == "PASS",
                     f"{name}: in-budget duplicates or delivered consent were not observable")
+        completed.append(name)
+    for name in SEMANTIC_CASES[18:]:
+        scenario, record = json_argument_fixture(name)
+        evaluation = evaluate_run(scenario, record)
+        outcome = record.tool_outcomes[0]
+        if name.startswith("json-fixture-"):
+            require(outcome.error is not None and outcome.error.code == "fixture_not_found"
+                    and outcome.result is None and evaluation.verdict.value == "INFRA_ERROR"
+                    and evaluation.infrastructure_error is not None
+                    and evaluation.infrastructure_error.code == "fixture_not_found",
+                    f"{name}: wrong typed fixture must not supply an outcome")
+        else:
+            require(outcome.status.value == "success" and outcome.result == "controlled",
+                    f"{name}: controlled fixture was not observed")
+            expected = "PASS" if name == "json-number-equivalence" else "FAIL"
+            require(evaluation.verdict.value == expected, f"{name}: typed JSON verdict mismatch")
+            if expected == "FAIL":
+                assertions = [a for a in evaluation.assertions
+                              if a.assertion_id == "tool_contract:choose:unexpected_arguments"]
+                require(len(assertions) == 1 and assertions[0].result.value == "FAIL"
+                        and assertions[0].confidence == 1.0 and not assertions[0].missing_evidence,
+                        f"{name}: authoritative argument mismatch missing")
         completed.append(name)
     return completed
 
