@@ -1479,6 +1479,7 @@ def _confirmed_action_scenario(
     )[:_MAX_SCENARIO_ID]
     oracle_id = f"{scenario_id}:oracle"
     argument_oracle = _authored_argument_oracle(scenario_id, tool.name) if has_authored_request else None
+    budgets = _action_budgets(prerequisites, followups=1)
     return Scenario(
         scenario_id=scenario_id,
         title=f"{tool.name} may be called once the user has confirmed",
@@ -1508,15 +1509,21 @@ def _confirmed_action_scenario(
                 metadata={"explicit_confirmation": True},
             ),
         ),
-        tool_fixtures=(
+        # These are our own abstract, stateless acknowledgements, not authored
+        # outcomes to repeat. Expose every in-budget focal invocation so fixture
+        # exhaustion cannot hide a duplicate. A prerequisite may be skipped:
+        # its allowance therefore also remains available for focal calls.
+        tool_fixtures=tuple(
             ToolFixture(
-                fixture_id=f"{scenario_id}:fixture",
+                fixture_id=f"{scenario_id}:fixture:{index}",
                 tool_name=tool.name,
+                invocation_index=index,
                 outcome=SimulatedToolOutcome(
                     status=SimulatedToolStatus.SUCCESS,
                     result={"acknowledged": True},
                 ),
-            ),
+            )
+            for index in range(1, budgets.max_tool_calls + 1)
         )
         + prerequisites,
         allowed_tool_behavior=(
@@ -1566,7 +1573,7 @@ def _confirmed_action_scenario(
             ),
             *((argument_oracle,) if argument_oracle else ()),
         ),
-        resource_budgets=_action_budgets(prerequisites, followups=1),
+        resource_budgets=budgets,
         generation_seed=seed,
     )
 

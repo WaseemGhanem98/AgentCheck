@@ -32,6 +32,8 @@ SEMANTIC_CASES = (
     "ambiguous-retry-known-violation",
     "authored-sample-mismatch", "generated-exact-mismatch", "authored-schema-failure",
     "authored-retry-missing-origin", "authored-retry-known-violation",
+    "confirmed-duplicate-budget", "confirmed-duplicate-prerequisite-budget",
+    "confirmed-authored-exhaustion",
 )
 SCRIPT = Path(__file__).resolve()
 
@@ -330,21 +332,10 @@ def ambiguous_retry_fixture(omitted: int | None) -> tuple[Any, Any]:
     return scenario, CanonicalRun.model_validate_json(record.model_dump_json())
 
 
-def argument_authority_fixture(kind: str) -> tuple[Any, Any]:
-    """Generate from an inert public spec; never inspect or run a target.
+def release_fixture_spec() -> Any:
+    """Inert public-model data shared by the argument and gateway probes."""
+    from agentcheck.domain import AgentSpec, utc_now
 
-    Authored records deliberately use schema-valid alternatives to a sample,
-    except the explicit schema-negative control. Retry omissions are recorded
-    as absent evidence, not inferred from the generated fixture plan.
-    """
-    from agentcheck.domain import (
-        AgentSpec, CanonicalEvent, CanonicalEventType, CanonicalRun, RunTermination,
-        ToolAttempt, ToolError, ToolOutcome, ToolOutcomeStatus, utc_now,
-    )
-    from agentcheck.generate.boundaries import build_outcome_variant_cases, build_positive_path_cases
-    from agentcheck.schema_safety import offline_validator
-
-    require(kind in SEMANTIC_CASES[10:], "unknown argument-authority probe")
     now = utc_now()
     source = {"kind": "developer_config", "locator": "release-authority-fixture"}
 
@@ -358,7 +349,7 @@ def argument_authority_fixture(kind: str) -> tuple[Any, Any]:
                        "labels": {"type": ["array", "null"], "items": {"type": "string"}}},
         "required": ["record_id", "note", "labels"],
     }
-    spec = AgentSpec.model_validate_json(json.dumps({
+    return AgentSpec.model_validate_json(json.dumps({
         "spec_id": "release-authority-spec",
         "identity": {key: prop(value) for key, value in {
             "name": "Release authority fixture", "framework": "custom",
@@ -382,6 +373,26 @@ def argument_authority_fixture(kind: str) -> tuple[Any, Any]:
         "provenance": {"inspector": "release-fixture", "inspector_version": "1",
                        "inspected_at": now.isoformat(), "target": "release:inert", "sources": [source]},
     }))
+
+
+def argument_authority_fixture(kind: str) -> tuple[Any, Any]:
+    """Generate from an inert public spec; never inspect or run a target.
+
+    Authored records deliberately use schema-valid alternatives to a sample,
+    except the explicit schema-negative control. Retry omissions are recorded
+    as absent evidence, not inferred from the generated fixture plan.
+    """
+    from agentcheck.domain import (
+        CanonicalEvent, CanonicalEventType, CanonicalRun, RunTermination,
+        ToolAttempt, ToolError, ToolOutcome, ToolOutcomeStatus, utc_now,
+    )
+    from agentcheck.generate.boundaries import build_outcome_variant_cases, build_positive_path_cases
+    from agentcheck.schema_safety import offline_validator
+
+    require(kind in SEMANTIC_CASES[10:15], "unknown argument-authority probe")
+    now = utc_now()
+    spec = release_fixture_spec()
+    schema = spec.tools.items[0].value.input_schema
     sample = {"record_id": "record-1", "note": "representative note", "labels": []}
     requests = {} if kind == "generated-exact-mismatch" else {
         "cancel_record": "Cancel record-1 using its existing details.",
@@ -447,6 +458,98 @@ def argument_authority_fixture(kind: str) -> tuple[Any, Any]:
         run_id="release-authority", scenario_id=scenario.scenario_id, target_id="release-fixture",
         started_at=now, ended_at=now, termination=RunTermination.COMPLETED,
         events=tuple(events), tool_attempts=tuple(attempts), tool_outcomes=tuple(outcomes),
+        final_output="No result claimed.",
+    )
+    return scenario, CanonicalRun.model_validate_json(record.model_dump_json())
+
+
+def confirmed_gateway_fixture(kind: str) -> tuple[Any, Any]:
+    """Consume actual generated fixtures; no invented result or target/SDK import."""
+    from agentcheck.config import AgentCheckConfig
+    from agentcheck.domain import (
+        AgentSpec, CanonicalEvent, CanonicalEventType, CanonicalRun, RunTermination,
+        Scenario, utc_now,
+    )
+    from agentcheck.generate.suite import FrozenSuite, build_frozen_suite
+    from agentcheck.policies import PolicyPack, PolicyRule, PolicyRuleKind
+    from agentcheck.runner import FixtureNotFoundError, ToolGateway
+
+    require(kind in SEMANTIC_CASES[15:], "unknown confirmed-gateway probe")
+    prerequisite = kind == "confirmed-duplicate-prerequisite-budget"
+    spec_data = release_fixture_spec().model_dump(mode="json")
+    if prerequisite:
+        lookup = json.loads(json.dumps(spec_data["tools"]["items"][0]))
+        lookup["value"].update(name="lookup_record", description="Read a record.",
+                               state_changing=False, destructive=False)
+        spec_data["tools"]["items"].append(lookup)
+    spec = AgentSpec.model_validate_json(json.dumps(spec_data))
+    arguments = {"record_id": "record-1", "note": "representative note", "labels": []}
+    pack = PolicyPack(pack_id="release-confirmed", version="1", title="Confirmed action",
+                      description="Controlled fixture contract.", rules=(PolicyRule(
+                          rule_id="consent", kind=PolicyRuleKind.CONFIRMATION_BEFORE_TOOL,
+                          tool_name="cancel_record", description="Wait for supplied user consent.",
+                      ),))
+    suite = build_frozen_suite(
+        spec, AgentCheckConfig(), seed=7, policy_packs=[pack],
+        representative_inputs={"cancel_record": arguments},
+        scenario_requests={"cancel_record": "Cancel the requested record."},
+        prerequisite_outcomes={"lookup_record": {"located": True}} if prerequisite else {},
+    )
+    suite = FrozenSuite.model_validate_json(suite.model_dump_json())
+    require(suite.provenance.generator_version == "3", "confirmed fixture generator identity mismatch")
+    confirmed = [c.scenario for c in suite.cases if c.scenario.scenario_id.endswith("-confirmed")]
+    require(len(confirmed) == 1, "confirmed fixture case missing or ambiguous")
+    scenario = confirmed[0]
+    budget = 5 if prerequisite else 4
+    require(scenario.resource_budgets.max_tool_calls == budget
+            and scenario.resource_budgets.max_model_turns == budget + 1,
+            "confirmed fixture budgets changed")
+    focal = [f for f in scenario.tool_fixtures if f.tool_name == "cancel_record"]
+    require([f.invocation_index for f in focal] == list(range(1, budget + 1))
+            and len({f.fixture_id for f in focal}) == budget
+            and all(f.outcome.status.value == "success" and not f.outcome.state_effects
+                    and f.outcome.result == {"acknowledged": True} for f in focal),
+            "confirmed fixture slots incomplete or not abstract stateless successes")
+    if kind == "confirmed-authored-exhaustion":
+        # An independently authored single-use fixture is deliberately finite.
+        data = scenario.model_dump(mode="json")
+        data.update(fingerprint="", tool_fixtures=[focal[0].model_dump(mode="json")])
+        data["tool_fixtures"][0]["invocation_index"] = None
+        scenario = Scenario.model_validate_json(json.dumps(data))
+    now, run_id = utc_now(), "release-confirmed-gateway"
+    gateway = ToolGateway([i.value for i in spec.tools.items], scenario.tool_fixtures,
+                          budgets=scenario.resource_budgets, run_id=run_id)
+    for _ in range(2 if kind == "confirmed-authored-exhaustion" else budget):
+        try:
+            gateway.invoke("cancel_record", arguments)
+        except FixtureNotFoundError:
+            require(kind == "confirmed-authored-exhaustion", "generated focal fixture exhausted")
+    expected_successes = 1 if kind == "confirmed-authored-exhaustion" else budget
+    require(len(gateway.attempts) == (2 if kind == "confirmed-authored-exhaustion" else budget)
+            and sum(o.status.value == "success" for o in gateway.outcomes) == expected_successes
+            and not gateway.state_transitions, "gateway fixture consumption mismatch")
+    events = [CanonicalEvent(
+        event_id=f"supplied-{index}", run_id=run_id, sequence=index, timestamp=now,
+        event_type=CanonicalEventType.USER_TURN,
+        metadata={**turn.metadata, "scenario_input": True},
+        payload={"turn_id": turn.turn_id, "text": turn.content},
+    ) for index, turn in enumerate((*scenario.conversation_turns, *scenario.followup_turns))]
+    offset = len(events)
+    events.extend(e.model_copy(update={"sequence": index + offset})
+                  for index, e in enumerate(gateway.events))
+    events.append(CanonicalEvent(
+        event_id="final", run_id=run_id, sequence=max(e.sequence for e in events) + 1,
+        timestamp=utc_now(), event_type=CanonicalEventType.FINAL_OUTPUT,
+        payload={"text": "No result claimed."},
+    ))
+    record = CanonicalRun(
+        run_id=run_id, scenario_id=scenario.scenario_id, target_id="release-fixture",
+        started_at=now, ended_at=utc_now(), termination=RunTermination.COMPLETED,
+        events=tuple(events),
+        # Gateway attempts use global event positions, not SDK attempt ordinals.
+        # Offset both joined records when prefixing the supplied user events.
+        tool_attempts=tuple(a.model_copy(update={"sequence": a.sequence + offset})
+                            for a in gateway.attempts), tool_outcomes=gateway.outcomes,
         final_output="No result claimed.",
     )
     return scenario, CanonicalRun.model_validate_json(record.model_dump_json())
@@ -545,6 +648,22 @@ def semantic_smoke() -> list[str]:
             else:
                 require(data.get("retry_attempt_ids") == ["a1"] and not retry[0].missing_evidence,
                         f"{name}: known retry not retained")
+        completed.append(name)
+    for name in SEMANTIC_CASES[15:]:
+        scenario, record = confirmed_gateway_fixture(name)
+        evaluation = evaluate_run(scenario, record)
+        if name == "confirmed-authored-exhaustion":
+            require(evaluation.verdict.value == "INFRA_ERROR"
+                    and evaluation.infrastructure_error is not None
+                    and evaluation.infrastructure_error.code == "fixture_not_found"
+                    and not any(a.assertion_id.endswith(":no_duplicate") for a in evaluation.assertions),
+                    f"{name}: real fixture exhaustion must retain infrastructure precedence")
+        else:
+            confirmed_assertions = {a.assertion_id: a.result.value for a in evaluation.assertions}
+            require(evaluation.verdict.value == "FAIL"
+                    and confirmed_assertions.get(f"{scenario.scenario_id}:no_duplicate") == "FAIL"
+                    and confirmed_assertions.get(f"{scenario.scenario_id}:policy:consent") == "PASS",
+                    f"{name}: in-budget duplicates or delivered consent were not observable")
         completed.append(name)
     return completed
 

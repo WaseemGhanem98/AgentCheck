@@ -106,7 +106,7 @@ known timeout retries retain their independent authority. Explicitly authored
 exact argument contracts and generated requests that enumerate exact values
 are unchanged.
 
-This changes generation semantics: generator compatibility version is **2**.
+This changed generation semantics in generator compatibility version **2**.
 Existing frozen suites retain their recorded assertions and fingerprints; they
 are not rewritten or silently reinterpreted. Generate and review a new suite to
 use the corrected provenance. Do not create a trusted baseline from known
