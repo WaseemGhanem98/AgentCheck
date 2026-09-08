@@ -63,7 +63,7 @@ pydantic-ai = [
     # 2.32 through 2.36 verified; 2.36 literal wrappers have a bounded reader.
     # Focused adapter controls pass on 2.32.2, 2.35.3 and 2.36.0. See
     # SUPPORTED_SDK_MINOR_RANGE in agentcheck/adapters/pydantic_ai.py.
-    "pydantic-ai-slim>=2.32,<2.37",
+    "pydantic-ai-slim>=2.32,<2.41",
 ]
 all = [
     "agentcheck-ai[openai-agents]",
