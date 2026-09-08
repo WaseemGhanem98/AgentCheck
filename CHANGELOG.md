@@ -12,6 +12,35 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## 0.5.8 (2026-09-06)
+
+### Fixed
+
+- JSON argument comparisons no longer equate booleans with numbers, including
+  nested objects and arrays. Explicit `true`/`1` or `false`/`0` mismatches cannot
+  silently pass a behavior contract or select the wrong simulated fixture.
+  Numeric `1`/`1.0` equality, top-level behavior matching, recursive fixture
+  subsets, exact-fixture mode, finite fixtures and oracle authority are retained.
+  Weak argument evidence remains inconclusive; missing fixtures do not invent
+  successful outcomes. No confirmation, retry-order or world-state policy is redesigned.
+
+  **Compatibility:** stored suites still validate against their recorded
+  fingerprints; their bytes, recorded runs and baselines are not rewritten.
+  Re-evaluation and execution use corrected argument matching, not legacy false
+  passes or incorrectly selected outcomes.
+
+  **Suite identity:** generator compatibility changes from 3 to 4 because lint
+  compatibility/admission now distinguishes disjoint boolean/number argument
+  contracts and fixtures. Generate and review new suites to adopt that generation
+  identity; unchanged case payloads are not re-authored by the version bump.
+
+### Release qualification
+
+- Installed-byte probes additionally check a nested boolean/number behavior
+  mismatch, missing typed fixtures in subset and exact modes, and retained
+  numeric equivalence. The prior 18 semantic cases and build/install/hash/network/
+  receipt protocol remain; the release workflow and transport are unchanged.
+
 ## 0.5.7 (2026-09-06)
 
 ### Fixed

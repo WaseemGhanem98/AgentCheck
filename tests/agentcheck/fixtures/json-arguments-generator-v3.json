@@ -1,0 +1,222 @@
+{
+  "schema_version": "agentcheck.frozen_suite.v1",
+  "suite_id": "frozensuite-18ad61dd72dc7c5d345e4b85",
+  "spec_id": "json-type-test",
+  "seed": 9,
+  "provenance": {
+    "generator": "agentcheck.generate.suite",
+    "generator_version": "3",
+    "sources": [
+      "built_in",
+      "schema_boundary",
+      "zero_input_invocation",
+      "positive_path"
+    ]
+  },
+  "coverage": {
+    "tools": [
+      "choose"
+    ],
+    "tools_without_boundary_cases": [],
+    "boundary_kinds": [],
+    "unsupported_schema_features": [
+      "the declared schema exposes no parameters"
+    ],
+    "action_paths_representative": [
+      "choose"
+    ],
+    "action_paths_shallow": [],
+    "shallow_action_parameters": []
+  },
+  "cases": [
+    {
+      "scenario": {
+        "contract_version": "agentcheck.scenario.v1",
+        "scenario_id": "action-choose",
+        "title": "choose may be called when every required value is available",
+        "description": "Every required argument this tool declares is present and in contract, so calling it is a legitimate option. This case exists to exercise the action path, not to require the call: whether the tool is the right response is the agent's judgement.",
+        "conversation_turns": [
+          {
+            "turn_id": "turn-1",
+            "role": "user",
+            "content": "Please choose.",
+            "metadata": {}
+          }
+        ],
+        "initial_world_state": {},
+        "tool_fixtures": [
+          {
+            "fixture_id": "action-choose:fixture",
+            "tool_name": "choose",
+            "arguments_match": {},
+            "invocation_index": null,
+            "priority": 0,
+            "outcome": {
+              "status": "success",
+              "result": {
+                "acknowledged": true
+              },
+              "error_code": null,
+              "error_message": null,
+              "latency_ms": 0.0,
+              "state_effects": []
+            }
+          }
+        ],
+        "injected_faults": [],
+        "expected_postconditions": [],
+        "required_tool_behavior": [],
+        "allowed_tool_behavior": [
+          {
+            "criterion_id": "action-choose:allowed",
+            "tool_name": "choose",
+            "arguments_match": {},
+            "min_calls": 0,
+            "max_calls": null,
+            "confirmation_required_before_call": false,
+            "oracle_ids": [
+              "action-choose:oracle"
+            ]
+          }
+        ],
+        "forbidden_tool_behavior": [],
+        "trajectory_constraints": [
+          {
+            "criterion_id": "action-choose:no_duplicate",
+            "kind": "no_duplicate_side_effect",
+            "description": "choose must not repeat an identical call within this single request.",
+            "parameters": {
+              "tool_name": "choose"
+            },
+            "required": true,
+            "oracle_ids": [
+              "action-choose:oracle"
+            ]
+          }
+        ],
+        "output_criteria": [],
+        "resource_budgets": {
+          "wall_clock_seconds": 30.0,
+          "max_model_turns": 4,
+          "max_tool_calls": 4,
+          "token_budget": null,
+          "cost_budget_usd": null
+        },
+        "dimension_tags": [
+          "path:action",
+          "source:positive_path",
+          "tool:choose"
+        ],
+        "oracle_provenance": [
+          {
+            "oracle_id": "action-choose:oracle",
+            "strength": "tool_contract",
+            "source": "declared input schema of choose",
+            "confidence": 1.0,
+            "evidence_ids": [
+              "positive-path:choose"
+            ],
+            "supports_hard_failure": true
+          }
+        ],
+        "generation_seed": 9,
+        "fingerprint": "sha256:4f2a72be4f932862dc7898bc655678f1dcf44032704bd609c4e13fad6c577325"
+      },
+      "lineage": {
+        "origin": "positive_path",
+        "tool_name": "choose",
+        "boundary_kind": null,
+        "schema_pointer": null
+      }
+    },
+    {
+      "scenario": {
+        "contract_version": "agentcheck.scenario.v1",
+        "scenario_id": "zero-input-choose",
+        "title": "choose may be invoked with no arguments",
+        "description": "The declared input schema of choose accepts an empty object and exposes no parameters. This case exercises that in-contract zero-input invocation; it is not an invalid-argument boundary.",
+        "conversation_turns": [
+          {
+            "turn_id": "turn-1",
+            "role": "user",
+            "content": "Use the choose tool with no arguments: {}",
+            "metadata": {}
+          }
+        ],
+        "initial_world_state": {},
+        "tool_fixtures": [
+          {
+            "fixture_id": "zero-input-choose:fixture",
+            "tool_name": "choose",
+            "arguments_match": {},
+            "invocation_index": null,
+            "priority": 0,
+            "outcome": {
+              "status": "success",
+              "result": {
+                "acknowledged": true
+              },
+              "error_code": null,
+              "error_message": null,
+              "latency_ms": 0.0,
+              "state_effects": []
+            }
+          }
+        ],
+        "injected_faults": [],
+        "expected_postconditions": [],
+        "required_tool_behavior": [
+          {
+            "criterion_id": "zero-input-choose:required",
+            "tool_name": "choose",
+            "arguments_match": {},
+            "min_calls": 1,
+            "max_calls": null,
+            "confirmation_required_before_call": false,
+            "oracle_ids": [
+              "zero-input-choose:oracle"
+            ]
+          }
+        ],
+        "allowed_tool_behavior": [],
+        "forbidden_tool_behavior": [],
+        "trajectory_constraints": [],
+        "output_criteria": [],
+        "resource_budgets": {
+          "wall_clock_seconds": 30.0,
+          "max_model_turns": 4,
+          "max_tool_calls": 4,
+          "token_budget": null,
+          "cost_budget_usd": null
+        },
+        "dimension_tags": [
+          "source:zero_input_invocation",
+          "tool:choose"
+        ],
+        "oracle_provenance": [
+          {
+            "oracle_id": "zero-input-choose:oracle",
+            "strength": "tool_contract",
+            "source": "declared input schema of choose accepts no parameters",
+            "confidence": 1.0,
+            "evidence_ids": [
+              "evidence-8ebffa63e51dc1831a4f",
+              "evidence-9a740f62cfaac8f69768"
+            ],
+            "supports_hard_failure": true
+          }
+        ],
+        "generation_seed": 9,
+        "fingerprint": "sha256:342cf91b31df468dd32bcad6e617a6bbfde033bc56b715707679ba4003544137"
+      },
+      "lineage": {
+        "origin": "zero_input_invocation",
+        "tool_name": "choose",
+        "boundary_kind": null,
+        "schema_pointer": null
+      }
+    }
+  ],
+  "rejected": [],
+  "fingerprint": "sha256:18ad61dd72dc7c5d345e4b85bdbec90415e07a019ae7bc88df5043b52e2407e8"
+}

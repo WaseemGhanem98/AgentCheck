@@ -486,6 +486,8 @@ def test_retry_release_smoke_rejects_wrong_verdicts_and_missing_evidence(monkeyp
             "authored-retry-missing-origin", "authored-retry-known-violation",
             "confirmed-duplicate-budget", "confirmed-duplicate-prerequisite-budget",
             "confirmed-authored-exhaustion",
+            "json-argument-type-mismatch", "json-fixture-subset-mismatch",
+            "json-fixture-exact-mismatch", "json-number-equivalence",
         ]
     else:
         with pytest.raises(ValueError):
@@ -704,7 +706,7 @@ def test_confirmed_release_smoke_rejects_lost_observation_or_infrastructure(monk
     monkeypatch.setattr(agentcheck.evaluate, "evaluate_run", evaluate)
     if mutation == "none":
         assert gate.semantic_smoke() == list(gate.SEMANTIC_CASES)
-        assert len(gate.SEMANTIC_CASES) == 18
+        assert len(gate.SEMANTIC_CASES) == 22
     else:
         with pytest.raises(ValueError, match="observable|infrastructure"):
             gate.semantic_smoke()
@@ -735,4 +737,55 @@ def test_confirmed_release_smoke_refuses_incomplete_or_wrong_fixture_contract(mo
     if mutation == "wrong-version":
         monkeypatch.setattr(suite_module, "GENERATOR_COMPATIBILITY_VERSION", "2")
     with pytest.raises(ValueError, match="fixture slots|fixture case|generator identity"):
+        gate.semantic_smoke()
+
+
+@pytest.mark.parametrize("kind,expected", [
+    ("json-argument-type-mismatch", "FAIL"),
+    ("json-fixture-subset-mismatch", "INFRA_ERROR"),
+    ("json-fixture-exact-mismatch", "INFRA_ERROR"),
+    ("json-number-equivalence", "PASS"),
+])
+def test_json_release_probe_uses_serialized_gateway_evidence(kind, expected):
+    from agentcheck.evaluate import evaluate_run
+    from agentcheck.evaluate.confirmation import observed_completion, tool_evidence_is_consistent
+
+    scenario, record = gate.json_argument_fixture(kind)
+    assert len(record.tool_attempts) == len(record.tool_outcomes) == 1
+    assert tool_evidence_is_consistent(scenario, record) and observed_completion(scenario, record)
+    assert evaluate_run(scenario, record).verdict.value == expected
+    actual = record.tool_attempts[0].arguments["value"]["items"][0]
+    assert not isinstance(actual, bool)
+    if expected == "INFRA_ERROR":
+        assert record.tool_outcomes[0].error.code == "fixture_not_found"
+        assert record.tool_outcomes[0].result is None
+
+
+@pytest.mark.parametrize("kind", [
+    "json-argument-type-mismatch", "json-fixture-subset-mismatch",
+    "json-fixture-exact-mismatch", "json-number-equivalence",
+])
+def test_json_release_smoke_rejects_wrong_typed_verdict(monkeypatch, kind):
+    import agentcheck.evaluate
+    from agentcheck.domain import Verdict
+
+    actual_evaluate = agentcheck.evaluate.evaluate_run
+    actual_fixture = gate.json_argument_fixture
+    selected = None
+
+    def fixture(name):
+        nonlocal selected
+        scenario, record = actual_fixture(name)
+        selected = name
+        return scenario, record
+
+    def evaluate(scenario, record):
+        result = actual_evaluate(scenario, record)
+        if record.run_id == "release-json-arguments" and selected == kind:
+            return result.model_copy(update={"verdict": Verdict.FAIL if kind == "json-number-equivalence" else Verdict.PASS})
+        return result
+
+    monkeypatch.setattr(gate, "json_argument_fixture", fixture)
+    monkeypatch.setattr(agentcheck.evaluate, "evaluate_run", evaluate)
+    with pytest.raises(ValueError, match="typed JSON|typed fixture"):
         gate.semantic_smoke()
