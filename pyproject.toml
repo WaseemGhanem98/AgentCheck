@@ -18,7 +18,7 @@ name = "agentcheck-ai"
 # `agentcheck.generate.GENERATOR_COMPATIBILITY_VERSION`, so bumping this line
 # does not move scenario fingerprints or re-identify equivalent suites.
 # `tests/agentcheck/test_version_decoupling.py` holds that guarantee.
-version = "0.5.8"
+version = "0.5.9"
 description = "Behavioral testing for AI agents"
 readme = "README.md"
 license = "Apache-2.0"
@@ -60,10 +60,10 @@ openai-agents = [
     "websockets>=15,<16",
 ]
 pydantic-ai = [
-    # 2.32 through 2.35 verified: identical private-attribute surface and full
-    # pydantic_ai adapter test suite passing on every minor in range. See
+    # 2.32 through 2.36 verified; 2.36 literal wrappers have a bounded reader.
+    # Focused adapter controls pass on 2.32.2, 2.35.3 and 2.36.0. See
     # SUPPORTED_SDK_MINOR_RANGE in agentcheck/adapters/pydantic_ai.py.
-    "pydantic-ai-slim>=2.32,<2.36",
+    "pydantic-ai-slim>=2.32,<2.37",
 ]
 all = [
     "agentcheck-ai[openai-agents]",

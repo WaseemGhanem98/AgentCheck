@@ -55,7 +55,7 @@ def fake_runner(monkeypatch, distributions):
             receipt.write_text(json.dumps(install_receipt(wheel, digest)))
         if "--probe" in command:
             extra = command[command.index("--extra") + 1]
-            return json.dumps(gate.probe_receipt(digest, VERSION, extra, list(gate.SEMANTIC_CASES)))
+            return json.dumps(gate.probe_receipt(digest, VERSION, extra, gate.expected_semantic_cases(extra)))
         if command[-1] == "--version":
             return f"agentcheck {VERSION}"
         return ""
@@ -789,3 +789,28 @@ def test_json_release_smoke_rejects_wrong_typed_verdict(monkeypatch, kind):
     monkeypatch.setattr(agentcheck.evaluate, "evaluate_run", evaluate)
     with pytest.raises(ValueError, match="typed JSON|typed fixture"):
         gate.semantic_smoke()
+
+
+def test_pydantic_receipt_requires_adapter_cases(distributions, fake_runner, monkeypatch):
+    dist, _, _ = distributions
+    execute, _ = fake_runner
+
+    def missing_adapter_cases(command, scratch):
+        result = execute(command, scratch)
+        if "--probe" in command and command[command.index("--extra") + 1] == "pydantic-ai":
+            proof = json.loads(result)
+            proof["semantic_cases"] = list(gate.SEMANTIC_CASES)
+            return json.dumps(proof)
+        return result
+
+    monkeypatch.setattr(gate, "run", missing_adapter_cases)
+    with pytest.raises(ValueError, match="receipt incomplete"):
+        gate.qualify(dist, VERSION, SOURCE)
+
+
+def test_pydantic_instruction_probe_executes_only_in_its_extra():
+    pytest.importorskip("pydantic_ai")
+    assert gate.pydantic_instruction_smoke() == list(gate.PYDANTIC_INSTRUCTION_CASES)
+    assert gate.expected_semantic_cases("") == list(gate.SEMANTIC_CASES)
+    assert gate.expected_semantic_cases("openai-agents") == list(gate.SEMANTIC_CASES)
+    assert gate.expected_semantic_cases("pydantic-ai") == [*gate.SEMANTIC_CASES, *gate.PYDANTIC_INSTRUCTION_CASES]

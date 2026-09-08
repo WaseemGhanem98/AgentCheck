@@ -12,6 +12,15 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## 0.5.9 (2026-09-08)
+
+### Fixed
+
+- PydanticAI 2.36 literal instructions now survive inspection and sanitized
+  runtime reconstruction. The verified dependency range extends through 2.36;
+  dynamic instructions, templates, structured instruction parts and unknown
+  wrappers remain refused. Suite generation semantics remain version 4.
+
 ## 0.5.8 (2026-09-06)
 
 ### Fixed

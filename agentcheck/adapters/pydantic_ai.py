@@ -91,9 +91,12 @@ FRAMEWORK_NAME = "pydantic_ai"
 # _output_validators, _event_stream_handler, _root_capability,
 # _system_prompt_functions, _system_prompts, _validation_context), the
 # installed default-capability set, and the full pydantic_ai test suite --
-# and found identical to 2.32 for everything this adapter touches. Widening
-# the ceiling again needs the same check, not just a version-string bump.
-SUPPORTED_SDK_MINOR_RANGE = ((2, 32), (2, 35))
+# and found identical to 2.32 for everything this adapter touches.
+# 2.36 changes instruction storage: exact SDK-owned literal wrappers are
+# accepted below; executable/structured recipes remain refused. Focused
+# adapter controls verify reconstruction, interception and default capabilities.
+# Widening again needs evidence, not just a version-string bump.
+SUPPORTED_SDK_MINOR_RANGE = ((2, 32), (2, 36))
 
 # Capabilities the framework installs on every agent. Anything beyond these is
 # target-supplied middleware that wraps node execution, so it is rejected
@@ -302,11 +305,24 @@ def _static_instruction_parts(target: Any) -> tuple[list[str], list[str]]:
     which is target code AgentCheck will not execute during inspection.
     """
 
+    # 2.36 wraps both literals and executable recipes. Read only the exact
+    # SDK wrapper and literal payload: never resolve or stringify a recipe.
+    from pydantic_ai import _instructions
+
+    sourced_type = getattr(_instructions, "SourcedInstruction", None)
     static: list[str] = []
     dynamic: list[str] = []
     for item in getattr(target, "_instructions", ()) or ():
         if isinstance(item, str):
             static.append(item)
+        elif (
+            sourced_type is not None
+            and type(item) is sourced_type
+            and type(item.instruction) is str
+            and item.dynamic is False
+            and item.name is None
+        ):
+            static.append(item.instruction)
         else:
             dynamic.append("agent.instructions")
     for item in getattr(target, "_system_prompts", ()) or ():
