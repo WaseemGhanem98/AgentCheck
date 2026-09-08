@@ -162,6 +162,82 @@ def test_inspect_reads_the_declared_surface() -> None:
     assert spec.provenance.target == "agent.py:agent"
 
 
+def test_literal_instruction_order_reaches_inspection_and_reconstructed_model() -> None:
+    seen: list[str | None] = []
+
+    def model(messages: list[Any], info: AgentInfo) -> ModelResponse:
+        seen.append(info.instructions)
+        return _text("done")
+
+    agent = Agent(FunctionModel(model), instructions=["First.", "Second."], system_prompt="Third.")
+    assert agent._cap_instructions == []
+    expected = "First.\n\nSecond.\n\nThird."
+    assert PydanticAIAdapter().inspect(agent).instructions.system.value == expected
+    run = _run(_prepare(agent, ToolGateway([], [])), "hello")
+    assert run.termination is RunTermination.COMPLETED
+    assert seen == [expected]
+
+
+def test_raw_instruction_strings_remain_ordered() -> None:
+    from agentcheck.adapters.pydantic_ai import _static_instruction_parts
+
+    agent = _agent()
+    sdk_entry = agent._instructions[0]
+    agent._instructions = ["First.", "Second."]  # type: ignore[list-item]
+    assert _static_instruction_parts(agent) == (["First.", "Second."], [])
+    agent._instructions = ["First.", sdk_entry, "Second."]  # type: ignore[list-item]
+    assert _static_instruction_parts(agent) == (["First.", "Assist the customer.", "Second."], [])
+
+
+@pytest.mark.parametrize("kind", ["callback", "template", "part", "unknown", "lookalike", "subclass", "dynamic"])
+def test_sourced_instruction_refusals_never_execute_or_stringify(kind: str) -> None:
+    from pydantic_ai import _instructions
+    from pydantic_ai.template import TemplateStr
+
+    sourced = getattr(_instructions, "SourcedInstruction", None)
+    if sourced is None:
+        pytest.skip("SDK-owned wrappers were introduced in 2.36")
+    calls: list[str] = []
+
+    class Unknown:
+        def __str__(self) -> str:
+            calls.append("stringified")
+            raise AssertionError("unknown payload must not be stringified")
+
+    def callback() -> str:
+        calls.append("called")
+        raise AssertionError("instruction callback must not run")
+
+    class Lookalike(Unknown):
+        instruction = "not SDK owned"
+        dynamic = False
+        name = None
+
+    class Subclass(sourced):
+        pass
+
+    from pydantic_ai.messages import InstructionPart
+
+    # Bypass template compilation: even an uninitialized executable template
+    # must be refused without invoking it or reading template internals.
+    template = object.__new__(TemplateStr)
+    payloads = {
+        "callback": sourced(callback, dynamic=False),
+        "template": sourced(template, dynamic=False),
+        "part": sourced(InstructionPart(content="Text", name="named")),
+        "unknown": sourced(Unknown()),
+        "lookalike": Lookalike(),
+        "subclass": Subclass("Text"),
+        "dynamic": sourced("Text", dynamic=True),
+    }
+    agent = _agent()
+    agent._instructions = [payloads[kind]]
+    assert PydanticAIAdapter().inspect(agent).instructions.system.value is None
+    with pytest.raises(UnsupportedTargetError):
+        _prepare(agent, ToolGateway([], []))
+    assert calls == []
+
+
 def test_inspection_never_runs_a_tool_handler() -> None:
     PydanticAIAdapter().inspect(_agent(lookup_order, cancel_order))
     PydanticAIAdapter().preflight(_agent(lookup_order, cancel_order))
@@ -277,11 +353,11 @@ def test_a_static_validation_context_value_is_not_rejected() -> None:
 
 
 def test_an_unsupported_sdk_version_is_named() -> None:
-    """2.32-2.35 verified compatible; see docs/pydantic-ai.md for the evidence.
+    """2.32-2.36 verified compatible; see docs/pydantic-ai.md for the evidence.
 
     The range is a floor and a ceiling, not "2.32 or newer": each new minor
     still needs the same empirical check (dir(Agent), the private-attribute
-    surface this adapter reads, and the full pydantic_ai test suite) before
+    surface this adapter reads, and focused pydantic_ai runtime controls) before
     being added, because inspection reads framework-private attributes with
     no stability guarantee.
     """
@@ -292,7 +368,8 @@ def test_an_unsupported_sdk_version_is_named() -> None:
     assert _supported_sdk_version("2.34.0") is True
     assert _supported_sdk_version("2.35.0") is True
     assert _supported_sdk_version("2.31.9") is False
-    assert _supported_sdk_version("2.36.0") is False
+    assert _supported_sdk_version("2.36.0") is True
+    assert _supported_sdk_version("2.37.0") is False
     assert _supported_sdk_version("1.0.0") is False
     assert _supported_sdk_version(None) is False
 

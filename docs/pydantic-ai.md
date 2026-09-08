@@ -14,13 +14,16 @@ Install the verified adapter extra from PyPI:
 python -m pip install "agentcheck-ai[pydantic-ai]"
 ```
 
-The extra installs `pydantic-ai-slim >=2.32,<2.36`. AgentCheck deliberately
-supports only PydanticAI 2.32.x through 2.35.x because inspection reads
-framework-private attributes with no stability guarantee across versions --
-each minor in that range was checked directly (the private-attribute surface
-this adapter reads, the framework-installed default-capability set, and the
-full adapter test suite) and found identical to 2.32 for everything this
-adapter touches. A missing extra produces `framework_unavailable`; a version
+The extra installs `pydantic-ai-slim >=2.32,<2.37`. AgentCheck deliberately
+supports only PydanticAI 2.32.x through 2.36.x because inspection reads
+framework-private attributes with no stability guarantee across versions.
+Versions 2.32–2.35 share the inspected surface. Version 2.36's SDK-owned
+`SourcedInstruction` wrapper is accepted only for literal strings, preserving
+instruction order in inspection and the rebuilt model input. Callbacks,
+templates, `InstructionPart` values and unknown wrappers remain refused without
+execution or stringification. Focused offline controls verify tool interception,
+fixtures, structured output, retries, concurrency and cumulative budgets on
+2.35.3 and 2.36.0; default framework capabilities contribute no instructions. A missing extra produces `framework_unavailable`; a version
 outside the verified range produces `unsupported_sdk_version` with the
 expected range and the detected version. AgentCheck fails preflight instead
 of guessing at an unverified object shape.

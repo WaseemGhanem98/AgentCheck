@@ -37,6 +37,7 @@ SEMANTIC_CASES = (
     "json-argument-type-mismatch", "json-fixture-subset-mismatch",
     "json-fixture-exact-mismatch", "json-number-equivalence",
 )
+PYDANTIC_INSTRUCTION_CASES = ("pydantic-literal-reconstruction-gateway", "pydantic-dynamic-refusal")
 SCRIPT = Path(__file__).resolve()
 
 
@@ -756,6 +757,69 @@ def semantic_smoke() -> list[str]:
     return completed
 
 
+def pydantic_instruction_smoke() -> list[str]:
+    import asyncio
+
+    from pydantic_ai import Agent
+    from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
+    from pydantic_ai.models.function import FunctionModel
+
+    from agentcheck.adapters import PydanticAIAdapter, UnsupportedTargetError
+    from agentcheck.domain import SimulatedToolOutcome, SimulatedToolStatus, ToolFixture
+    from agentcheck.runner import ToolGateway
+
+    seen: list[str | None] = []
+    handlers: list[str] = []
+    callbacks: list[str] = []
+    expected = "First.\n\nSecond."
+
+    def original(value: str) -> str:
+        handlers.append(value)
+        raise ValueError("release probe reached original handler")
+
+    def model(messages: Any, info: Any) -> Any:
+        seen.append(info.instructions)
+        if len(seen) == 1:
+            return ModelResponse(parts=[ToolCallPart("original", {"value": "probe"})])
+        return ModelResponse(parts=[TextPart("done")])
+
+    adapter = PydanticAIAdapter()
+    target = Agent(FunctionModel(model), instructions=["First.", "Second."], tools=[original])
+    spec = adapter.inspect(target)
+    require(spec.instructions.system.value == expected, "PydanticAI literal inspection mismatch")
+    gateway = ToolGateway([item.value for item in spec.tools.items], [ToolFixture(
+        fixture_id="release-pydantic", tool_name="original",
+        outcome=SimulatedToolOutcome(status=SimulatedToolStatus.SUCCESS, result="simulated"),
+    )])
+    prepared = adapter.prepare(target, gateway, world_state=gateway.world)
+    record = asyncio.run(adapter.run(prepared, "hello", run_id="release-pydantic", max_turns=4))
+    require(record.termination.value == "completed" and record.final_output == "done"
+            and seen == [expected, expected] and not handlers
+            and len(record.tool_attempts) == len(record.tool_outcomes) == 1
+            and record.tool_attempts[0].tool_name == "original"
+            and record.tool_outcomes[0].status.value == "success"
+            and record.tool_outcomes[0].result == "simulated",
+            "PydanticAI rebuilt instructions or gateway isolation mismatch")
+
+    def dynamic() -> str:
+        callbacks.append("called")
+        raise ValueError("release probe executed dynamic instruction")
+
+    refused = Agent(FunctionModel(model), instructions=dynamic)
+    try:
+        adapter.prepare(refused, ToolGateway([], []), world_state=gateway.world)
+    except UnsupportedTargetError:
+        pass
+    else:
+        raise ValueError("PydanticAI dynamic instructions were admitted")
+    require(not callbacks and not handlers, "PydanticAI probe executed target code")
+    return list(PYDANTIC_INSTRUCTION_CASES)
+
+
+def expected_semantic_cases(extra: str) -> list[str]:
+    return [*SEMANTIC_CASES, *(PYDANTIC_INSTRUCTION_CASES if extra == "pydantic-ai" else ())]
+
+
 def probe_receipt(digest: str, version: str, extra: str, cases: list[str]) -> dict[str, Any]:
     return {"wheel_sha256": digest, "version": version, "extra": extra, "semantic_cases": cases}
 
@@ -770,6 +834,8 @@ def installed_probe(
     install_network_guard(allow_network=False)
     check_frameworks(extra)
     cases = semantic_smoke()
+    if extra == "pydantic-ai":
+        cases.extend(pydantic_instruction_smoke())
     check_network()
     require(not denied_destinations(), "installed smoke attempted network access")
     return probe_receipt(digest, version, extra, cases)
@@ -818,7 +884,7 @@ def qualify(dist: Path, version: str, source_sha: str) -> dict[str, Any]:
                 "--sha256", digest, "--version", version, "--environment", str(environment),
                 "--extra", extra,
             ], scratch)
-            require(json.loads(proof) == probe_receipt(digest, version, extra, list(SEMANTIC_CASES)),
+            require(json.loads(proof) == probe_receipt(digest, version, extra, expected_semantic_cases(extra)),
                     "installed probe receipt incomplete or mismatched")
             cli = [python, "-I", "-c", CLI_PROBE, str(SCRIPT), str(environment / "bin" / "agentcheck")]
             require(run([*cli, "--version"], scratch) == f"agentcheck {version}",
