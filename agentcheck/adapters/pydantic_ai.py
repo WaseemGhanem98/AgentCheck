@@ -20,6 +20,7 @@ import inspect as _inspect
 import json
 from importlib import metadata as importlib_metadata
 from collections.abc import Mapping, Sequence
+from contextvars import ContextVar
 from enum import Enum
 from typing import TYPE_CHECKING, Any, cast
 
@@ -95,8 +96,10 @@ FRAMEWORK_NAME = "pydantic_ai"
 # 2.36 changes instruction storage: exact SDK-owned literal wrappers are
 # accepted below; executable/structured recipes remain refused. Focused
 # adapter controls verify reconstruction, interception and default capabilities.
+# 2.37-2.40 retain that surface; 2.40 event hooks and active execution
+# overrides must be refused rather than silently dropped in reconstruction.
 # Widening again needs evidence, not just a version-string bump.
-SUPPORTED_SDK_MINOR_RANGE = ((2, 32), (2, 36))
+SUPPORTED_SDK_MINOR_RANGE = ((2, 32), (2, 40))
 
 # Capabilities the framework installs on every agent. Anything beyond these is
 # target-supplied middleware that wraps node execution, so it is rejected
@@ -1574,6 +1577,28 @@ class PydanticAIAdapter(FrameworkAdapter):
                     location="agent.validation_context",
                 )
             )
+        # Active SDK context overrides are execution configuration, not target
+        # defaults. Rebuilding from defaults would discard them. These native
+        # ContextVars exist with default None on every supported minor.
+        for name in ("root_capability", "tool_retries", "output_retries"):
+            override = getattr(target, f"_override_{name}", None)
+            inactive = False
+            if type(override) is ContextVar:
+                try:
+                    inactive = ContextVar.get(override) is None
+                except LookupError:
+                    pass
+            if not inactive:
+                issues.append(
+                    SupportIssue(
+                        code="unsupported_execution_override",
+                        message=(
+                            f"The agent has an active or unknown {name} override, "
+                            "which cannot be preserved by the sanitized runtime."
+                        ),
+                        location=f"agent.override.{name}",
+                    )
+                )
         root = getattr(target, "_root_capability", None)
         declared = [
             type(capability).__name__
@@ -1591,6 +1616,26 @@ class PydanticAIAdapter(FrameworkAdapter):
                     location="agent.capabilities",
                 )
             )
+        # 2.40 stores @agent.on_event listeners outside _root_capability.
+        # Rebuilding would silently drop them. Inspect only the exact SDK's
+        # inert empty registry, never its dispatch properties or target code.
+        missing_hooks = object()
+        event_hooks = getattr(target, "_event_hooks", missing_hooks)
+        if event_hooks is not missing_hooks or hasattr(Agent, "on_event"):
+            from pydantic_ai.capabilities import Hooks
+
+            registry = vars(event_hooks).get("_registry") if type(event_hooks) is Hooks else None
+            if type(registry) is not dict or registry:
+                issues.append(
+                    SupportIssue(
+                        code="unsupported_event_hooks",
+                        message=(
+                            "The agent declares event hooks or an unknown hook container, "
+                            "which cannot be preserved by the sanitized runtime."
+                        ),
+                        location="agent.on_event",
+                    )
+                )
         if getattr(target, "_event_stream_handler", None) is not None:
             issues.append(
                 SupportIssue(

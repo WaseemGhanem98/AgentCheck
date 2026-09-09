@@ -37,7 +37,10 @@ SEMANTIC_CASES = (
     "json-argument-type-mismatch", "json-fixture-subset-mismatch",
     "json-fixture-exact-mismatch", "json-number-equivalence",
 )
-PYDANTIC_INSTRUCTION_CASES = ("pydantic-literal-reconstruction-gateway", "pydantic-dynamic-refusal")
+PYDANTIC_INSTRUCTION_CASES = (
+    "pydantic-literal-reconstruction-gateway", "pydantic-dynamic-refusal",
+    "pydantic-execution-override-refusal", "pydantic-event-hook-refusal",
+)
 SCRIPT = Path(__file__).resolve()
 
 
@@ -806,12 +809,47 @@ def pydantic_instruction_smoke() -> list[str]:
         raise ValueError("release probe executed dynamic instruction")
 
     refused = Agent(FunctionModel(model), instructions=dynamic)
+    require(any(issue.code == "dynamic_instructions" for issue in adapter.preflight(refused).issues),
+            "PydanticAI missing dynamic_instructions")
     try:
         adapter.prepare(refused, ToolGateway([], []), world_state=gateway.world)
     except UnsupportedTargetError:
         pass
     else:
         raise ValueError("PydanticAI dynamic instructions were admitted")
+    require(not callbacks and not handlers, "PydanticAI probe executed target code")
+    def require_refusal(agent: Any, code: str) -> None:
+        report = adapter.preflight(agent)
+        require(any(issue.code == code for issue in report.issues), f"PydanticAI missing {code}")
+        try:
+            adapter.prepare(agent, ToolGateway([], []), world_state=gateway.world)
+        except UnsupportedTargetError:
+            pass
+        else:
+            raise ValueError(f"PydanticAI admitted {code}")
+
+    with target.override(retries={"tools": 7, "output": 6}):
+        require_refusal(target, "unsupported_execution_override")
+    require(not any(issue.code == "unsupported_execution_override"
+                    for issue in adapter.preflight(target).issues),
+            "PydanticAI override context did not restore")
+
+    hook_target = Agent(FunctionModel(model), instructions="Literal.")
+
+    def event_observer(ctx: Any, event: Any) -> None:
+        callbacks.append("event")
+        raise ValueError("release probe executed event hook")
+
+    if hasattr(Agent, "on_event"):
+        hook_target.on_event(event_observer)
+    else:
+        # Earlier SDKs lack the public decorator. Exercise the same inert
+        # stored-registry refusal without claiming that public API exists.
+        from pydantic_ai.capabilities import Hooks
+
+        hook_target._event_hooks = Hooks()
+        hook_target._event_hooks._registry["on_event"] = [event_observer]
+    require_refusal(hook_target, "unsupported_event_hooks")
     require(not callbacks and not handlers, "PydanticAI probe executed target code")
     return list(PYDANTIC_INSTRUCTION_CASES)
 
