@@ -14,8 +14,8 @@ Install the verified adapter extra from PyPI:
 python -m pip install "agentcheck-ai[pydantic-ai]"
 ```
 
-The extra installs `pydantic-ai-slim >=2.32,<2.37`. AgentCheck deliberately
-supports only PydanticAI 2.32.x through 2.36.x because inspection reads
+The extra installs `pydantic-ai-slim >=2.32,<2.41`. AgentCheck deliberately
+supports only PydanticAI 2.32.x through 2.40.x because inspection reads
 framework-private attributes with no stability guarantee across versions.
 Versions 2.32–2.35 share the inspected surface. Version 2.36's SDK-owned
 `SourcedInstruction` wrapper is accepted only for literal strings, preserving
@@ -23,7 +23,8 @@ instruction order in inspection and the rebuilt model input. Callbacks,
 templates, `InstructionPart` values and unknown wrappers remain refused without
 execution or stringification. Focused offline controls verify tool interception,
 fixtures, structured output, retries, concurrency and cumulative budgets on
-2.35.3 and 2.36.0; default framework capabilities contribute no instructions. A missing extra produces `framework_unavailable`; a version
+2.32.2, 2.36.0 and 2.37.0–2.40.0; default framework capabilities contribute no
+instructions. A missing extra produces `framework_unavailable`; a version
 outside the verified range produces `unsupported_sdk_version` with the
 expected range and the detected version. AgentCheck fails preflight instead
 of guessing at an unverified object shape.
@@ -66,10 +67,20 @@ The adapter requires:
 - static instructions;
 - ordinary function tools with JSON Schema;
 - no output validators, a callable `validation_context`, target capabilities,
-  event-stream handler, or external toolsets.
+  event-stream handler, registered event hooks, or external toolsets.
 
 Those unsupported surfaces are executable target behavior that cannot be
 reconstructed safely. Preflight names each one and refuses the run.
+
+Agent-level event hooks (`@agent.on_event` on SDK versions that expose it) are
+refused: rebuilding a sanitized agent would drop their behavior. Only the exact
+SDK default hook container with an empty registry is inert; custom containers,
+registered hooks and unknown shapes are unsupported without invoking them.
+
+Active root-capability, tool-retry and output-retry context overrides are also
+refused. Evaluation reconstructs declared defaults and cannot silently discard
+an active `agent.override(...)` configuration. Exit that context before
+preparation; normal inactive defaults remain supported.
 
 ### Dynamic instructions
 

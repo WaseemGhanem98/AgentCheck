@@ -353,7 +353,7 @@ def test_a_static_validation_context_value_is_not_rejected() -> None:
 
 
 def test_an_unsupported_sdk_version_is_named() -> None:
-    """2.32-2.36 verified compatible; see docs/pydantic-ai.md for the evidence.
+    """2.32-2.40 verified compatible; see docs/pydantic-ai.md for the evidence.
 
     The range is a floor and a ceiling, not "2.32 or newer": each new minor
     still needs the same empirical check (dir(Agent), the private-attribute
@@ -369,7 +369,11 @@ def test_an_unsupported_sdk_version_is_named() -> None:
     assert _supported_sdk_version("2.35.0") is True
     assert _supported_sdk_version("2.31.9") is False
     assert _supported_sdk_version("2.36.0") is True
-    assert _supported_sdk_version("2.37.0") is False
+    assert _supported_sdk_version("2.37.0") is True
+    assert _supported_sdk_version("2.38.0") is True
+    assert _supported_sdk_version("2.39.0") is True
+    assert _supported_sdk_version("2.40.0") is True
+    assert _supported_sdk_version("2.41.0") is False
     assert _supported_sdk_version("1.0.0") is False
     assert _supported_sdk_version(None) is False
 
@@ -994,6 +998,140 @@ def test_an_event_stream_handler_is_rejected() -> None:
     codes = {issue.code for issue in PydanticAIAdapter().preflight(agent).issues}
 
     assert "unsupported_event_stream_handler" in codes
+
+
+
+def test_registered_agent_event_hooks_are_refused_without_invocation() -> None:
+    agent = _agent()
+    if not hasattr(agent, "on_event"):
+        pytest.skip("Agent event hooks were introduced in 2.40")
+    calls: list[str] = []
+
+    @agent.on_event
+    def observer(ctx: Any, event: Any) -> None:
+        calls.append("called")
+        raise AssertionError("event observer must never run")
+
+    codes = {issue.code for issue in PydanticAIAdapter().preflight(agent).issues}
+    assert "unsupported_event_hooks" in codes
+    with pytest.raises(UnsupportedTargetError, match="event hooks"):
+        _prepare(agent, ToolGateway([], []))
+    assert calls == []
+
+
+def test_missing_sdk_event_hook_container_is_refused() -> None:
+    agent = _agent()
+    if not hasattr(Agent, "on_event"):
+        pytest.skip("Older SDKs legitimately have no event-hook container")
+    del agent._event_hooks
+    codes = {issue.code for issue in PydanticAIAdapter().preflight(agent).issues}
+    assert "unsupported_event_hooks" in codes
+
+
+@pytest.mark.parametrize("kind", ["default", "nonempty", "subclass", "lookalike", "missing", "unknown_registry", "none"])
+def test_event_hook_container_shapes_fail_closed_without_property_access(kind: str) -> None:
+    from pydantic_ai.capabilities import Hooks
+
+    calls: list[str] = []
+
+    class Lookalike:
+        _registry: dict[str, Any] = {}
+
+        def __bool__(self) -> bool:
+            calls.append("truthiness")
+            raise AssertionError("do not evaluate unknown registry truthiness")
+
+        @property
+        def has_on_event(self) -> bool:
+            calls.append("property")
+            raise AssertionError("do not inspect executable properties")
+
+    class Subclass(Hooks):
+        @property
+        def has_on_event(self) -> bool:
+            calls.append("property")
+            raise AssertionError("do not inspect subclass properties")
+
+    hooks: Any = Hooks()
+    if kind == "nonempty":
+        hooks._registry["on_event"] = []
+    elif kind == "subclass":
+        hooks = Subclass()
+    elif kind == "lookalike":
+        hooks = Lookalike()
+    elif kind == "missing":
+        del hooks._registry
+    elif kind == "unknown_registry":
+        hooks._registry = Lookalike()
+    elif kind == "none":
+        hooks = None
+    agent = _agent()
+    agent._event_hooks = hooks
+    codes = {issue.code for issue in PydanticAIAdapter().preflight(agent).issues}
+    assert ("unsupported_event_hooks" in codes) is (kind != "default")
+    assert calls == []
+
+
+@pytest.mark.parametrize("retries", [{"tools": 7, "output": 6}, {"tools": 0}, {"output": 0}])
+def test_active_public_retry_overrides_are_refused_and_context_restores(retries: Any) -> None:
+    agent = _agent()
+    adapter = PydanticAIAdapter()
+    assert not [i for i in adapter.preflight(agent).issues if i.code == "unsupported_execution_override"]
+    with agent.override(retries=retries):
+        issues = [i for i in adapter.preflight(agent).issues if i.code == "unsupported_execution_override"]
+        assert {i.location for i in issues} == {
+            "agent.override.tool_retries" if key == "tools" else "agent.override.output_retries"
+            for key in retries
+        }
+        with pytest.raises(UnsupportedTargetError, match="override"):
+            _prepare(agent, ToolGateway([], []))
+    assert not [i for i in adapter.preflight(agent).issues if i.code == "unsupported_execution_override"]
+
+
+def test_active_root_context_override_is_refused_and_restored() -> None:
+    # Direct SDK ContextVar control; this does not claim public spec loading.
+    from pydantic_ai._utils import Some
+
+    agent = _agent()
+    state = agent._override_root_capability
+    token = state.set(Some(agent._root_capability))
+    try:
+        issues = PydanticAIAdapter().preflight(agent).issues
+        assert any(i.code == "unsupported_execution_override" and
+                   i.location == "agent.override.root_capability" for i in issues)
+        with pytest.raises(UnsupportedTargetError, match="override"):
+            _prepare(agent, ToolGateway([], []))
+    finally:
+        state.reset(token)
+    assert not [i for i in PydanticAIAdapter().preflight(agent).issues if i.code == "unsupported_execution_override"]
+
+
+@pytest.mark.parametrize("name", ["root_capability", "tool_retries", "output_retries"])
+@pytest.mark.parametrize("kind", ["missing", "unknown", "unset", "active_false"])
+def test_unknown_override_state_is_refused_without_custom_get(name: str, kind: str) -> None:
+    from contextvars import ContextVar
+
+    calls: list[str] = []
+
+    class Unknown:
+        def get(self) -> None:
+            calls.append("get")
+            raise AssertionError("custom context container must not run")
+
+    agent = _agent()
+    field = f"_override_{name}"
+    if kind == "missing":
+        delattr(agent, field)
+    elif kind == "unknown":
+        setattr(agent, field, Unknown())
+    elif kind == "unset":
+        setattr(agent, field, ContextVar("without-default"))
+    else:
+        getattr(agent, field).set(False)
+    issues = PydanticAIAdapter().preflight(agent).issues
+    assert any(i.code == "unsupported_execution_override" and i.location == f"agent.override.{name}"
+               for i in issues)
+    assert calls == []
 
 
 def test_a_plain_agent_passes_preflight() -> None:

@@ -12,6 +12,23 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## 0.5.10 (2026-09-09)
+
+### Fixed
+
+- PydanticAI 2.37–2.40 are supported within the existing static instruction and
+  simulated-tool boundary. Registered event hooks are refused because runtime
+  reconstruction would otherwise silently drop them.
+- Active root-capability, tool-retry and output-retry context overrides now
+  fail preflight instead of being discarded in favor of declared defaults.
+  Inactive defaults and restored contexts retain their existing behavior.
+- Release artifact checks verify these refusals and require the specific
+  dynamic-instruction refusal, without invoking target callbacks or handlers.
+
+### Suite identity
+
+Generator compatibility remains **4**; suite generation semantics are unchanged.
+
 ## 0.5.9 (2026-09-08)
 
 ### Fixed

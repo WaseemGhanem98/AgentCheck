@@ -814,3 +814,20 @@ def test_pydantic_instruction_probe_executes_only_in_its_extra():
     assert gate.expected_semantic_cases("") == list(gate.SEMANTIC_CASES)
     assert gate.expected_semantic_cases("openai-agents") == list(gate.SEMANTIC_CASES)
     assert gate.expected_semantic_cases("pydantic-ai") == [*gate.SEMANTIC_CASES, *gate.PYDANTIC_INSTRUCTION_CASES]
+
+
+@pytest.mark.parametrize("code", ["dynamic_instructions", "unsupported_execution_override", "unsupported_event_hooks"])
+def test_pydantic_release_probe_rejects_discarded_execution_state(monkeypatch, code):
+    pytest.importorskip("pydantic_ai")
+    from dataclasses import replace
+    from agentcheck.adapters import PydanticAIAdapter
+
+    original = PydanticAIAdapter.preflight
+
+    def drop_guard(self, *args, **kwargs):
+        report = original(self, *args, **kwargs)
+        return replace(report, issues=tuple(issue for issue in report.issues if issue.code != code))
+
+    monkeypatch.setattr(PydanticAIAdapter, "preflight", drop_guard)
+    with pytest.raises(ValueError, match=f"missing {code}"):
+        gate.pydantic_instruction_smoke()
