@@ -36,10 +36,13 @@ from agentcheck.fixtures import (
     load_representative_inputs,
 )
 from agentcheck.domain import (
+    AgentProperty,
     AgentSpec,
     CaseEvaluation,
     Scenario,
     Severity,
+    SourceKind,
+    ToolDefinition,
     Verdict,
     measured_action_path_exercise,
 )
@@ -71,6 +74,9 @@ _CONSOLE_ERROR_MESSAGE_CHARS = 320
 _CONSOLE_SCENARIO_TITLE_CHARS = 96
 _CONSOLE_COVERAGE_SUBJECT_CHARS = 500
 _CONSOLE_COVERAGE_REASON_CHARS = 100
+_MCP_MANIFEST_TOOL_LOCATOR_RE = re.compile(
+    r".+\.mcp_manifest\.tools\[(?:0|[1-9][0-9]*)\]", re.DOTALL
+)
 _TEST_PROGRESS_HEARTBEAT_SECONDS = 10.0
 _TEST_PROGRESS_RESULT_COLUMN = 72
 _TRUNCATION_MARKER = "...[TRUNCATED]"
@@ -829,16 +835,15 @@ def _print_action_path_exercise(execution: Any) -> None:
         if AUTHORED_REQUEST_TAG in scenario.dimension_tags
     }
     if any(item not in authored for item in exercise.not_exercised):
-        # Valid arguments are not the same as a reason to act. The generated
-        # request states the tool's declared purpose and hands over the values,
-        # which reads as a data handover rather than a situation, and a capable
-        # agent can answer it without acting. Naming the fix here is the only
-        # place the reader is already looking at the problem.
+        # Not every generated family marks its authored requests with this tag.
+        # Its absence does not establish that the request came from schema data,
+        # so keep the advice conditional.
         print(
-            '  To exercise these, add a "user_request" for the tool in '
+            '  Check whether the tool has a "user_request" in '
             "agentcheck-fixtures.json describing a realistic situation that "
-            "calls for the action. Declining a request remains a valid agent "
-            "choice, so AgentCheck never counts a missing call as a failure."
+            "calls for the action; if it is missing, add one. An unexercised "
+            "path supplies no behavioral execution evidence; the evaluation "
+            "verdict is reported separately."
         )
     if any(item in authored for item in exercise.not_exercised):
         # Already given a situation a developer wrote and still no call. That
@@ -976,6 +981,20 @@ def _print_declared_behavioral_coverage(coverage: BehavioralCoverage) -> None:
                 )
 
 
+def _is_manifest_declared_tool(item: AgentProperty[ToolDefinition], *, framework: str) -> bool:
+    """Recognize the existing PydanticAI manifest provenance, not tool prose."""
+
+    source = getattr(item, "source", None)
+    if framework != "pydantic_ai" or getattr(source, "kind", None) is not SourceKind.TOOL_SCHEMA:
+        return False
+    locator = getattr(source, "locator", None)
+    return (
+        isinstance(locator, str)
+        and _MCP_MANIFEST_TOOL_LOCATOR_RE.fullmatch(locator) is not None
+        and any(evidence.locator == locator for evidence in getattr(item, "evidence", ()))
+    )
+
+
 def _print_inspection(
     spec: AgentSpec,
     *,
@@ -986,6 +1005,7 @@ def _print_inspection(
     capabilities = [item.value for item in spec.capabilities.items]
     state_changing = sum(item.state_changing for item in tools)
     destructive = sum(item.destructive for item in tools)
+    has_manifest_tools = False
     print(f"Agent: {spec.identity.name.value}")
     print(
         "Framework: "
@@ -1002,12 +1022,16 @@ def _print_inspection(
     if tools:
         print()
         print("Tools:")
-        for tool in tools:
+        for tool_property in spec.tools.items:
+            tool = tool_property.value
             markers = []
             if tool.state_changing:
                 markers.append("state-changing")
             if tool.destructive:
                 markers.append("destructive")
+            if _is_manifest_declared_tool(tool_property, framework=spec.identity.framework.value):
+                markers.append("developer-declared MCP")
+                has_manifest_tools = True
             suffix = f" ({', '.join(markers)})" if markers else ""
             print(f"✓ {tool.name}{suffix}")
         print()
@@ -1027,6 +1051,8 @@ def _print_inspection(
     _print_preflight(preflight_issues)
     print()
     print("Inspection scope:")
+    if has_manifest_tools:
+        print("- MCP manifest declarations do not verify live server inventory or completeness.")
     print("- Describes the exported object after import, not the complete runtime application.")
     print(
         "- Tools, MCP servers, or other capabilities assigned later "
