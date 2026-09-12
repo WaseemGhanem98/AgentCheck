@@ -1580,7 +1580,10 @@ class PydanticAIAdapter(FrameworkAdapter):
         # Active SDK context overrides are execution configuration, not target
         # defaults. Rebuilding from defaults would discard them. These native
         # ContextVars exist with default None on every supported minor.
-        for name in ("root_capability", "tool_retries", "output_retries"):
+        for name in (
+            "root_capability", "tool_retries", "output_retries",
+            "instructions", "model", "model_settings", "native_tools", "metadata",
+        ):
             override = getattr(target, f"_override_{name}", None)
             inactive = False
             if type(override) is ContextVar:

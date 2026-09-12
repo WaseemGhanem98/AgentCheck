@@ -1106,7 +1106,10 @@ def test_active_root_context_override_is_refused_and_restored() -> None:
     assert not [i for i in PydanticAIAdapter().preflight(agent).issues if i.code == "unsupported_execution_override"]
 
 
-@pytest.mark.parametrize("name", ["root_capability", "tool_retries", "output_retries"])
+@pytest.mark.parametrize("name", [
+    "root_capability", "tool_retries", "output_retries",
+    "instructions", "model", "model_settings", "native_tools", "metadata",
+])
 @pytest.mark.parametrize("kind", ["missing", "unknown", "unset", "active_false"])
 def test_unknown_override_state_is_refused_without_custom_get(name: str, kind: str) -> None:
     from contextvars import ContextVar
@@ -1132,6 +1135,61 @@ def test_unknown_override_state_is_refused_without_custom_get(name: str, kind: s
     assert any(i.code == "unsupported_execution_override" and i.location == f"agent.override.{name}"
                for i in issues)
     assert calls == []
+
+
+
+@pytest.mark.parametrize("name,kind", [
+    ("instructions", "literal"), ("instructions", "empty"), ("instructions", "callback"),
+    ("model", "local"),
+    ("model_settings", "literal"), ("model_settings", "empty"), ("model_settings", "callback"),
+    ("metadata", "literal"), ("metadata", "empty"), ("metadata", "callback"),
+    ("native_tools", "literal"), ("native_tools", "empty"),
+])
+def test_discarded_public_configuration_is_refused_without_invocation_and_restores(name: str, kind: str) -> None:
+    from pydantic_ai.native_tools import WebSearchTool
+
+    calls: list[str] = []
+
+    def callback(*args: Any) -> Any:
+        calls.append("callback")
+        raise AssertionError("override callback or model must never execute")
+
+    if kind == "callback":
+        value: Any = callback
+    elif name == "model":
+        value = FunctionModel(callback, model_name="override-local")
+    elif name == "instructions":
+        value = [] if kind == "empty" else "Override instructions."
+    elif name == "native_tools":
+        value = [] if kind == "empty" else [WebSearchTool()]
+    elif name == "model_settings":
+        value = {} if kind == "empty" else {"temperature": 0.2}
+    else:
+        value = {} if kind == "empty" else {"label": "override"}
+    agent = _agent()
+    adapter = PydanticAIAdapter()
+    assert adapter.preflight(agent).supported
+    with agent.override(**{name: value}):
+        issues = adapter.preflight(agent).issues
+        assert any(i.code == "unsupported_execution_override" and i.location == f"agent.override.{name}"
+                   for i in issues)
+        with pytest.raises(UnsupportedTargetError, match=f"{name} override"):
+            _prepare(agent, ToolGateway([], []))
+    assert adapter.preflight(agent).supported
+    prepared = _prepare(agent, ToolGateway([], []))
+    assert prepared.spec.instructions.system.value == "Assist the customer."
+    assert calls == []
+
+
+def test_name_empty_toolsets_and_inert_deps_override_paths_remain_available() -> None:
+    agent = _agent()
+    # This does not promise arbitrary tools/toolsets support. The existing
+    # external-toolset boundary and simulation-only dependency policy remain.
+    with agent.override(name="OverrideName", toolsets=[], deps=object()):
+        prepared = _prepare(agent, ToolGateway([], []))
+        assert prepared.runtime_agent.name == "OverrideName"
+        assert prepared.runtime_agent._override_deps.get() is None
+    assert agent.name == "OrderSupport"
 
 
 def test_a_plain_agent_passes_preflight() -> None:

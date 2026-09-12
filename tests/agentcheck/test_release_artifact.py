@@ -831,3 +831,21 @@ def test_pydantic_release_probe_rejects_discarded_execution_state(monkeypatch, c
     monkeypatch.setattr(PydanticAIAdapter, "preflight", drop_guard)
     with pytest.raises(ValueError, match=f"missing {code}"):
         gate.pydantic_instruction_smoke()
+
+
+@pytest.mark.parametrize("name", ["instructions", "model", "model_settings", "native_tools", "metadata"])
+def test_pydantic_release_probe_rejects_missing_specific_override_guard(monkeypatch, name):
+    pytest.importorskip("pydantic_ai")
+    from dataclasses import replace
+    from agentcheck.adapters import PydanticAIAdapter
+
+    original = PydanticAIAdapter.preflight
+    location = f"agent.override.{name}"
+
+    def drop_guard(self, *args, **kwargs):
+        report = original(self, *args, **kwargs)
+        return replace(report, issues=tuple(issue for issue in report.issues if issue.location != location))
+
+    monkeypatch.setattr(PydanticAIAdapter, "preflight", drop_guard)
+    with pytest.raises(ValueError, match=f"missing {location}"):
+        gate.pydantic_instruction_smoke()
