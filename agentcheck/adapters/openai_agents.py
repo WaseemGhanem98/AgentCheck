@@ -62,6 +62,7 @@ from agentcheck.domain import (
     utc_now,
 )
 from agentcheck.inspect.capabilities import extract_capabilities
+from agentcheck.errors import ConfigurationError
 from agentcheck.inspect.risk_authority import declared_risk_for, resolve_tool_risk
 
 if TYPE_CHECKING:
@@ -2022,7 +2023,12 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
         mcp_manifest: "McpManifest | None" = None,
     ) -> AgentSpec:
-        del mcp_manifest  # No external-toolset concept on this adapter yet.
+        if mcp_manifest is not None:
+            raise ConfigurationError(
+                "The OpenAI Agents adapter does not support "
+                "agentcheck-mcp-manifest.json. Remove the manifest or use "
+                "a supported PydanticAI target."
+            )
         _require_sdk()
         source = source or "runtime:agent"
         if type(target) is not Agent:
@@ -2473,7 +2479,21 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
     def preflight(
         self, target: Any, *, mcp_manifest: "McpManifest | None" = None
     ) -> PreflightReport:
-        del mcp_manifest  # No external-toolset concept on this adapter yet.
+        if mcp_manifest is not None:
+            return PreflightReport(
+                framework=FRAMEWORK_NAME,
+                issues=(
+                    SupportIssue(
+                        code="unsupported_mcp_manifest",
+                        message=(
+                            "The OpenAI Agents adapter does not support "
+                            "agentcheck-mcp-manifest.json. Remove the manifest or use "
+                            "a supported PydanticAI target."
+                        ),
+                        location="agentcheck-mcp-manifest.json",
+                    ),
+                ),
+            )
         _require_sdk()
         issues: list[SupportIssue] = []
         version = _sdk_version()
@@ -2731,8 +2751,7 @@ class OpenAIAgentsAdapter(FrameworkAdapter):
         declared_tool_risk: "Mapping[str, ToolRiskDeclaration] | None" = None,
         mcp_manifest: "McpManifest | None" = None,
     ) -> PreparedTarget:
-        del mcp_manifest  # No external-toolset concept on this adapter yet.
-        report = self.preflight(target)
+        report = self.preflight(target, mcp_manifest=mcp_manifest)
         report.require_supported()
         spec = self.inspect(
             target,

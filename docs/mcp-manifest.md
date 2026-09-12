@@ -1,5 +1,12 @@
 # MCP tool manifests
 
+This manifest is supported only by the PydanticAI adapter. The OpenAI Agents
+and custom adapters refuse a supplied manifest, including an empty one,
+instead of silently ignoring its declared tools.
+
+Tool names must contain 1–200 characters, matching the existing tool contract.
+Invalid lengths are reported when loading the manifest.
+
 An agent whose tools come from an external toolset — the shape a real
 MCP-backed agent has — is refused at `preflight` with `unsupported_toolset`.
 AgentCheck only replaces tools it can fully own: the agent's own function

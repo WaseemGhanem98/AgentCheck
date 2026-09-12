@@ -907,3 +907,42 @@ def test_target_extractor_directory_entrypoint_cannot_escape(tmp_path: Any) -> N
         resolve_entrypoint(target)
     with pytest.raises(TargetLoadError, match="target directory"):
         load_target(target)
+
+
+@pytest.mark.parametrize("nonempty", [False, True, None])
+def test_openai_mcp_manifest_is_refused_before_target_access(nonempty: bool | None) -> None:
+    from agentcheck.errors import ConfigurationError
+    from agentcheck.mcp_manifest import DeclaredMcpTool, McpManifest
+
+    adapter = OpenAIAgentsAdapter()
+    target = Agent(name="Manifest boundary")
+    gateway = ToolGateway([], [])
+    assert adapter.preflight(target).supported
+    assert adapter.inspect(target).tools.items == ()
+    assert adapter.prepare(target, gateway, world_state=gateway.world).tool_names == ()
+    class UnknownManifest:
+        def __bool__(self):
+            raise AssertionError("manifest truthiness must not be evaluated")
+
+        @property
+        def tools(self):
+            raise AssertionError("unsupported manifest contents must not be read")
+
+    manifest = UnknownManifest() if nonempty is None else McpManifest(
+        tools={"declared": DeclaredMcpTool()} if nonempty else {}
+    )
+
+    class UnreadTarget:
+        @property
+        def tools(self):
+            raise AssertionError("unsupported manifest must precede target inspection")
+
+    for candidate in (target, UnreadTarget()):
+        report = adapter.preflight(candidate, mcp_manifest=manifest)
+        assert [(i.code, i.location) for i in report.issues] == [
+            ("unsupported_mcp_manifest", "agentcheck-mcp-manifest.json")
+        ]
+        with pytest.raises(ConfigurationError, match="does not support"):
+            adapter.inspect(candidate, mcp_manifest=manifest)
+        with pytest.raises(UnsupportedTargetError, match="does not support"):
+            adapter.prepare(candidate, gateway, world_state=gateway.world, mcp_manifest=manifest)

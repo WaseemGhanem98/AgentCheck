@@ -58,6 +58,7 @@ if TYPE_CHECKING:
 from jsonschema.exceptions import SchemaError  # type: ignore[import-untyped]
 
 from agentcheck.custom import TurnResult
+from agentcheck.errors import ConfigurationError
 from agentcheck.domain.agent_spec import (
     AgentProperty,
     AgentSpec,
@@ -834,7 +835,12 @@ class CustomAgentAdapter(FrameworkAdapter):
         of the target access.
         """
 
-        del mcp_manifest  # No external-toolset concept on this adapter yet.
+        if mcp_manifest is not None:
+            raise ConfigurationError(
+                "The custom adapter does not support "
+                "agentcheck-mcp-manifest.json. Remove the manifest or use "
+                "a supported PydanticAI target."
+            )
         locator = source or f"{type(target).__module__}.{type(target).__name__}"
         tool_risk_assertions: dict[str, ToolRiskAssertion] = {}
         definitions: list[ToolDefinition] = []
@@ -1093,7 +1099,21 @@ class CustomAgentAdapter(FrameworkAdapter):
         declaration that has to be executed to be read is not a declaration.
         """
 
-        del mcp_manifest  # No external-toolset concept on this adapter yet.
+        if mcp_manifest is not None:
+            return PreflightReport(
+                framework=FRAMEWORK_NAME,
+                issues=(
+                    SupportIssue(
+                        code="unsupported_mcp_manifest",
+                        message=(
+                            "The custom adapter does not support "
+                            "agentcheck-mcp-manifest.json. Remove the manifest or use "
+                            "a supported PydanticAI target."
+                        ),
+                        location="agentcheck-mcp-manifest.json",
+                    ),
+                ),
+            )
         if not self._implements_any_of_the_contract(target):
             # One diagnosis, not three symptoms. An object with none of the
             # contract on it is almost always the wrong object -- a config
@@ -1299,7 +1319,8 @@ class CustomAgentAdapter(FrameworkAdapter):
         constructed here.
         """
 
-        del mcp_manifest  # No external-toolset concept on this adapter yet.
+        if mcp_manifest is not None:
+            self.preflight(target, mcp_manifest=mcp_manifest).require_supported()
         if controlled_model:
             # Refused, not recorded as a caveat. AgentCheck substitutes a
             # deterministic model by rebuilding the target around one, and a
@@ -1325,7 +1346,7 @@ class CustomAgentAdapter(FrameworkAdapter):
                     )
                 ]
             )
-        report = self.preflight(target)
+        report = self.preflight(target, mcp_manifest=mcp_manifest)
         report.require_supported()
         spec = self.inspect(
             target,

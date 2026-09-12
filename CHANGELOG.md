@@ -24,6 +24,16 @@ identity**.
 - Release artifact checks verify each newly refused override family, including
   exact issue locations and callback tripwires. Existing name, tool/toolset and
   inert dependency boundaries are unchanged; the supported SDK range is unchanged.
+- Public PydanticAI tools overrides now identify the agent's own function
+  toolset within one SDK snapshot. This prevents false external-toolset
+  refusals and prevents a manifest from adding phantom tools when the target
+  has no external toolset. Release checks exercise this manifest boundary.
+- OpenAI Agents and custom adapters explicitly refuse supplied MCP manifests
+  during preflight, inspection and preparation instead of silently ignoring
+  them. MCP manifests remain a PydanticAI-only feature.
+- MCP manifest loading validates the existing 1–200 character tool-name
+  bounds early, reporting a manifest configuration error instead of failing
+  later during inspection. Name grammar and supported schema roots are unchanged.
 
 ### Suite identity
 

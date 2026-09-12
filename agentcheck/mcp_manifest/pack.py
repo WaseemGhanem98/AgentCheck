@@ -26,7 +26,7 @@ fixtures, stated here for the same reason.
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field
 
@@ -65,7 +65,9 @@ class McpManifest(ContractModel):
     schema_version: Literal["agentcheck.mcp_manifest.v1"] = (
         MCP_MANIFEST_CONTRACT_VERSION
     )
-    tools: dict[str, DeclaredMcpTool] = Field(default_factory=dict)
+    tools: dict[Annotated[str, Field(min_length=1, max_length=200)], DeclaredMcpTool] = Field(
+        default_factory=dict
+    )
 
 
 __all__ = [
