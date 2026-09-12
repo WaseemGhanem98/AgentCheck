@@ -12,6 +12,23 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## 0.5.11 (2026-09-11)
+
+### Fixed
+
+- Active PydanticAI instruction, model, model-settings, native-tool and metadata
+  overrides now fail preflight instead of being silently discarded when the
+  simulated runtime is rebuilt. Empty active values and unknown override state
+  fail closed without invoking override callbacks. Inactive defaults and
+  restored contexts retain their behavior.
+- Release artifact checks verify each newly refused override family, including
+  exact issue locations and callback tripwires. Existing name, tool/toolset and
+  inert dependency boundaries are unchanged; the supported SDK range is unchanged.
+
+### Suite identity
+
+Generator compatibility remains **4**; suite generation semantics are unchanged.
+
 ## 0.5.10 (2026-09-09)
 
 ### Fixed

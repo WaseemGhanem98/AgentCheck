@@ -40,6 +40,9 @@ SEMANTIC_CASES = (
 PYDANTIC_INSTRUCTION_CASES = (
     "pydantic-literal-reconstruction-gateway", "pydantic-dynamic-refusal",
     "pydantic-execution-override-refusal", "pydantic-event-hook-refusal",
+    "pydantic-instructions-override-refusal", "pydantic-model-override-refusal",
+    "pydantic-model-settings-override-refusal", "pydantic-native-tools-override-refusal",
+    "pydantic-metadata-override-refusal",
 )
 SCRIPT = Path(__file__).resolve()
 
@@ -818,9 +821,10 @@ def pydantic_instruction_smoke() -> list[str]:
     else:
         raise ValueError("PydanticAI dynamic instructions were admitted")
     require(not callbacks and not handlers, "PydanticAI probe executed target code")
-    def require_refusal(agent: Any, code: str) -> None:
+    def require_refusal(agent: Any, code: str, location: str | None = None) -> None:
         report = adapter.preflight(agent)
-        require(any(issue.code == code for issue in report.issues), f"PydanticAI missing {code}")
+        require(any(issue.code == code and (location is None or issue.location == location)
+                    for issue in report.issues), f"PydanticAI missing {location or code}")
         try:
             adapter.prepare(agent, ToolGateway([], []), world_state=gateway.world)
         except UnsupportedTargetError:
@@ -851,6 +855,25 @@ def pydantic_instruction_smoke() -> list[str]:
         hook_target._event_hooks._registry["on_event"] = [event_observer]
     require_refusal(hook_target, "unsupported_event_hooks")
     require(not callbacks and not handlers, "PydanticAI probe executed target code")
+    def override_callback(*args: Any) -> Any:
+        callbacks.append("override")
+        raise ValueError("release probe executed override code")
+
+    overrides = {
+        "instructions": ["OVERRIDE", [], override_callback],
+        "model": [FunctionModel(override_callback, model_name="override-local")],
+        "model_settings": [{}, {"temperature": 0.2}, override_callback],
+        "native_tools": [[]],
+        "metadata": [{}, {"label": "override"}, override_callback],
+    }
+    for name, values in overrides.items():
+        for value in values:
+            with target.override(**{name: value}):
+                require_refusal(target, "unsupported_execution_override", f"agent.override.{name}")
+            require(not any(issue.code == "unsupported_execution_override"
+                            for issue in adapter.preflight(target).issues),
+                    f"PydanticAI {name} override did not restore")
+    require(not callbacks and not handlers, "PydanticAI probe executed override code")
     return list(PYDANTIC_INSTRUCTION_CASES)
 
 

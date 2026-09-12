@@ -77,10 +77,14 @@ refused: rebuilding a sanitized agent would drop their behavior. Only the exact
 SDK default hook container with an empty registry is inert; custom containers,
 registered hooks and unknown shapes are unsupported without invoking them.
 
-Active root-capability, tool-retry and output-retry context overrides are also
-refused. Evaluation reconstructs declared defaults and cannot silently discard
-an active `agent.override(...)` configuration. Exit that context before
-preparation; normal inactive defaults remain supported.
+Active instruction, model, model-settings, native-tool and metadata overrides
+are refused, along with root-capability and retry overrides. Reconstruction
+would discard that configuration; metadata also permits executable callbacks.
+Exit the relevant `agent.override(...)` context before preparation. Empty active
+values remain overrides, while inactive defaults and restored contexts remain
+supported. Name, tool and toolset paths keep their existing boundaries; this is
+not a promise of arbitrary toolset or active-tools override support. Dependencies
+still use AgentCheck's inert simulation placeholder.
 
 ### Dynamic instructions
 
