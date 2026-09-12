@@ -83,7 +83,10 @@ would discard that configuration; metadata also permits executable callbacks.
 Exit the relevant `agent.override(...)` context before preparation. Empty active
 values remain overrides, while inactive defaults and restored contexts remain
 supported. Name, tool and toolset paths keep their existing boundaries; this is
-not a promise of arbitrary toolset or active-tools override support. Dependencies
+not a promise of arbitrary toolset support. Public tools overrides retain their
+effective function-tool schemas. A manifest still requires an actual external
+toolset; an overridden own function toolset cannot satisfy that requirement.
+Dependencies
 still use AgentCheck's inert simulation placeholder.
 
 ### Dynamic instructions

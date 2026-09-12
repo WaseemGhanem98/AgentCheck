@@ -22,7 +22,7 @@ from pydantic_ai.messages import ModelResponse, TextPart, ToolCallPart
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 from pydantic_ai.toolsets import AbstractToolset
 
-from agentcheck.adapters import PydanticAIAdapter
+from agentcheck.adapters import PydanticAIAdapter, UnsupportedTargetError
 from agentcheck.domain import (
     ConversationRole,
     ConversationTurn,
@@ -174,6 +174,69 @@ def test_preflight_rejects_a_manifest_without_an_external_toolset() -> None:
         issue.code == "mcp_manifest_without_external_toolset"
         for issue in report.issues
     )
+
+
+@pytest.mark.parametrize("with_tool", [False, True])
+def test_tools_override_cannot_admit_phantom_manifest_tools(with_tool: bool) -> None:
+    def effective_tool(value: int) -> int:
+        raise AssertionError("original override handler must never execute")
+
+    agent = Agent("test")
+    adapter = PydanticAIAdapter()
+    manifest = McpManifest(
+        tools={"phantom": DeclaredMcpTool(description="Phantom.", input_schema={})}
+    )
+    with agent.override(tools=[effective_tool] if with_tool else []):
+        expected = ["effective_tool"] if with_tool else []
+        assert sorted(agent.toolsets[0].tools) == expected
+        assert adapter.preflight(agent).supported
+        spec = adapter.inspect(agent)
+        assert [item.value.name for item in spec.tools.items] == expected
+        gateway = ToolGateway([], [])
+        prepared = adapter.prepare(agent, gateway, world_state=gateway.world)
+        assert sorted(prepared.runtime_agent.toolsets[0].tools) == expected
+        if with_tool:
+            assert spec.tools.items[0].value.input_schema["properties"]["value"]["type"] == "integer"
+        report = adapter.preflight(agent, mcp_manifest=manifest)
+        assert [(issue.code, issue.location) for issue in report.issues] == [
+            ("mcp_manifest_without_external_toolset", "agent.toolsets")
+        ]
+        with pytest.raises(ConfigurationError, match="no external toolset"):
+            adapter.inspect(agent, mcp_manifest=manifest)
+        with pytest.raises(UnsupportedTargetError, match="no external toolset"):
+            adapter.prepare(agent, gateway, world_state=gateway.world, mcp_manifest=manifest)
+    assert adapter.preflight(agent).supported
+    assert adapter.preflight(agent, mcp_manifest=manifest).issues[0].code == "mcp_manifest_without_external_toolset"
+
+
+@pytest.mark.parametrize("with_tool", [False, True])
+def test_tools_override_retains_real_external_manifest_boundary(with_tool: bool) -> None:
+    def effective_tool(value: int) -> int:
+        raise AssertionError("original override handler must never execute")
+
+    agent = _agent_with_external_toolset()
+    adapter = PydanticAIAdapter()
+    manifest = McpManifest(
+        tools={"declared": DeclaredMcpTool(description="External.", input_schema={})}
+    )
+    with agent.override(tools=[effective_tool] if with_tool else []):
+        assert adapter.preflight(agent).issues[0].code == "unsupported_toolset"
+        assert adapter.preflight(agent, mcp_manifest=manifest).supported
+        assert adapter.preflight(agent, mcp_manifest=McpManifest()).issues[0].code == "invalid_mcp_manifest"
+        gateway = ToolGateway([], [])
+        prepared = adapter.prepare(agent, gateway, world_state=gateway.world, mcp_manifest=manifest)
+        expected = ["declared", "effective_tool"] if with_tool else ["declared"]
+        assert sorted(prepared.runtime_agent.toolsets[0].tools) == expected
+        if with_tool:
+            collision = McpManifest(tools={"effective_tool": DeclaredMcpTool()})
+            with pytest.raises(ConfigurationError, match="also a real function tool"):
+                adapter.inspect(agent, mcp_manifest=collision)
+            with pytest.raises(ConfigurationError, match="also a real function tool"):
+                adapter.prepare(agent, gateway, world_state=gateway.world, mcp_manifest=collision)
+        with agent.override(toolsets=[]):
+            assert adapter.preflight(agent).supported
+            assert adapter.preflight(agent, mcp_manifest=manifest).issues[0].code == "mcp_manifest_without_external_toolset"
+        assert adapter.preflight(agent, mcp_manifest=manifest).supported
 
 
 def test_manifest_name_colliding_with_a_real_tool_is_rejected() -> None:
@@ -372,3 +435,23 @@ def test_load_mcp_manifest_refuses_a_symlink_escaping_the_target(tmp_path: Path)
     with pytest.raises(ConfigurationError):
         load_mcp_manifest(tmp_path)
     outside.unlink()
+
+
+@pytest.mark.parametrize("name", ["", "x" * 201])
+def test_manifest_tool_names_reject_existing_contract_length_violations(tmp_path: Path, name: str) -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        McpManifest(tools={name: DeclaredMcpTool()})
+    path = tmp_path / "agentcheck-mcp-manifest.json"
+    path.write_text(json.dumps({"tools": {name: {"input_schema": {}}}}))
+    with pytest.raises(ConfigurationError, match="invalid agentcheck-mcp-manifest.json"):
+        load_mcp_manifest(tmp_path)
+
+
+@pytest.mark.parametrize("name", ["x", "x" * 200, "with spaces"])
+def test_manifest_tool_names_preserve_boundaries_and_existing_grammar(tmp_path: Path, name: str) -> None:
+    manifest = McpManifest(tools={name: DeclaredMcpTool(input_schema={"type": "string"})})
+    path = tmp_path / "agentcheck-mcp-manifest.json"
+    path.write_text(manifest.model_dump_json())
+    assert load_mcp_manifest(tmp_path) == manifest

@@ -248,7 +248,10 @@ class _InertDependencies:
 def _agent_toolset(target: Any) -> Any | None:
     """The agent's own function toolset, or None when the shape is unexpected."""
 
-    toolsets = getattr(target, "toolsets", ())
+    return _own_function_toolset(getattr(target, "toolsets", ()))
+
+
+def _own_function_toolset(toolsets: Sequence[Any]) -> Any | None:
     for toolset in toolsets:
         if isinstance(getattr(toolset, "tools", None), dict):
             return toolset
@@ -266,7 +269,10 @@ def _external_toolsets(target: Any) -> list[Any]:
     """Toolsets AgentCheck cannot read for itself -- MCP and anything like it."""
 
     toolsets = list(getattr(target, "toolsets", ()) or ())
-    own = _agent_toolset(target)
+    # A public tools override makes the SDK build a new own toolset on each
+    # property read. Compare identities within one snapshot, or that own
+    # toolset looks external and a manifest can invent tools on the target.
+    own = _own_function_toolset(toolsets)
     return [toolset for toolset in toolsets if toolset is not own]
 
 

@@ -811,9 +811,23 @@ def test_pydantic_receipt_requires_adapter_cases(distributions, fake_runner, mon
 def test_pydantic_instruction_probe_executes_only_in_its_extra():
     pytest.importorskip("pydantic_ai")
     assert gate.pydantic_instruction_smoke() == list(gate.PYDANTIC_INSTRUCTION_CASES)
-    assert gate.expected_semantic_cases("") == list(gate.SEMANTIC_CASES)
-    assert gate.expected_semantic_cases("openai-agents") == list(gate.SEMANTIC_CASES)
-    assert gate.expected_semantic_cases("pydantic-ai") == [*gate.SEMANTIC_CASES, *gate.PYDANTIC_INSTRUCTION_CASES]
+    assert gate.expected_semantic_cases("") == [*gate.SEMANTIC_CASES, *gate.CUSTOM_MANIFEST_CASES]
+    assert gate.expected_semantic_cases("openai-agents") == [*gate.SEMANTIC_CASES, *gate.CUSTOM_MANIFEST_CASES, *gate.OPENAI_MANIFEST_CASES]
+    assert gate.expected_semantic_cases("pydantic-ai") == [*gate.SEMANTIC_CASES, *gate.PYDANTIC_INSTRUCTION_CASES, *gate.CUSTOM_MANIFEST_CASES]
+
+
+def test_pydantic_release_probe_rejects_cross_snapshot_toolset_identity(monkeypatch):
+    pytest.importorskip("pydantic_ai")
+    import agentcheck.adapters.pydantic_ai as adapter
+
+    def old_external_toolsets(target):
+        toolsets = list(target.toolsets)
+        own = adapter._agent_toolset(target)
+        return [toolset for toolset in toolsets if toolset is not own]
+
+    monkeypatch.setattr(adapter, "_external_toolsets", old_external_toolsets)
+    with pytest.raises(ValueError, match="refused owned tools override"):
+        gate.pydantic_instruction_smoke()
 
 
 @pytest.mark.parametrize("code", ["dynamic_instructions", "unsupported_execution_override", "unsupported_event_hooks"])
@@ -849,3 +863,51 @@ def test_pydantic_release_probe_rejects_missing_specific_override_guard(monkeypa
     monkeypatch.setattr(PydanticAIAdapter, "preflight", drop_guard)
     with pytest.raises(ValueError, match=f"missing {location}"):
         gate.pydantic_instruction_smoke()
+
+
+@pytest.mark.parametrize("extra", ["", "pydantic-ai", "openai-agents"])
+def test_release_unsupported_manifest_probe_is_extra_specific(extra):
+    if extra == "openai-agents":
+        pytest.importorskip("agents")
+    expected = [*gate.CUSTOM_MANIFEST_CASES, *(gate.OPENAI_MANIFEST_CASES if extra == "openai-agents" else ())]
+    assert gate.unsupported_manifest_smoke(extra) == expected
+    assert len(gate.expected_semantic_cases(extra)) == {"": 23, "openai-agents": 24, "pydantic-ai": 33}[extra]
+
+
+@pytest.mark.parametrize("adapter_name,extra", [("CustomAgentAdapter", ""), ("OpenAIAgentsAdapter", "openai-agents")])
+@pytest.mark.parametrize("surface", ["preflight", "inspect", "prepare"])
+def test_release_manifest_probe_detects_each_ignored_surface(monkeypatch, adapter_name, extra, surface):
+    if extra == "openai-agents":
+        pytest.importorskip("agents")
+    import agentcheck.adapters as adapters
+
+    adapter = getattr(adapters, adapter_name)
+    original = getattr(adapter, surface)
+
+    def ignore_manifest(self, *args, **kwargs):
+        kwargs.pop("mcp_manifest", None)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(adapter, surface, ignore_manifest)
+    expected = "missing unsupported_mcp_manifest" if surface == "preflight" else f"{surface} ignored manifest"
+    with pytest.raises(ValueError, match=expected):
+        gate.unsupported_manifest_smoke(extra)
+
+
+@pytest.mark.parametrize("surface", ["model", "loader"])
+def test_release_manifest_probe_detects_missing_name_length_validation(monkeypatch, surface):
+    import agentcheck.mcp_manifest as manifests
+
+    if surface == "model":
+        original = manifests.McpManifest
+
+        def omit_name_validation(**kwargs):
+            return original.model_construct(**kwargs)
+
+        monkeypatch.setattr(manifests, "McpManifest", omit_name_validation)
+        message = "manifest probe accepted invalid tool-name length"
+    else:
+        monkeypatch.setattr(manifests, "load_mcp_manifest", lambda root: None)
+        message = "manifest loader accepted invalid tool-name length"
+    with pytest.raises(ValueError, match=message):
+        gate.unsupported_manifest_smoke("")

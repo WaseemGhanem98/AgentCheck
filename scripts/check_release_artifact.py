@@ -43,7 +43,10 @@ PYDANTIC_INSTRUCTION_CASES = (
     "pydantic-instructions-override-refusal", "pydantic-model-override-refusal",
     "pydantic-model-settings-override-refusal", "pydantic-native-tools-override-refusal",
     "pydantic-metadata-override-refusal",
+    "pydantic-tools-override-manifest-boundary",
 )
+CUSTOM_MANIFEST_CASES = ("custom-mcp-manifest-refusal",)
+OPENAI_MANIFEST_CASES = ("openai-mcp-manifest-refusal",)
 SCRIPT = Path(__file__).resolve()
 
 
@@ -772,6 +775,8 @@ def pydantic_instruction_smoke() -> list[str]:
 
     from agentcheck.adapters import PydanticAIAdapter, UnsupportedTargetError
     from agentcheck.domain import SimulatedToolOutcome, SimulatedToolStatus, ToolFixture
+    from agentcheck.errors import ConfigurationError
+    from agentcheck.mcp_manifest import DeclaredMcpTool, McpManifest
     from agentcheck.runner import ToolGateway
 
     seen: list[str | None] = []
@@ -874,11 +879,120 @@ def pydantic_instruction_smoke() -> list[str]:
                             for issue in adapter.preflight(target).issues),
                     f"PydanticAI {name} override did not restore")
     require(not callbacks and not handlers, "PydanticAI probe executed override code")
+    manifest = McpManifest(tools={
+        "phantom": DeclaredMcpTool(description="Synthetic declaration.", input_schema={})
+    })
+    for tools in ([], [original]):
+        with target.override(tools=tools):
+            require(adapter.preflight(target).supported, "PydanticAI refused owned tools override")
+            expected_tools = ["original"] if tools else []
+            effective = adapter.prepare(target, ToolGateway([], []), world_state=gateway.world)
+            require(list(effective.tool_names) == expected_tools,
+                    "PydanticAI lost effective override tools")
+            report = adapter.preflight(target, mcp_manifest=manifest)
+            require(any(issue.code == "mcp_manifest_without_external_toolset"
+                        and issue.location == "agent.toolsets" for issue in report.issues),
+                    "PydanticAI missing phantom manifest refusal")
+            try:
+                adapter.inspect(target, mcp_manifest=manifest)
+            except ConfigurationError:
+                pass
+            else:
+                raise ValueError("PydanticAI inspected phantom manifest tools")
+            try:
+                adapter.prepare(target, ToolGateway([], []), world_state=gateway.world,
+                                mcp_manifest=manifest)
+            except UnsupportedTargetError:
+                pass
+            else:
+                raise ValueError("PydanticAI rebuilt phantom manifest tools")
+    require(not callbacks and not handlers and seen == [expected, expected],
+            "PydanticAI manifest probe executed target code or model")
     return list(PYDANTIC_INSTRUCTION_CASES)
 
 
+def unsupported_manifest_smoke(extra: str) -> list[str]:
+    from pydantic import ValidationError
+    from agentcheck.adapters import CustomAgentAdapter, UnsupportedTargetError
+    from agentcheck.errors import ConfigurationError
+    from agentcheck.mcp_manifest import DeclaredMcpTool, McpManifest, load_mcp_manifest
+    from agentcheck.runner import ToolGateway
+
+    calls: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="agentcheck-manifest-probe-") as temporary:
+        root = Path(temporary)
+        path = root / "agentcheck-mcp-manifest.json"
+        for name in ("", "x" * 201):
+            try:
+                McpManifest(tools={name: DeclaredMcpTool()})
+            except ValidationError:
+                pass
+            else:
+                raise ValueError("manifest probe accepted invalid tool-name length")
+            path.write_text(json.dumps({"tools": {name: {}}}))
+            try:
+                load_mcp_manifest(root)
+            except ConfigurationError as error:
+                require("agentcheck-mcp-manifest.json" in str(error),
+                        "manifest probe lost configuration context")
+            else:
+                raise ValueError("manifest loader accepted invalid tool-name length")
+        for name in ("x", "x" * 200, "with spaces"):
+            manifest = McpManifest(tools={name: DeclaredMcpTool(input_schema={"type": "string"})})
+            path.write_text(manifest.model_dump_json())
+            require(load_mcp_manifest(root) == manifest, "manifest probe changed valid names or schema roots")
+
+    class CustomTarget:
+        tools: tuple[Any, ...] = ()
+
+        def start(self, message: str, tools: Any) -> Any:
+            calls.append("start")
+            raise ValueError("release probe executed custom start")
+
+        def resume(self, state: Any, message: str, tools: Any) -> Any:
+            calls.append("resume")
+            raise ValueError("release probe executed custom resume")
+
+    targets: list[tuple[Any, Any, str]] = [
+        (CustomAgentAdapter(), CustomTarget(), CUSTOM_MANIFEST_CASES[0])
+    ]
+    if extra == "openai-agents":
+        from agents import Agent
+        from agentcheck.adapters import OpenAIAgentsAdapter
+
+        targets.append((OpenAIAgentsAdapter(), Agent(name="Manifest probe"), OPENAI_MANIFEST_CASES[0]))
+    completed = []
+    for adapter, target, case in targets:
+        gateway = ToolGateway([], [])
+        require(adapter.preflight(target).supported, f"{case}: baseline refused")
+        require(not adapter.inspect(target).tools.items, f"{case}: baseline tools changed")
+        require(not adapter.prepare(target, gateway, world_state=gateway.world).tool_names,
+                f"{case}: baseline reconstruction changed")
+        for manifest in (McpManifest(), McpManifest(tools={"declared": DeclaredMcpTool()})):
+            report = adapter.preflight(target, mcp_manifest=manifest)
+            require(any(issue.code == "unsupported_mcp_manifest"
+                        and issue.location == "agentcheck-mcp-manifest.json" for issue in report.issues),
+                    f"{case}: missing unsupported_mcp_manifest")
+            try:
+                adapter.inspect(target, mcp_manifest=manifest)
+            except ConfigurationError:
+                pass
+            else:
+                raise ValueError(f"{case}: inspect ignored manifest")
+            try:
+                adapter.prepare(target, gateway, world_state=gateway.world, mcp_manifest=manifest)
+            except UnsupportedTargetError:
+                pass
+            else:
+                raise ValueError(f"{case}: prepare ignored manifest")
+        completed.append(case)
+    require(not calls, "release manifest probe executed custom target")
+    return completed
+
+
 def expected_semantic_cases(extra: str) -> list[str]:
-    return [*SEMANTIC_CASES, *(PYDANTIC_INSTRUCTION_CASES if extra == "pydantic-ai" else ())]
+    return [*SEMANTIC_CASES, *(PYDANTIC_INSTRUCTION_CASES if extra == "pydantic-ai" else ()),
+            *CUSTOM_MANIFEST_CASES, *(OPENAI_MANIFEST_CASES if extra == "openai-agents" else ())]
 
 
 def probe_receipt(digest: str, version: str, extra: str, cases: list[str]) -> dict[str, Any]:
@@ -897,6 +1011,7 @@ def installed_probe(
     cases = semantic_smoke()
     if extra == "pydantic-ai":
         cases.extend(pydantic_instruction_smoke())
+    cases.extend(unsupported_manifest_smoke(extra))
     check_network()
     require(not denied_destinations(), "installed smoke attempted network access")
     return probe_receipt(digest, version, extra, cases)
