@@ -124,11 +124,11 @@ jobs:
         # standard hosted runners. Product wall-clock budgets stay unchanged.
         run: |
           if [ "${{ matrix.python-version }}" = "$PRIMARY_PYTHON" ]; then
-            python -m pytest -p no:cacheprovider tests -q -n 1
+            python -m pytest -p no:cacheprovider tests -q -n 1 --durations=25
           else
             mapfile -t compat < <(python tests/compat_manifest.py)
             echo "cross-version suite: ${#compat[@]} files"
-            python -m pytest -p no:cacheprovider "${compat[@]}" -q -n 1
+            python -m pytest -p no:cacheprovider "${compat[@]}" -q -n 1 --durations=25
           fi
 
   checks:

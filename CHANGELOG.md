@@ -12,7 +12,7 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
-## 0.5.11 (2026-09-11)
+## 0.5.11 (2026-09-12)
 
 ### Fixed
 
@@ -34,6 +34,10 @@ identity**.
 - MCP manifest loading validates the existing 1–200 character tool-name
   bounds early, reporting a manifest configuration error instead of failing
   later during inspection. Name grammar and supported schema roots are unchanged.
+- CLI action-path advice no longer assumes an authored request is missing when
+  its tag is absent, and distinguishes path measurement from evaluation verdicts.
+  Inspection labels tools declared through MCP manifests and states that these
+  declarations do not verify live server inventory or completeness.
 
 ### Suite identity
 

@@ -16,12 +16,142 @@ from agentcheck.coverage import (
     BehavioralCoverageStatus,
     BehavioralDimension,
 )
-from agentcheck.domain import Scenario, Verdict
+from agentcheck.domain import (
+    AgentProperty,
+    Scenario,
+    SourceKind,
+    SourceReference,
+    SpecEvidence,
+    ToolDefinition,
+    Verdict,
+)
 from agentcheck.evaluate import infrastructure_evaluation
 from agentcheck.errors import ConfigurationError
 from agentcheck.generate import build_account_support_suite
 from agentcheck.initialize import write_initial_config
 from scripts.check_distribution import _long_description_link_violations
+
+
+def _inspection_tool(
+    *,
+    name: str = "delete_account",
+    locator: str = "target.agent.mcp_manifest.tools[0]",
+    kind: SourceKind = SourceKind.TOOL_SCHEMA,
+    evidence_locator: str | None = None,
+) -> AgentProperty[ToolDefinition]:
+    return AgentProperty(
+        value=ToolDefinition(
+            name=name,
+            description="developer-declared MCP manifest tool",
+            input_schema={"type": "object", "properties": {}},
+            state_changing=True,
+            destructive=True,
+        ),
+        source=SourceReference(kind=kind, locator=locator),
+        confidence=0.9,
+        inferred=True,
+        authoritative=False,
+        evidence=(SpecEvidence(
+            evidence_id="tool-provenance",
+            summary="developer-declared MCP manifest tool",
+            locator=evidence_locator if evidence_locator is not None else locator,
+        ),),
+    )
+
+
+def _inspection_spec(*tools: object, framework: str = "pydantic_ai") -> SimpleNamespace:
+    return SimpleNamespace(
+        identity=SimpleNamespace(
+            name=SimpleNamespace(value="Data-only inspection"),
+            framework=SimpleNamespace(value=framework),
+            framework_version=SimpleNamespace(value=None),
+            model=SimpleNamespace(value=None),
+        ),
+        tools=SimpleNamespace(items=tools),
+        capabilities=SimpleNamespace(items=()),
+        policies=SimpleNamespace(items=()),
+        unknowns=(),
+    )
+
+
+@pytest.mark.parametrize(("prefix", "index"), [("target.agent", 0), ("target.agent", 12), ("target\nagent", 0)])
+def test_inspection_labels_manifest_provenance_without_changing_risk_or_data(
+    capsys: pytest.CaptureFixture[str], prefix: str, index: int,
+) -> None:
+    tool = _inspection_tool(locator=f"{prefix}.mcp_manifest.tools[{index}]")
+    before = tool.model_dump(mode="json")
+
+    cli._print_inspection(_inspection_spec(tool))
+
+    output = capsys.readouterr().out
+    assert "✓ delete_account (state-changing, destructive, developer-declared MCP)" in output
+    assert "- 1 tools" in output
+    assert "- 1 state-changing actions" in output
+    assert "- 1 destructive actions" in output
+    assert "do not verify live server inventory or completeness" in output
+    assert tool.model_dump(mode="json") == before
+
+
+@pytest.mark.parametrize(
+    ("locator", "kind", "framework", "evidence_locator"),
+    [
+        ("target.agent.tools[0]", SourceKind.TOOL_SCHEMA, "pydantic_ai", None),
+        ("target.mcp_manifest.tools[0].agent.tools[1]", SourceKind.TOOL_SCHEMA, "pydantic_ai", None),
+        ("target.mcp_manifest.tools[0].nested", SourceKind.TOOL_SCHEMA, "pydantic_ai", None),
+        ("target.mcp_manifest.tools[-1]", SourceKind.TOOL_SCHEMA, "pydantic_ai", None),
+        ("target.mcp_manifest.tools[01]", SourceKind.TOOL_SCHEMA, "pydantic_ai", None),
+        ("target.mcp_manifest.tools[index]", SourceKind.TOOL_SCHEMA, "pydantic_ai", None),
+        ("target.mcp_manifest.tools[0]", SourceKind.RUNTIME_INTROSPECTION, "pydantic_ai", None),
+        ("target.mcp_manifest.tools[0]", SourceKind.TOOL_SCHEMA, "openai-agents", None),
+        ("target.mcp_manifest.tools[0]", SourceKind.TOOL_SCHEMA, "pydantic-ai", None),
+        ("target.mcp_manifest.tools[0]", SourceKind.TOOL_SCHEMA, "pydantic_ai", "target.agent.tools[0]"),
+    ],
+)
+def test_inspection_requires_bound_manifest_provenance_not_name_or_prose(
+    capsys: pytest.CaptureFixture[str], locator: str, kind: SourceKind,
+    framework: str, evidence_locator: str | None,
+) -> None:
+    tool = _inspection_tool(
+        name="mcp_manifest.tools[0]", locator=locator, kind=kind,
+        evidence_locator=evidence_locator,
+    )
+
+    cli._print_inspection(_inspection_spec(tool, framework=framework))
+
+    output = capsys.readouterr().out
+    assert "✓ mcp_manifest.tools[0] (state-changing, destructive)" in output
+    assert "developer-declared MCP" not in output
+    assert "do not verify live server inventory or completeness" not in output
+
+
+def test_inspection_keeps_legacy_unprovenanced_tools_unlabelled(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    tool = _inspection_tool()
+    legacy = SimpleNamespace(value=tool.value)
+    missing_evidence = SimpleNamespace(value=tool.value, source=tool.source)
+
+    cli._print_inspection(_inspection_spec(legacy, missing_evidence))
+
+    output = capsys.readouterr().out
+    assert output.count("✓ delete_account (state-changing, destructive)") == 2
+    assert "developer-declared MCP" not in output
+    assert "do not verify live server inventory or completeness" not in output
+
+
+def test_inspection_labels_only_manifest_tools_in_mixed_inventory(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    native = _inspection_tool(name="native", locator="target.agent.tools[0]")
+    declared = _inspection_tool(name="declared", locator="target.mcp_manifest.tools[1]")
+
+    cli._print_inspection(_inspection_spec(native, declared))
+
+    output = capsys.readouterr().out
+    assert "✓ native (state-changing, destructive)" in output
+    assert "✓ declared (state-changing, destructive, developer-declared MCP)" in output
+    assert "- 2 tools" in output
+    assert output.count("do not verify live server inventory or completeness") == 1
 
 
 def _empty_behavioral_coverage() -> BehavioralCoverage:
