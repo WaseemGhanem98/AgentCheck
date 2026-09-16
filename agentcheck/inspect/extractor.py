@@ -22,6 +22,7 @@ import json
 import keyword
 import os
 import sys
+from collections.abc import Iterable
 from contextlib import contextmanager
 from pathlib import Path
 from types import ModuleType
@@ -192,14 +193,75 @@ class _ContainedTargetFinder:
         path: object = None,
         target: ModuleType | None = None,
     ) -> importlib.machinery.ModuleSpec | None:
-        del path, target
+        del target
         parts = fullname.split(".")
-        if not parts or not all(part.isidentifier() for part in parts):
+        if not parts or not all(
+            part.isidentifier() and not keyword.iskeyword(part) for part in parts
+        ):
             return None
-        current = self.root
+        if path is not None:
+            return self._find_submodule(fullname, parts[-1], path)
+        return self._find_in_target(fullname, parts, self.root)
+
+    def _find_submodule(
+        self, fullname: str, leaf: str, path: object,
+    ) -> importlib.machinery.ModuleSpec | None:
+        # A loaded package's search path is authoritative. Reconstructing it
+        # from root/fullname can replace a trusted package's child with target
+        # code, or ignore a package's deliberately changed __path__.
+        if not isinstance(path, Iterable):
+            return None
+        entries = iter(path)
+        single_pass = entries is path
+        searched: list[str] = []
+        target_only = True
+        saw_target = False
+        namespace = False
+        for entry in entries:
+            if not isinstance(entry, str):
+                continue  # PathFinder likewise ignores non-string entries.
+            searched.append(entry)
+            parent = Path(os.path.abspath(entry))
+            try:
+                resolved_parent = parent.resolve()
+            except (OSError, RuntimeError, ValueError):
+                resolved_parent = parent
+            if not (
+                parent.is_relative_to(self.root)
+                or resolved_parent.is_relative_to(self.root)
+            ):
+                target_only = False
+                spec = importlib.machinery.PathFinder.find_spec(fullname, [entry])
+                if spec is not None and spec.loader is not None:
+                    # Reusable paths still defer to the remaining meta-path
+                    # finders. An iterator cannot replay this selected entry.
+                    return spec if single_pass else None
+            else:
+                saw_target = True
+                parent = _require_contained(parent, self.root)
+                spec = self._find_in_target(fullname, [leaf], parent)
+                if spec is not None and spec.loader is not None:
+                    return spec
+            if spec is not None:
+                namespace = True
+        if namespace:
+            # Let Python combine namespace portions in their original order;
+            # every target candidate above still passed containment checks.
+            return (
+                importlib.machinery.PathFinder.find_spec(fullname, searched)
+                if single_pass else None
+            )
+        if saw_target and target_only:
+            raise TargetLoadError(
+                f"no module named {fullname!r} inside the target directory",
+                code="target_import_failed",
+            )
+        return None
+
+    def _find_in_target(
+        self, fullname: str, parts: list[str], current: Path,
+    ) -> importlib.machinery.ModuleSpec | None:
         for index, part in enumerate(parts):
-            if keyword.iskeyword(part):
-                return None
             module_file = current / f"{part}.py"
             package_dir = current / part
             file_hit = _path_exists(module_file)

@@ -12,6 +12,28 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## 0.5.12 (2026-09-16)
+
+### Fixed
+
+- Child-module imports now respect the loaded parent package's search paths,
+  preventing a same-named file under the target root from replacing a child of
+  an unrelated loaded package. Target-local ordinary and namespace packages,
+  nested relative imports and containment checks remain supported.
+
+### Improved
+
+- Fixture and MCP manifest documentation distinguishes path spelling from the
+  resolved file location used by containment checks. Regression tests now
+  distinguish outbound symlink containment refusal from malformed-file rejection
+  and check baseline path refusal through the CLI.
+- The stored-identity regression test prepares its persisted spec directly,
+  retaining the live identity refusal check without an unrelated seed run.
+
+### Suite identity
+
+Generator compatibility remains **4**; suite generation semantics are unchanged.
+
 ## 0.5.11 (2026-09-12)
 
 ### Fixed
