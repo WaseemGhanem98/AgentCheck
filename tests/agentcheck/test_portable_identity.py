@@ -932,28 +932,44 @@ def test_a_legacy_suite_from_another_agent_at_this_path_is_refused(
 
 def test_a_stale_legacy_identity_in_a_stored_spec_cannot_rescue_a_suite(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The suite gate inspects live, so a persisted legacy value is never consulted."""
 
     import json
+    from unittest.mock import Mock
 
     import agentcheck.application as application
+    from agentcheck.artifacts import ArtifactStore
+    from agentcheck.domain import AgentSpec
     from agentcheck.errors import ConfigurationError
     from agentcheck.generate.suite import DEFAULT_SUITE_FILENAME
+    from agentcheck.identity import spec_identity_matches
 
     target = _copy_example(tmp_path / "home" / "dev" / "refund-agent")
-    application.generate_suite(target, seed=1729, force=True)
-    application.execute_suite(target, run_id="seed-run", persist_store=False)
+    generation = application.generate_suite(target, seed=1729, force=True)
+    # Only the persisted spec is adversarial input here. Use the production
+    # writer without executing an unrelated suite just to create that file.
+    artifacts = ArtifactStore(
+        generation.target_root, generation.config.artifacts_directory, "seed-run"
+    )
+    spec_path = artifacts.write_json("agent-spec.json", generation.spec)
+    assert spec_path == target / ".agentcheck" / "runs" / "seed-run" / "agent-spec.json"
 
     forged = "agentspec-0123456789abcdef01234567"
-    spec_path = target / ".agentcheck" / "runs" / "seed-run" / "agent-spec.json"
     document = json.loads(spec_path.read_text(encoding="utf-8"))
     document["legacy_spec_id"] = forged
     spec_path.write_text(json.dumps(document), encoding="utf-8")
+    stored = AgentSpec.model_validate_json(spec_path.read_text(encoding="utf-8"))
+    assert spec_identity_matches(stored, forged)
+    assert not spec_identity_matches(generation.spec, forged)
     _rebind_suite_to(target / DEFAULT_SUITE_FILENAME, forged)
 
+    workers = Mock(side_effect=AssertionError("scenario workers must not start"))
+    monkeypatch.setattr(application, "run_scenario_in_subprocess", workers)
     with pytest.raises(ConfigurationError, match="re-run agentcheck generate"):
         application.execute_suite(target, run_id="after-forgery", persist_store=False)
+    workers.assert_not_called()
 
 
 def test_a_nested_entrypoint_is_portable_and_distinct(tmp_path: Path) -> None:

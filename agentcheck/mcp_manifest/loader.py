@@ -1,7 +1,7 @@
 """Load and validate a developer-declared external-toolset manifest.
 
-Mirrors ``agentcheck/fixtures/loader.py`` deliberately: contained path, no
-symlink following, bounded size, versioned contract, offline-only schema
+Mirrors ``agentcheck/fixtures/loader.py`` deliberately: resolved-path containment,
+bounded size, versioned contract, offline-only schema
 validation, and a ``ConfigurationError`` on anything malformed. A manifest
 that cannot be trusted is refused rather than partially applied -- the same
 reasoning as fixtures: a silently ignored or partially-read declaration would
@@ -37,6 +37,8 @@ def load_mcp_manifest(root: Path, *, filename: str | None = None) -> McpManifest
         return None
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
+        # contained_path already resolved permitted in-target links. This flag
+        # applies to the resolved final component, not the original alias.
         flags |= os.O_NOFOLLOW
     try:
         descriptor = os.open(path, flags)
