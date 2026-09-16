@@ -1,7 +1,7 @@
 """Load and validate representative input values from inside the target.
 
-Mirrors the policy-pack loader deliberately: contained path, no symlink
-following, bounded size, versioned contract, and a ``ConfigurationError`` on
+Mirrors the policy-pack loader deliberately: resolved-path containment,
+bounded size, versioned contract, and a ``ConfigurationError`` on
 anything malformed. A fixture that cannot be trusted is refused rather than
 partially applied, because a silently ignored fixture would look like coverage
 the suite does not have.

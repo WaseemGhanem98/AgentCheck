@@ -425,16 +425,31 @@ def test_load_mcp_manifest_rejects_oversized_file(tmp_path: Path) -> None:
 
 
 def test_load_mcp_manifest_refuses_a_symlink_escaping_the_target(tmp_path: Path) -> None:
-    outside = tmp_path.parent / "outside-mcp-manifest.json"
+    root = tmp_path / "target"
+    root.mkdir()
+    outside = tmp_path / "outside-mcp-manifest.json"
     outside.write_text(
-        json.dumps({"schema_version": "agentcheck.mcp_manifest.v1", "tools": {}}),
+        json.dumps({"tools": {"search": {"input_schema": {"type": "object"}}}}),
         encoding="utf-8",
     )
-    link = tmp_path / "agentcheck-mcp-manifest.json"
+    # The same file is valid when its containing directory is the target.
+    # An empty manifest could fail for its content after a containment regression.
+    assert load_mcp_manifest(tmp_path, filename=outside.name) is not None
+    link = root / "agentcheck-mcp-manifest.json"
     link.symlink_to(outside)
-    with pytest.raises(ConfigurationError):
-        load_mcp_manifest(tmp_path)
-    outside.unlink()
+    with pytest.raises(ConfigurationError, match="path must remain inside the target directory"):
+        load_mcp_manifest(root)
+
+
+def test_load_mcp_manifest_allows_a_symlink_resolving_inside_the_target(tmp_path: Path) -> None:
+    declared = tmp_path / "declared.json"
+    declared.write_text(
+        json.dumps({"tools": {"search": {"input_schema": {"type": "object"}}}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "agentcheck-mcp-manifest.json").symlink_to(declared.name)
+
+    assert load_mcp_manifest(tmp_path) == load_mcp_manifest(tmp_path, filename=declared.name)
 
 
 @pytest.mark.parametrize("name", ["", "x" * 201])
