@@ -860,7 +860,9 @@ def test_wrong_artifact_kinds_are_refused(
         check_baseline(root, baseline_path="index.sqlite", run_id="run-old")
 
 
-def test_path_containment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_path_containment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     root = _target(tmp_path)
     _patch_execution_tripwires(monkeypatch)
     _write_run(
@@ -870,6 +872,10 @@ def test_path_containment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     )
     with pytest.raises(ConfigurationError, match="inside the target"):
         create_baseline(root, run_id="run-old", out="../escape.json")
+    # A missing or malformed outside file could produce the same CLI exit code
+    # even if the baseline read's containment check were removed.
+    created = create_baseline(root, run_id="run-old", out="valid-baseline.json")
+    shutil.copyfile(created.path, tmp_path / "escape.json")
     assert main(
         [
             "baseline",
@@ -881,6 +887,7 @@ def test_path_containment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
             "run-old",
         ]
     ) == 2
+    assert "path must be a safe relative path" in capsys.readouterr().err
 
 
 def test_no_target_execution_during_compare(
