@@ -75,8 +75,13 @@ now extended to toolsets it previously couldn't see into at all.
 ## Safety
 
 The manifest file goes through the same loader discipline as
-`agentcheck-fixtures.json`: contained-path resolution with `O_NOFOLLOW` (a
-symlink escaping the target directory is refused), a byte-size cap, strict
+`agentcheck-fixtures.json`: symlinks are resolved before checking that the path
+stays inside the target directory. Links resolving inside that directory are
+allowed; links resolving outside it are refused by the containment check.
+Where available, `O_NOFOLLOW` is also applied when opening the resolved final
+component. This is not a race-proof boundary against hostile filesystem changes.
+
+The loader also enforces a byte-size cap, strict
 schema validation (`extra="forbid"`), and `input_schema` for every declared
 tool is run through the same `offline_validator` that rejects non-local
 `$ref`/`$dynamicRef` — a manifest cannot smuggle in a remote schema fetch any
