@@ -19,7 +19,14 @@ credentials. `scripts/check_workflow_safety.py` enforces these repository-side
 controls.
 
 For code and runtime changes, the test matrix runs the full suite on Python 3.12
-and the compatibility manifest on Python 3.10 and 3.11. Those process-heavy
+across two separate hosted jobs, and the compatibility manifest on Python 3.10
+and 3.11. Both primary jobs collect the complete suite, then
+`scripts/ci_partition.py` assigns whole files in sorted alternating order. The
+partitions are exhaustive and disjoint; new collected files join automatically.
+Both primary shards also run on pushes to main, and both must succeed for
+`Required CI`. Collection errors, invalid shard arguments and empty partitions
+fail the job. This changes neither test assertions nor scenario counts.
+Those process-heavy
 invocations use one pytest worker on standard hosted runners because AgentCheck
 scenarios already execute in child processes. A fail-closed scope check skips
 that matrix only when every changed path is Markdown or under `docs/assets/`.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 import subprocess
@@ -180,6 +181,25 @@ def test_process_heavy_pytest_commands_are_serial_on_hosted_runners() -> None:
     ci = (WORKFLOWS / "ci.yml").read_text(encoding="utf-8")
     assert "tests -q -n 1" in ci
     assert '"${compat[@]}" -q -n 1' in ci
+
+
+def test_primary_matrix_preserves_both_shards_and_compatibility() -> None:
+    workflow = _load(WORKFLOWS / "ci.yml")
+    tests = workflow["jobs"]["tests"]
+    matrix = tests["strategy"]["matrix"]
+    expression = matrix["include"]
+    assert "github.event_name == 'push'" in expression
+    push, pull_request = [json.loads(value) for value in re.findall(r"fromJSON\('([^']+)'\)", expression)]
+    primary = [{"python-version": "3.12", "shard": 1}, {"python-version": "3.12", "shard": 2}]
+    assert push == primary
+    assert pull_request == [{"python-version": "3.10", "shard": 0}, {"python-version": "3.11", "shard": 0}] + primary
+    assert tests["strategy"]["fail-fast"] is False
+    command = next(step["run"] for step in tests["steps"] if step.get("name") == "Test")
+    assert "-p scripts.ci_partition" in command
+    assert '--ci-shard "${{ matrix.shard }}"' in command
+    gate = workflow["jobs"]["required"]
+    assert gate["needs"] == ["scope", "tests", "checks"]
+    assert gate["if"] == "${{ always() }}"
 
 
 def test_agentcheck_example_installs_the_exact_public_distribution() -> None:
