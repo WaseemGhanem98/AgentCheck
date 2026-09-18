@@ -69,11 +69,11 @@ does not make it lenient. The script refuses a skipped matrix on a code change,
 refuses a failed or cancelled matrix in any scope, requires `scope` and `checks`
 to have succeeded, and treats an unreadable classification as a code change.
 
-Requiring the matrix jobs by name does not work, and the failure mode is quiet.
-`Tests (Python 3.10 | 3.11 | 3.12)` are skipped by design on documentation-only
-pull requests, and a skipped job never reports a status, so a required matrix
-name leaves those pull requests stuck at *"Waiting for status to be reported"*
-with nothing failing and nothing to fix.
+Requiring individual matrix job names is fragile for documentation-only pull
+requests. GitHub skips the matrix before expanding it, so names such as
+`Tests (Python 3.10)` are absent from that run. Require the always-present
+aggregate to distinguish an intentional documentation-only skip from a missing
+or failing required matrix.
 
 ### Repository settings
 
