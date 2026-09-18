@@ -75,39 +75,19 @@ pull requests, and a skipped job never reports a status, so a required matrix
 name leaves those pull requests stuck at *"Waiting for status to be reported"*
 with nothing failing and nothing to fix.
 
-### Migrating the ruleset
+### Repository settings
 
-The `main integrity and CI` ruleset currently requires these six contexts:
+`Required CI` above is the recommended aggregate CI requirement, not a claim
+that repository protection is already configured. At the 2026-09-18 settings
+check, legacy main protection returned “Branch not protected,” and the active
+rulesets contained no required-status-check rule. Main still had separate
+integrity and pull-request-review protections.
 
-```
-Classify change scope
-Tests (Python 3.10)
-Tests (Python 3.11)
-Tests (Python 3.12)
-Quality, packaging, extras, and workflow trust
-dependency-review
-```
-
-After this change, **remove the three `Tests (Python …)` entries and add
-`Required CI`**, leaving:
-
-```
-Classify change scope
-Quality, packaging, extras, and workflow trust
-dependency-review
-Required CI
-```
-
-Nothing is weakened by the removal. `Required CI` fails whenever any of those
-three matrix jobs fails or is cancelled, and additionally fails if the matrix is
-skipped on a change that was not documentation-only — a case the per-name
-requirements could not express at all. Keeping `Classify change scope` and the
-quality job listed is redundant but harmless, since the gate already requires
-both; they are worth keeping so a deleted gate job cannot silently leave `main`
-with no required check.
-
-Do the ruleset edit only after this workflow is on `main`, so `Required CI` has
-reported at least once and is selectable in the ruleset UI.
+Recheck both legacy branch protection and active rulesets before relying on
+configured enforcement. Any authorized settings update should select
+`Required CI` after it has reported on main, rather than individual matrix job
+names. Repository documentation and workflow changes do not themselves update
+those settings.
 
 ## Release boundary
 
