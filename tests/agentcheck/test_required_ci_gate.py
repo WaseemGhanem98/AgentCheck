@@ -165,7 +165,7 @@ def test_the_matrix_still_covers_every_supported_interpreter() -> None:
     """The gate must not become an excuse to shrink real coverage."""
 
     tests = _ci()["jobs"]["tests"]
-    matrix = str(tests["strategy"]["matrix"]["python-version"])
+    matrix = str(tests["strategy"]["matrix"]["include"])
 
     for version in ("3.10", "3.11", "3.12"):
         assert version in matrix

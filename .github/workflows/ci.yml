@@ -65,7 +65,7 @@ jobs:
           echo "full validation required: $expensive"
 
   tests:
-    name: Tests (Python ${{ matrix.python-version }})
+    name: Tests (Python ${{ matrix.python-version }}${{ matrix.shard && format(', shard {0}/2', matrix.shard) || '' }})
     needs: scope
     if: needs.scope.outputs.expensive == 'true'
     runs-on: ubuntu-latest
@@ -73,9 +73,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Pull requests cover every supported interpreter. A push to main reruns
-        # the full suite on the primary interpreter to catch merge races.
-        python-version: ${{ github.event_name == 'push' && fromJSON('["3.12"]') || fromJSON('["3.10", "3.11", "3.12"]') }}
+        # Both events execute every primary test across two isolated hosts.
+        # Compatibility coverage remains unchanged on pull requests.
+        include: ${{ github.event_name == 'push' && fromJSON('[{"python-version":"3.12","shard":1},{"python-version":"3.12","shard":2}]') || fromJSON('[{"python-version":"3.10","shard":0},{"python-version":"3.11","shard":0},{"python-version":"3.12","shard":1},{"python-version":"3.12","shard":2}]') }}
 
     env:
       AGENTCHECK_ALLOWED_TEST: ""
@@ -124,7 +124,8 @@ jobs:
         # standard hosted runners. Product wall-clock budgets stay unchanged.
         run: |
           if [ "${{ matrix.python-version }}" = "$PRIMARY_PYTHON" ]; then
-            python -m pytest -p no:cacheprovider tests -q -n 1 --durations=25
+            python -m pytest -p no:cacheprovider -p scripts.ci_partition \
+              --ci-shard "${{ matrix.shard }}" tests -q -n 1 --durations=25
           else
             mapfile -t compat < <(python tests/compat_manifest.py)
             echo "cross-version suite: ${#compat[@]} files"
