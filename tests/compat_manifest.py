@@ -110,6 +110,9 @@ COMPATIBILITY_SUITE: dict[str, dict[str, object]] = {
         "files": (
             "tests/agentcheck/test_openai_adapter.py",
             "tests/agentcheck/test_pydantic_ai_adapter.py",
+            # Output declarations combine SDK markers with interpreter-owned
+            # union, generic and type-alias forms; every one must refuse code.
+            "tests/agentcheck/test_pydantic_ai_output_boundary.py",
             "tests/agentcheck/test_controlled_model.py",
             # The custom adapter reads no SDK internals, but it is the one
             # adapter whose preflight decides support from `inspect.signature`
