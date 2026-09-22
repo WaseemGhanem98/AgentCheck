@@ -12,6 +12,22 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## 0.5.14 (2026-09-22)
+
+### Fixed
+
+- README installs, adapter extras, example checkout and expected CLI version,
+  plus the copyable CI workflow, now pin this release. Regression checks bind
+  these instructions to the declared project version so stale pins are detected.
+- Gate documentation now states the existing requirement for exit 0: a
+  certifiable run, no new authoritative failure and no outstanding required
+  evidence. Exit 3 also covers missing required evidence. Dated release-specific
+  wording and an unqualified illustrative output transcript were removed.
+
+### Suite identity
+
+Generator compatibility remains **4**; suite generation semantics are unchanged.
+
 ## 0.5.13 (2026-09-22)
 
 ### Fixed
