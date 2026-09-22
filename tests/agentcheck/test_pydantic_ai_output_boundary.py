@@ -5,7 +5,7 @@ from __future__ import annotations
 import typing
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Annotated, Any, Literal, NewType, TypedDict, Union
+from typing import Annotated, Any, Literal, NewType, Union
 
 import pytest
 from pydantic import (
@@ -16,7 +16,7 @@ from pydantic import (
 from pydantic.dataclasses import dataclass as pydantic_dataclass
 from pydantic_ai import Agent, NativeOutput, PromptedOutput, TextOutput, ToolOutput
 from pydantic_ai.output import StructuredDict
-from typing_extensions import TypeAliasType
+from typing_extensions import TypeAliasType, TypedDict
 
 from agentcheck.adapters import PydanticAIAdapter, UnsupportedTargetError
 
