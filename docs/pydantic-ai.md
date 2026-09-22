@@ -87,12 +87,15 @@ Callback-free data declarations retain their output type, including ordinary
 models/dataclasses, static defaults, built-in collection factories, static JSON
 schema extras, `WithJsonSchema`, and SDK `StructuredDict` forms. Output containers
 must use ordinary SDK markers and plain lists or tuples. Unknown processors,
-pluggable validators and opaque schema data are refused; changed declarations
-must correspond to the SDK processors inspected before reconstruction.
+pluggable validators and opaque schema data are refused. Newly introduced output
+types absent from the inspected SDK processors are also refused. That identity
+membership check does not establish complete order/content equivalence after
+output declarations change.
 
 These checks apply to trusted local targets with static output declarations.
 Native validator metadata is mutable: it is not proof against private schema
-tampering or concurrent target mutation. Constructing/importing the original
+tampering, reordered/removed output alternatives or concurrent target mutation.
+Constructing/importing the original
 target is also outside this refusal boundary and can execute its schema hooks.
 
 Agent-level event hooks (`@agent.on_event` on SDK versions that expose it) are

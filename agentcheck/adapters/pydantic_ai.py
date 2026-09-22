@@ -681,9 +681,10 @@ def _compiled_output_execution_issue(target: Any) -> SupportIssue | None:
         reason = _core_output_callback_reason(reduced[1][0])
         if reason is not None:
             return reject(reason)
-    # The public marker payload/list may have changed since Agent construction.
-    # Only compare identities: equality could dispatch target code. Declaration
-    # containers have already passed _output_execution_issue before this walk.
+    # Reject newly introduced output types that were not inspected. This
+    # membership check does not establish order/content equivalence for mutated
+    # declarations. Compare identities because equality could dispatch target
+    # code; containers have already passed _output_execution_issue.
     declarations = list(_output._flatten_output_spec(target.output_type))
     while declarations:
         output = declarations.pop()
