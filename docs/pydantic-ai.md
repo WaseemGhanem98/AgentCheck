@@ -79,7 +79,8 @@ These callbacks run outside the ordinary tool gateway and would remain executabl
 if copied into the rebuilt agent. The same refusal covers callbacks in output
 validation, serialization, construction and schema generation: annotated
 validators, model/dataclass validators and initialization hooks, custom default
-factories, computed fields, and custom JSON schema hooks or callable schema extras.
+factories, computed fields, custom JSON schema hooks or callable schema extras,
+and configured model/field title generators (including dataclass configuration).
 AgentCheck refuses these declarations instead of stripping their behavior.
 
 Callback-free data declarations retain their output type, including ordinary

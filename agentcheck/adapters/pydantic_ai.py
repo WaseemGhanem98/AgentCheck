@@ -523,10 +523,16 @@ def _output_schema_hook_reason(value: Any) -> str | None:
             continue
         return "The output declaration contains a custom schema-generation hook."
     if isinstance(value, type):
-        config = _inspect.getattr_static(value, "model_config", None)
-        if config is not None:
+        for config_name in ("model_config", "__pydantic_config__"):
+            config = _inspect.getattr_static(value, config_name, None)
+            if config is None:
+                continue
             if type(config) is not dict:
                 return "The output model has opaque configuration."
+            if any(config.get(name) is not None for name in (
+                "model_title_generator", "field_title_generator",
+            )):
+                return "The output declaration configures an executable schema-title generator."
             extra = config.get("json_schema_extra")
             if not _inert_output_default(extra):
                 return "The output model has executable or opaque JSON schema extras."

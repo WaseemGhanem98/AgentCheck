@@ -294,6 +294,45 @@ def test_unknown_validator_is_refused_without_reduction_dispatch() -> None:
         PydanticAIAdapter().prepare(target, object())
 
 
+@pytest.mark.parametrize("config_name", ["model_title_generator", "field_title_generator"])
+@pytest.mark.parametrize("kind", ["model", "dataclass"])
+@pytest.mark.parametrize("wrapper", ["direct", "tool", "native", "prompted", "nested"])
+def test_title_generation_configuration_is_refused(
+    config_name: str, kind: str, wrapper: str,
+) -> None:
+    calls: list[str] = []
+
+    def title(*args: Any) -> str:
+        calls.append("title")
+        return "SyntheticTitle"
+
+    config = ConfigDict(**{config_name: title})
+
+    class TitledModel(BaseModel):
+        value: str
+        model_config = config
+
+    @pydantic_dataclass(config=config)
+    class TitledData:
+        value: str
+
+    output: Any = TitledModel if kind == "model" else TitledData
+    if wrapper == "nested":
+        output = list[output]
+    elif wrapper != "direct":
+        output = {"tool": ToolOutput, "native": NativeOutput, "prompted": PromptedOutput}[wrapper](output)
+    target = Agent(output_type=output)
+    calls.clear()
+    adapter = PydanticAIAdapter()
+    assert [(issue.code, issue.location) for issue in adapter.preflight(target).issues] == [
+        ("unsupported_output_function", "agent.output_type")
+    ]
+    adapter.inspect(target)
+    with pytest.raises(UnsupportedTargetError, match="unsupported_output_function"):
+        adapter.prepare(target, object())
+    assert calls == []
+
+
 class Result(BaseModel):
     value: str
 
@@ -323,6 +362,16 @@ class RecursiveResult(BaseModel):
     children: list[RecursiveResult] = []
 
 
+class StaticTitleResult(BaseModel):
+    value: str
+    model_config = ConfigDict(title="SyntheticTitle")
+
+
+@pydantic_dataclass(config=ConfigDict(title="SyntheticTitle"))
+class StaticTitleData:
+    value: str
+
+
 @pytest.mark.parametrize("output", [
     str, int, bool, Result, DataResult, DictResult, Literal["accepted", "refused"],
     list[Result], dict[str, int], Result | None, Union[Result, DataResult],
@@ -335,6 +384,7 @@ class RecursiveResult(BaseModel):
     StructuredDict({"type": "object", "properties": {"value": {"type": "string"}}}),
     DefaultResult, DefaultDataResult, RecursiveResult,
     Annotated[str, WithJsonSchema({"type": "string"})],
+    StaticTitleResult, StaticTitleData,
 ])
 def test_data_output_declarations_keep_their_preparation_contract(output: Any) -> None:
     target = Agent(output_type=output)
