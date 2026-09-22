@@ -66,11 +66,37 @@ The adapter requires:
 - an exact `pydantic_ai.Agent`;
 - static instructions;
 - ordinary function tools with JSON Schema;
-- no output validators, a callable `validation_context`, target capabilities,
+- no output functions or validators, a callable `validation_context`, target capabilities,
   event-stream handler, registered event hooks, or external toolsets.
 
 Those unsupported surfaces are executable target behavior that cannot be
 reconstructed safely. Preflight names each one and refuses the run.
+
+Output functions are refused with `unsupported_output_function`, including
+functions inside `ToolOutput`, `NativeOutput`, `PromptedOutput`, `TextOutput`,
+output alternatives, and collection annotations such as `list[callback]`.
+These callbacks run outside the ordinary tool gateway and would remain executable
+if copied into the rebuilt agent. The same refusal covers callbacks in output
+validation, serialization, construction and schema generation: annotated
+validators, model/dataclass validators and initialization hooks, custom default
+factories, computed fields, custom JSON schema hooks or callable schema extras,
+and configured model/field title generators (including dataclass configuration).
+AgentCheck refuses these declarations instead of stripping their behavior.
+
+Callback-free data declarations retain their output type, including ordinary
+models/dataclasses, static defaults, built-in collection factories, static JSON
+schema extras, `WithJsonSchema`, and SDK `StructuredDict` forms. Output containers
+must use ordinary SDK markers and plain lists or tuples. Unknown processors,
+pluggable validators and opaque schema data are refused. Newly introduced output
+types absent from the inspected SDK processors are also refused. That identity
+membership check does not establish complete order/content equivalence after
+output declarations change.
+
+These checks apply to trusted local targets with static output declarations.
+Native validator metadata is mutable: it is not proof against private schema
+tampering, reordered/removed output alternatives or concurrent target mutation.
+Constructing/importing the original
+target is also outside this refusal boundary and can execute its schema hooks.
 
 Agent-level event hooks (`@agent.on_event` on SDK versions that expose it) are
 refused: rebuilding a sanitized agent would drop their behavior. Only the exact

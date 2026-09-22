@@ -12,6 +12,27 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## 0.5.13 (2026-09-22)
+
+### Fixed
+
+- Preflight now refuses PydanticAI output functions and callback-bearing schemas
+  before simulated-runtime preparation; inspection skips their output-schema
+  generation. This covers
+  functions in SDK output markers, alternatives and collection annotations;
+  validation, serialization and construction callbacks; and schema-generation
+  hooks, including configured title generators. These callbacks are refused
+  rather than retained outside the simulated tool gateway or silently removed.
+- Verified static data outputs keep their original declarations. Unknown
+  processors and newly introduced uninspected output types fail closed. This
+  remains a trusted, static-target boundary: original target construction,
+  private native-schema tampering and concurrent or general declaration mutation
+  are outside its guarantees. The supported PydanticAI range remains 2.32–2.40.
+
+### Suite identity
+
+Generator compatibility remains **4**; suite generation semantics are unchanged.
+
 ## 0.5.12 (2026-09-16)
 
 ### Fixed

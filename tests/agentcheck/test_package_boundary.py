@@ -22,6 +22,8 @@ PUBLIC_IMPORT_ROOTS = frozenset(
         "openai",
         "pydantic",
         "pydantic_ai",
+        # Mandatory public runtime of the declared Pydantic dependency.
+        "pydantic_core",
         "referencing",
         "requests",
         "typing_extensions",

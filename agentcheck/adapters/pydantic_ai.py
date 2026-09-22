@@ -18,11 +18,14 @@ import dataclasses
 import hashlib
 import inspect as _inspect
 import json
+import typing
 from importlib import metadata as importlib_metadata
 from collections.abc import Mapping, Sequence
 from contextvars import ContextVar
 from enum import Enum
-from typing import TYPE_CHECKING, Any, cast
+from types import UnionType
+from typing import TYPE_CHECKING, Annotated, Any, Union, cast, get_args, get_origin
+from typing_extensions import TypeAliasType
 
 from agentcheck.domain.agent_spec import (
     AgentProperty,
@@ -367,10 +370,8 @@ def _output_schema(target: Any) -> dict[str, Any] | None:
     accepts any type ``pydantic.TypeAdapter`` can build a schema for (``bool``,
     ``int``, a dataclass, a ``TypedDict``, ``Literal[...]``, ...), and real
     targets use this heavily (the SDK's own roulette_wheel example declares
-    ``output_type=bool``). Deriving a schema via ``TypeAdapter`` is the same
-    category of safe, static type introspection ``BaseModel.model_json_schema``
-    already is here -- no target code runs, only its type's schema is built --
-    so this is not a new execution-safety surface, just a wider one. Getting
+    ``output_type=bool``). Schema generation can itself invoke target hooks;
+    only declarations that pass the output boundary are inspected. Getting
     this wrong previously had a real, silent failure mode: an unschematized
     output_type made ``ControlledPydanticModel`` reply with plain neutral text
     that could not satisfy the target's own output validation, which read as
@@ -378,6 +379,10 @@ def _output_schema(target: Any) -> dict[str, Any] | None:
     """
 
     output_type = getattr(target, "output_type", None)
+    if not _supported_sdk_version(_sdk_version()):
+        return None
+    if _output_execution_issue(output_type) or _compiled_output_execution_issue(target):
+        return None
     if output_type is None or output_type is str:
         return None
     schema = getattr(output_type, "model_json_schema", None)
@@ -394,6 +399,305 @@ def _output_schema(target: Any) -> dict[str, Any] | None:
     except Exception:
         return None
     return built if isinstance(built, dict) else None
+
+
+def _output_execution_issue(output_spec: Any) -> SupportIssue | None:
+    """Read output declarations without invoking their processing functions.
+
+    PydanticAI output functions are separate from registered output validators
+    and ordinary tools. Rebuilding with the original output_type retains them.
+    Walk the SDK's public marker/sequence/union forms, preserving data classes
+    and generic schema types rather than rejecting everything callable.
+    """
+
+    from pydantic_ai.output import NativeOutput, PromptedOutput, TextOutput, ToolOutput
+
+    markers = (ToolOutput, NativeOutput, PromptedOutput)
+    aliases = (TypeAliasType, getattr(typing, "TypeAliasType", TypeAliasType))
+    pending: list[tuple[Any, frozenset[int]]] = [(output_spec, frozenset())]
+    while pending:
+        output, ancestors = pending.pop()
+        reason: str | None = None
+        children: Sequence[Any] = ()
+        origin = get_origin(output)
+        if id(output) in ancestors:
+            reason = "The output declaration contains a cycle."
+        elif isinstance(output, TextOutput):
+            reason = "TextOutput declares a function that processes the model's output."
+        elif isinstance(output, markers):
+            if type(output) not in markers:
+                reason = "Custom output markers cannot be inspected without target code."
+            else:
+                field = "output" if type(output) is ToolOutput else "outputs"
+                values = vars(output)
+                if field not in values:
+                    reason = "The output marker is missing its output declaration."
+                else:
+                    children = (values[field],)
+        elif isinstance(output, Sequence):
+            if type(output) not in (list, tuple):
+                reason = "Only plain lists and tuples can contain output declarations."
+            else:
+                children = output
+        elif isinstance(output, aliases):
+            children = (output.__value__,)
+        elif isinstance(output, typing.NewType):
+            children = (output.__supertype__,)
+        elif origin is Annotated:
+            children = get_args(output)[:1]
+            for metadata in get_args(output)[1:]:
+                reason = _output_schema_hook_reason(metadata)
+                if reason is not None:
+                    break
+        elif origin is Union or origin is UnionType:
+            children = get_args(output)
+        elif origin is not None and origin is not typing.Literal:
+            # Pydantic also builds callable schemas inside collection types;
+            # list[callback] is executable even though the outer type is data.
+            # Literal arguments are values, not output annotations.
+            children = get_args(output)
+        elif callable(output) and not isinstance(output, type) and origin is None:
+            reason = "Output functions are executable target code."
+        elif isinstance(output, type):
+            reason = _output_schema_hook_reason(output)
+        if reason is not None:
+            return SupportIssue(
+                code="unsupported_output_function",
+                message=(
+                    f"{reason} AgentCheck preserves data output schemas but cannot "
+                    "replace executable or unknown output processing safely."
+                ),
+                location="agent.output_type",
+            )
+        nested = ancestors | {id(output)}
+        pending.extend((child, nested) for child in children)
+    return None
+
+
+def _inert_output_default(value: Any) -> bool:
+    """Defaults may be copied by validation; do not admit custom copy hooks."""
+
+    pending = [value]
+    seen: set[int] = set()
+    while pending:
+        item = pending.pop()
+        if item is None or type(item) in (str, bytes, bool, int, float):
+            continue
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if type(item) is dict:
+            pending.extend(item.keys())
+            pending.extend(item.values())
+        elif type(item) in (list, tuple):
+            pending.extend(item)
+        else:
+            return False
+    return True
+
+
+def _output_schema_hook_reason(value: Any) -> str | None:
+    """Recognize static schema declarations without calling their hooks."""
+
+    from pydantic import BaseModel, WithJsonSchema
+    from pydantic_ai.output import StructuredDict
+
+    if type(value) is WithJsonSchema:
+        if _inert_output_default((value.json_schema, value.mode)):
+            return None
+        return "The JSON schema annotation contains opaque data."
+    reference = StructuredDict({"type": "object"})
+    for name in ("model_json_schema", "__get_pydantic_core_schema__", "__get_pydantic_json_schema__"):
+        hook = _inspect.getattr_static(value, name, None)
+        if hook is None:
+            continue
+        if hook is _inspect.getattr_static(BaseModel, name, None):
+            continue
+        sdk_hook = _inspect.getattr_static(reference, name, None)
+        if (
+            type(hook) is classmethod and type(sdk_hook) is classmethod
+            and type(hook.__func__) is type(sdk_hook.__func__)
+            and hook.__func__.__code__ is sdk_hook.__func__.__code__
+            and all(_inert_output_default(cell.cell_contents) for cell in hook.__func__.__closure__ or ())
+        ):
+            continue
+        return "The output declaration contains a custom schema-generation hook."
+    if isinstance(value, type):
+        for config_name in ("model_config", "__pydantic_config__"):
+            config = _inspect.getattr_static(value, config_name, None)
+            if config is None:
+                continue
+            if type(config) is not dict:
+                return "The output model has opaque configuration."
+            if any(config.get(name) is not None for name in (
+                "model_title_generator", "field_title_generator",
+            )):
+                return "The output declaration configures an executable schema-title generator."
+            extra = config.get("json_schema_extra")
+            if not _inert_output_default(extra):
+                return "The output model has executable or opaque JSON schema extras."
+    return None
+
+
+def _core_output_callback_reason(schema: Any) -> str | None:
+    """Inspect retained native CoreSchema data, never rebuild or validate it."""
+
+    pending = [schema]
+    seen: set[int] = set()
+    inert_factories = (list, dict, tuple, set, frozenset, str, bytes, bool, int, float)
+    while pending:
+        item = pending.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        if type(item) is dict:
+            kind = item.get("type")
+            metadata: list[Any] = [item.get("metadata")]
+            metadata_seen: set[int] = set()
+            while metadata:
+                entry = metadata.pop()
+                if id(entry) in metadata_seen:
+                    continue
+                metadata_seen.add(id(entry))
+                if type(entry) is dict:
+                    metadata.extend(entry.values())
+                elif type(entry) in (list, tuple):
+                    metadata.extend(entry)
+                elif callable(entry):
+                    if not (
+                        _inspect.ismethod(entry)
+                        and entry.__name__ == "__get_pydantic_json_schema__"
+                        and _output_schema_hook_reason(entry.__self__) is None
+                    ):
+                        return "The output schema contains an unknown schema-generation callback."
+                elif entry is not None and not _inert_output_default(entry):
+                    return "The output schema contains opaque schema-generation metadata."
+            cls = item.get("cls")
+            if isinstance(cls, type):
+                reason = _output_schema_hook_reason(cls)
+                if reason is not None:
+                    return reason
+            if type(kind) is str and (kind.startswith("function-") or kind == "call"):
+                return "The compiled output schema declares a validation or serialization function."
+            for field in ("custom_init", "post_init", "missing"):
+                value = item.get(field)
+                if value is not None and value is not False:
+                    return "The compiled output schema declares a construction or enum callback."
+            factory = item.get("default_factory")
+            if factory is not None and not any(factory is safe for safe in inert_factories):
+                return "The compiled output schema declares an executable default factory."
+            if "default" in item and not _inert_output_default(item["default"]):
+                return "The output schema has an opaque default value with unknown copy behavior."
+            computed = item.get("computed_fields")
+            if computed is not None and (type(computed) is not list or len(computed) != 0):
+                return "Computed output fields execute target code during serialization."
+            # These carry schema-generation metadata, literal/default data or
+            # class identities, not validation sub-schemas. In particular, a
+            # literal dict whose `type` happens to be `call` is still just data.
+            pending.extend(value for key, value in item.items() if key not in {
+                "metadata", "config", "cls", "members", "expected", "default",
+                "default_factory", "computed_fields",
+            })
+        elif type(item) in (list, tuple):
+            pending.extend(item)
+        elif isinstance(item, (Mapping, Sequence)) and type(item) not in (str, bytes):
+            return "The compiled output schema contains an unknown container."
+        elif callable(item):
+            return "The compiled output schema contains an unknown callable."
+    return None
+
+
+def _compiled_output_execution_issue(target: Any) -> SupportIssue | None:
+    """Account for callback-bearing types that look like ordinary data classes."""
+
+    from pydantic_ai import _output
+    from pydantic_ai.output import NativeOutput, PromptedOutput, ToolOutput
+    from pydantic_core import SchemaValidator
+
+    def reject(reason: str) -> SupportIssue:
+        return SupportIssue(
+            code="unsupported_output_function",
+            message=f"{reason} AgentCheck cannot replace this output processing safely.",
+            location="agent.output_type",
+        )
+
+    schema = vars(target).get("_output_schema")
+    schema_types = (
+        _output.AutoOutputSchema, _output.TextOutputSchema, _output.ImageOutputSchema,
+        _output.NativeOutputSchema, _output.PromptedOutputSchema, _output.ToolOutputSchema,
+    )
+    if type(schema) not in schema_types:
+        return reject("The compiled output schema is missing or unknown.")
+    fields = vars(schema)
+    if "text_processor" not in fields or "toolset" not in fields:
+        return reject("The compiled output schema is missing processor storage.")
+    pending = [fields["text_processor"], fields.get("processor")]
+    toolset = fields["toolset"]
+    if toolset is not None:
+        if type(toolset) is not _output.OutputToolset:
+            return reject("The output toolset is unknown.")
+        tools = vars(toolset)
+        processors = tools.get("processors")
+        validators = tools.get("output_validators")
+        if type(processors) is not dict or type(validators) is not list or len(validators) != 0:
+            return reject("The output toolset contains unknown processors or validators.")
+        pending.extend(processors.values())
+    seen: set[int] = set()
+    inspected_outputs: set[int] = set()
+    while pending:
+        processor = pending.pop()
+        if processor is None or id(processor) in seen:
+            continue
+        seen.add(id(processor))
+        if type(processor) is _output.TextOutputProcessor:
+            continue
+        if type(processor) is _output.UnionOutputProcessor:
+            fields = vars(processor)
+            alternatives = fields.get("_processors")
+            if type(alternatives) is not dict or "_union_processor" not in fields:
+                return reject("The union output processor has unknown alternatives.")
+            pending.extend(alternatives.values())
+            pending.append(fields["_union_processor"])
+            continue
+        if type(processor) is not _output.ObjectOutputProcessor:
+            return reject("An executable or unknown output processor is present.")
+        fields = vars(processor)
+        inspected_outputs.add(id(fields.get("output_type")))
+        if fields.get("_function_schema") is not None:
+            return reject("An original output function is retained by the compiled processor.")
+        validator = fields.get("validator")
+        if type(validator) is not SchemaValidator:
+            return reject("The output validator is missing, pluggable or unknown.")
+        # The exact native method returns its retained schema/config arguments.
+        # Do not dispatch __reduce__ on arbitrary objects or reconstruct a
+        # validator: either could invoke target code or install plugin hooks.
+        reduced = SchemaValidator.__reduce__(validator)
+        if (
+            type(reduced) is not tuple or len(reduced) != 2
+            or type(reduced[1]) is not tuple or not reduced[1]
+            or type(reduced[1][0]) is not dict
+        ):
+            return reject("The native output validator exposes an unknown schema shape.")
+        reason = _core_output_callback_reason(reduced[1][0])
+        if reason is not None:
+            return reject(reason)
+    # Reject newly introduced output types that were not inspected. This
+    # membership check does not establish order/content equivalence for mutated
+    # declarations. Compare identities because equality could dispatch target
+    # code; containers have already passed _output_execution_issue.
+    declarations = list(_output._flatten_output_spec(target.output_type))
+    while declarations:
+        output = declarations.pop()
+        if type(output) in (NativeOutput, PromptedOutput, ToolOutput):
+            field = "output" if type(output) is ToolOutput else "outputs"
+            declarations.extend(_output._flatten_output_spec(vars(output)[field]))
+        elif output is str or output is None or output is type(None):
+            continue
+        elif output is _output.DeferredToolRequests or output is _output._messages.BinaryImage:
+            continue
+        elif id(output) not in inspected_outputs:
+            return reject("The current output declaration does not match the inspected SDK processors.")
+    return None
 
 
 def _tool_definition(
@@ -1557,6 +1861,12 @@ class PydanticAIAdapter(FrameworkAdapter):
                     location="agent.output_validator",
                 )
             )
+        if _supported_sdk_version(version):
+            output_issue = _output_execution_issue(target.output_type)
+            if output_issue is None:
+                output_issue = _compiled_output_execution_issue(target)
+            if output_issue is not None:
+                issues.append(output_issue)
         # deps_type itself is not rejected: it is a static type annotation the
         # framework never instantiates or validates at runtime (confirmed
         # against the pinned SDK), so AgentCheck always supplies its own
