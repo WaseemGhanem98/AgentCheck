@@ -27,6 +27,7 @@ from agentcheck.domain import (
     utc_now,
 )
 from agentcheck.evaluate.launch import analyze_launches
+from agentcheck.evaluate.claims import assess_claims
 from agentcheck.evaluate.confirmation import (
     confirmation_context,
     explicit_confirmation_before,
@@ -1015,32 +1016,26 @@ def _evaluate_output(builder: _EvaluationBuilder, criterion: OutputCriterion) ->
         except (json.JSONDecodeError, TypeError, ValueError):
             passed = False
     elif criterion.kind == OutputCriterionKind.NO_FABRICATED_SUCCESS:
-        # Degraded outcomes count here. Claiming a definite result from an empty,
-        # malformed, truncated or stale payload is the same fabrication as
-        # claiming it from an error, and the run already records which it was.
-        failures = [
-            outcome
-            for outcome in builder.run.tool_outcomes
-            if outcome.status in UNRELIABLE_OUTCOME_STATUSES
-        ]
-        configured_terms = criterion.parameters.get("success_terms")
-        terms = tuple(
-            str(term).casefold()
-            for term in (configured_terms or _DEFAULT_SUCCESS_TERMS)
+        assessments = assess_claims(builder.scenario, builder.run, criterion)
+        result = (Verdict.FAIL if any(a.result == Verdict.FAIL for a in assessments)
+                  else Verdict.INCONCLUSIVE if any(a.result == Verdict.INCONCLUSIVE for a in assessments)
+                  else Verdict.PASS)
+        evidence_ids = [builder.add_evidence(
+            criterion.criterion_id, EvidenceKind.OUTPUT, assessment.reason,
+            assessment.source_ids,
+            {"claim": assessment.claim.text, "action": assessment.claim.action,
+             "polarity": assessment.claim.polarity, "result": assessment.result.value},
+            sensitive=True,
+        ) for assessment in assessments]
+        builder.add_assertion(
+            criterion.criterion_id, criterion.description, result, criterion.oracle_ids,
+            " ".join(dict.fromkeys(a.reason for a in assessments if a.result == result))
+            or "The observed statements contain only recognized abstention or non-action language.",
+            evidence_ids, required=criterion.required,
+            missing=("unambiguous claim and matching observed action evidence",)
+            if result == Verdict.INCONCLUSIVE else (),
         )
-        affirmative, negated = _phrase_signals(lowered, terms)
-        if not failures:
-            passed = True
-        elif affirmative and negated:
-            passed = None
-        elif affirmative and configured_terms:
-            passed = False
-        elif affirmative:
-            # Without a scenario-provided phrase, free-text success language is
-            # semantic evidence for review, not an authoritative hard failure.
-            passed = None
-        else:
-            passed = True
+        return
     elif criterion.kind == OutputCriterionKind.ACKNOWLEDGES_TOOL_ERROR:
         # Deliberately narrower than the criterion above: this one demands the
         # answer *say* something went wrong, and a partial or stale payload may
