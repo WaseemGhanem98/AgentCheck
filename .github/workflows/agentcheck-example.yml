@@ -17,8 +17,9 @@
 #
 # This repository is not itself an AgentCheck target at its root. The default
 # below points at the bundled deterministic example. There is no committed
-# example baseline here. Without a baseline, all-PASS can exit 0, any FAIL
-# exits 1, and INCONCLUSIVE exits 3; baseline absence alone is not exit 2.
+# example baseline here. Without a baseline, a certifiable all-PASS run can
+# exit 0 when no required evidence is outstanding. A failure blocks with exit 1,
+# and insufficient evidence blocks with exit 3; baseline absence alone is not exit 2.
 
 # Runner note: this workflow is deliberately GitHub-hosted so the copied
 # template does not expose a personal runner to pull-request code. It is
@@ -63,7 +64,7 @@ jobs:
       - name: Install AgentCheck
         run: |
           python -m pip install --upgrade "pip==26.1.2" "setuptools==83.0.0"
-          python -m pip install "agentcheck-ai==0.5.2"
+          python -m pip install "agentcheck-ai==0.5.14"
           agentcheck --version
 
       - name: Install target dependencies
@@ -71,8 +72,8 @@ jobs:
         # Replace this step in a consuming repository with that target's own
         # locked dependency install. For an OpenAI or PydanticAI target, the
         # corresponding exact AgentCheck extra is a convenient SDK install:
-        #   agentcheck-ai[openai-agents]==0.5.2
-        #   agentcheck-ai[pydantic-ai]==0.5.2
+        #   agentcheck-ai[openai-agents]==0.5.14
+        #   agentcheck-ai[pydantic-ai]==0.5.14
         # Custom targets use the base package plus their own dependencies.
         run: |
           python -m pip install "openai-agents>=0.20,<0.23" "websockets>=15,<16"
@@ -81,15 +82,16 @@ jobs:
         # One command for the whole flow: run the frozen suite, compare it to
         # the trusted baseline, and return one status.
         #
-        #   0  allow: no new behavioural failure against a trusted baseline;
-        #      without one, every case passed. Accepted historical failures
-        #      may pass only when the current run is otherwise certifiable.
+        #   0  allow: a certifiable run with no new behavioural failure and no
+        #      outstanding required evidence. Without a baseline, every case
+        #      must pass. Known failures may be accepted by a trusted baseline.
         #   1  block: a behavioural failure is new against the baseline; without
         #      one, any behavioural failure blocks.
         #   2  block: the run or comparison is not certifiable (infrastructure,
         #      incomplete execution evidence, or a suite/source/baseline
         #      mismatch). A missing baseline by itself does not force exit 2.
-        #   3  block: the available evidence is INCONCLUSIVE. AgentCheck 0.5.2
+        #   3  block: evidence is INCONCLUSIVE or a declared risk obligation
+        #      lacks required evidence. AgentCheck
         #      does not let a baseline turn missing current evidence into PASS.
         run: |
           agentcheck gate "$AGENTCHECK_TARGET" \

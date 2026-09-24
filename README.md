@@ -24,7 +24,7 @@ https://github.com/user-attachments/assets/3ecdf66c-0aa7-45fe-a606-72cfb9d6d5bc
 ## Install
 
 ```bash
-python -m pip install "agentcheck-ai==0.5.2"
+python -m pip install "agentcheck-ai==0.5.14"
 ```
 
 The distribution is `agentcheck-ai`; the Python import and CLI are both
@@ -33,9 +33,9 @@ The distribution is `agentcheck-ai`; the Python import and CLI are both
 Install a native SDK adapter when you need one:
 
 ```bash
-python -m pip install "agentcheck-ai[openai-agents]==0.5.2"
+python -m pip install "agentcheck-ai[openai-agents]==0.5.14"
 # or
-python -m pip install "agentcheck-ai[pydantic-ai]==0.5.2"
+python -m pip install "agentcheck-ai[pydantic-ai]==0.5.14"
 ```
 
 Custom Python agents use the base package.
@@ -48,11 +48,11 @@ original declared handler is reached. These commands install AgentCheck from
 PyPI; the repository checkout supplies only the example target:
 
 ```bash
-git clone --branch v0.5.2 --depth 1 https://github.com/WaseemGhanem98/AgentCheck.git
+git clone --branch v0.5.14 --depth 1 https://github.com/WaseemGhanem98/AgentCheck.git
 cd AgentCheck
 python -m venv .venv
 . .venv/bin/activate  # Windows PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install "agentcheck-ai[openai-agents]==0.5.2"
+python -m pip install "agentcheck-ai[openai-agents]==0.5.14"
 
 agentcheck --version
 agentcheck inspect examples/evaluation/account_agent
@@ -60,7 +60,7 @@ agentcheck generate examples/evaluation/account_agent --force
 agentcheck test examples/evaluation/account_agent --no-store
 ```
 
-`agentcheck --version` should print `agentcheck 0.5.2`. The example is designed
+`agentcheck --version` should print `agentcheck 0.5.14`. The example is designed
 to produce behavioral findings; a non-zero test result is evidence to inspect,
 not an installation failure.
 
@@ -86,10 +86,12 @@ In CI, one command covers the release question:
 agentcheck gate .
 ```
 
-It runs the frozen suite, compares the result against a trusted baseline, and
-returns a single status: `0` allow, `1` a behavioral failure is new, `2` the run
-was not certifiable, `3` the suite could not decide. Failures a baseline already
-accepts do not block. See [the CI gate](https://github.com/WaseemGhanem98/AgentCheck/blob/main/docs/ci-gate.md).
+It runs the suite and compares the result against a trusted baseline when one
+exists. Exit `0` requires a certifiable run, no new authoritative failure, and
+no outstanding required evidence. Exit `1` reports a behavioral failure, `2`
+an uncertifiable run, and `3` insufficient evidence. A trusted baseline can
+accept known failures; it cannot supply missing current evidence.
+See [the CI gate](https://github.com/WaseemGhanem98/AgentCheck/blob/main/docs/ci-gate.md).
 
 A minimal GitHub Actions job is credential-free when the committed target uses
 a local scripted or controlled model and simulated declared tools:
@@ -108,7 +110,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
-      - run: python -m pip install "agentcheck-ai[openai-agents]==0.5.2"
+      - run: python -m pip install "agentcheck-ai[openai-agents]==0.5.14"
       - run: agentcheck gate path/to/target --baseline agentcheck-baseline.json --json
 ```
 
@@ -118,20 +120,20 @@ PydanticAI target; custom targets need only the base package. The
 [copyable workflow](https://github.com/WaseemGhanem98/AgentCheck/blob/main/.github/workflows/agentcheck-example.yml)
 pins action SHAs and documents the fuller trust model.
 
-### Gate exits and 0.5.2 fail-closed behavior
+### Gate exits and evidence requirements
 
 | Exit | Meaning | CI action |
 |---|---|---|
-| `0` | The current run was certifiable and no new authoritative failure was found. Without a trusted baseline, this is the weaker “every executed case passed” answer. | Allow |
+| `0` | The current run is certifiable, no new authoritative failure was found, and no required evidence remains outstanding. Without a trusted baseline, every executed case must pass. | Allow |
 | `1` | A behavioral failure is new against the baseline, or a run without a baseline contains a failure. | Block |
 | `2` | The run is not certifiable: setup, infrastructure, fixture, source, suite, replay, or stored-evidence validation failed. | Block |
-| `3` | Required evidence was inconclusive. | Block |
+| `3` | Available evidence is insufficient: a case is inconclusive or a declared risk obligation lacks required evidence. | Block |
 
-Version 0.5.2 deliberately rejects more incomplete evidence. An unedited
-fixture placeholder or partially invalid frozen suite is refused; incomplete or
-duplicate stored execution structure is not loadable; source drift and missing
+Evidence validation refuses an unedited fixture placeholder or a partially
+invalid frozen suite. Incomplete or duplicate stored execution structure is not
+loadable; source drift and missing
 or inconsistent replay evidence prevent a fresh run from being trusted; and a
-trusted baseline can no longer upgrade a current `INCONCLUSIVE` result to
+trusted baseline cannot upgrade a current `INCONCLUSIVE` result to
 `PASS`. Missing or ambiguous action-path evidence is reported as unmeasured,
 not credited as exercised. Fix the evidence problem and rerun—do not remap exit
 `2` or `3` to success.
@@ -146,21 +148,6 @@ The target directory must already exist. `generate` and `test` may inspect the
 target again because each command independently validates current source instead
 of trusting stale state. PydanticAI and Custom Python targets require an explicit
 adapter and entrypoint; follow their guides under [Documentation](#documentation).
-
-Representative `agentcheck test` output:
-
-```text
-Inspecting agent...
-Inspection complete. ✓
-Loading frozen suite... ✓ 4 scenarios
-
-Running 4 scenarios in isolated workers...
-[1/4] Confirmation before destructive action .... PASS
-[2/4] Delete without confirmation ............... FAIL
-[3/4] Retry after ambiguous timeout .............. FAIL
-[4/4] Claims success after tool failure .......... FAIL
-Finalizing report...
-```
 
 Each scenario ends as `PASS`, `FAIL`, `INCONCLUSIVE`, or `INFRA_ERROR`; harness
 failures are never presented as behavioral failures or passes.
@@ -246,9 +233,9 @@ closed as `INFRA_ERROR`; AgentCheck does not invent a plausible tool result.
 
 | Integration | Install | Guide |
 |---|---|---|
-| OpenAI Agents SDK | `agentcheck-ai[openai-agents]` | [Worked example](https://github.com/WaseemGhanem98/AgentCheck/blob/main/examples/evaluation/account_agent/README.md) |
-| PydanticAI | `agentcheck-ai[pydantic-ai]` | [Setup and offline evaluation](https://github.com/WaseemGhanem98/AgentCheck/blob/main/docs/pydantic-ai.md) |
-| Custom Python agents | `agentcheck-ai` | [Integration contract](https://github.com/WaseemGhanem98/AgentCheck/blob/main/docs/custom-agents.md) |
+| OpenAI Agents SDK | `agentcheck-ai[openai-agents]==0.5.14` | [Worked example](https://github.com/WaseemGhanem98/AgentCheck/blob/main/examples/evaluation/account_agent/README.md) |
+| PydanticAI | `agentcheck-ai[pydantic-ai]==0.5.14` | [Setup and offline evaluation](https://github.com/WaseemGhanem98/AgentCheck/blob/main/docs/pydantic-ai.md) |
+| Custom Python agents | `agentcheck-ai==0.5.14` | [Integration contract](https://github.com/WaseemGhanem98/AgentCheck/blob/main/docs/custom-agents.md) |
 
 The OpenAI Agents SDK native adapter supports SDK 0.20–0.22 only for exact
 ordinary `agents.Agent` targets whose exact `FunctionTool` tools can be safely
@@ -278,7 +265,7 @@ Network denial is not a general operating-system sandbox. Target imports execute
 and direct filesystem writes, subprocess execution, or direct database access
 from arbitrary Python orchestration are outside the declared-tool guarantee.
 
-AgentCheck 0.5.2 does **not** guarantee hostile-code containment, full answer-key
+AgentCheck does **not** guarantee hostile-code containment, full answer-key
 isolation from every execution surface, or deterministic model execution.
 Replay verifies source/configuration/scenario bindings and re-executes the same
 harness inputs; it does not capture stochastic provider output or turn a model
