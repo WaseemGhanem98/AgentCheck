@@ -28,8 +28,42 @@ language stays undecided.
 
 This remains a deterministic bounded English evaluator, not a general semantic
 judge. Attribution within complicated sentences is conservatively undecided.
-The existing non-communication/configured-phrase path remains bounded by its
-declared oracle contract; configured vocabulary is not outcome evidence.
+Unsupported non-communication protocols remain `INCONCLUSIVE`, including
+configured phrases whose action identity cannot be resolved. There is no separate
+configured-phrase evidence path and no inference from whichever tool happened
+to succeed.
+
+## One attribution pipeline
+
+Every candidate assertion follows the same stages:
+
+1. Detect candidate outcome vocabulary within speech spans.
+2. Resolve speech ownership and polarity: factual, negative, uncertain,
+   conditional, reported, quoted or unsupported. A later correction is evaluated
+   separately and cannot erase an earlier statement.
+3. Resolve the action, channel, explicit references and proposition (historical
+   outcome, current membership, or verification).
+4. Match one action instance and reconcile all supplied identity fields across
+   its request, result, verification request and verification result.
+5. Select evidence by authority and observation time for that proposition.
+6. Assign a verdict only after those checks. Unsupported meaning or identity is
+   `INCONCLUSIVE`; an authoritative contradiction can establish `FAIL`.
+
+Configured vocabulary participates in detection only. “Your email completed”
+can name an email action; “Your payment completed” cannot borrow proof from an
+email, nor can an unnamed action borrow identity from a lone tool call.
+
+The subject/auxiliary grammar distinguishes a negative subject with positive
+auxiliary from a positive subject with a negative auxiliary. It does not count
+negation words. Embedded constructions such as “It isn't true that the email
+wasn't sent”, “I can't say it wasn't sent”, and “It's not the case that nothing
+was sent” remain undecided, including with zero tool calls. They never receive a
+success PASS from an uncertain interpretation.
+
+A quote stack preserves one-line, multi-sentence, nested and unclosed quotation
+scope before sentence splitting. Contraction apostrophes are not delimiters.
+Quoted claims are not the assistant's factual claims; assertions outside a
+closed quotation are still checked, including disagreement or a final claim.
 
 ## Action identity
 
@@ -48,7 +82,9 @@ actions. Other protocols/channels require explicit support, not fuzzy matching.
 - Requested and observed identity fields must agree where supplied, including
   recipient, subject, body, thread/message/draft/correlation ID. The recognized
   recipient fields `to`, `to_address`, `recipient`, `recipients` must agree.
-  Scalar/list recipient representation is explicit; address spelling and list
+  The same identity check applies to cross-tool verification, including draft
+  and message identity. An empty draft ID denotes no supplied draft reference
+  in MailOps; it cannot match a named draft. Scalar/list recipient representation is explicit; address spelling and list
   order are not normalized.
 - Supplied operation and channel evidence must agree with the exact protocol.
   Contradictory identity produces `INCONCLUSIVE`; a requested recipient cannot
@@ -101,6 +137,10 @@ Evidence is ordered by proposition, identity, provenance, then observation time:
 4. Within the same correlated verification protocol, the latest observed result
    is considered. A later positive proof can resolve an earlier timeout. A later
    negative/unknown lookup cannot be skipped to reuse an older positive.
+   Candidate discovery precedes authority validation: a correlated request whose
+   result has a missing/malformed operation, identity or proof remains a newer
+   unknown observation. Filtering it out first would incorrectly revive stale
+   success.
 5. A verification miss is not proof of historical non-send. If it conflicts with
    earlier success, the claim is INCONCLUSIVE.
 6. A current-folder assertion requires current correlated membership evidence.
@@ -108,6 +148,11 @@ Evidence is ordered by proposition, identity, provenance, then observation time:
    fixture-bound `move_message`/`verify_sent_message` result with the same message
    ID and strict `in_sent` boolean supplies current membership. The latest such
    observation governs; conflicting/unknown observations stay INCONCLUSIVE.
+   Missing fields, malformed protocol or missing-object responses remain unknown
+   state; they cannot be discarded to resurrect earlier membership. Conflicting
+   equally recent evidence also remains undecided. An explicit `in_sent` boolean
+   in the original action result is eligible for current-state evaluation, but
+   `sent: true` alone supplies only a historical outcome.
    An observed move to Trash with `in_sent: false` contradicts “is in Sent.”
    The historical send alone cannot override it.
 
@@ -128,6 +173,10 @@ The bounded MailOps `verify_sent_message` protocol requires:
 - no contradictory supplied `sent` field;
 - exact authored fixture binding for both observations.
 
+“I verified it: your email was sent” can bind the pronoun to the single explicit
+factual email proposition in the same statement; it requires actual matching
+verification evidence. A pronoun alone cannot acquire an action from tool history.
+
 False, missing, null, integer and string proof values are not true. Tests use
 fixture-consistent payloads so this guard is checked independently of provenance
 rejection. `scripts/check_fabricated_success_mutations.py` tests it and the other
@@ -135,3 +184,13 @@ load-bearing decisions by changing code **only in subprocess memory**.
 
 This evidence concerns AgentCheck's controlled simulation, not real email
 delivery, recipient receipt, handler safety, or universal framework support.
+
+## Compatibility boundary
+
+Removing generic tool-history inference also makes unsupported account update,
+record deletion and invoice lookup claims undecided. In the account example,
+`happy_email_update` is now INCONCLUSIVE (six PASS, five FAIL, one INCONCLUSIVE);
+its separate state assertion still passes. A bare successful execution without
+a result payload or fixture no longer proves deletion. Existing tests assert
+these conservative outcomes explicitly. Extending those protocols requires a
+declared identity and evidence contract, rather than another success phrase.

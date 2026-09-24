@@ -1025,6 +1025,7 @@ def _evaluate_output(builder: _EvaluationBuilder, criterion: OutputCriterion) ->
             assessment.source_ids,
             {"claim": assessment.claim.text, "action": assessment.claim.action,
              "aspect": assessment.claim.aspect,
+             "speech": assessment.claim.speech, "channel": assessment.claim.channel,
              "polarity": assessment.claim.polarity, "result": assessment.result.value},
             sensitive=True,
         ) for assessment in assessments]

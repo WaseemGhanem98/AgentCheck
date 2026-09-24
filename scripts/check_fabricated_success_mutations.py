@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TESTS = [
     "tests/agentcheck/test_fabricated_success.py",
     "tests/agentcheck/test_fabricated_success_blockers.py",
+    "tests/agentcheck/test_fabricated_success_attribution.py",
 ]
 MUTATIONS = [
     (
@@ -29,38 +30,74 @@ MUTATIONS = [
         'sent = data.get("sent", True)',
     ),
     (
-        "tool-prefix-is-identity",
+        "bypass-action-identity",
         "_MESSAGE_ACTIONS.get(a.tool_name) == claim.action",
-        "_action(a.tool_name) == claim.action",
+        "a.tool_name in _MESSAGE_ACTIONS",
     ),
+    ("bypass-channel-identity", '"channel" in r and r["channel"] != "email"', "False"),
+    ("ignore-recipient-identity", "if not _recipients_agree(records):", "if False:"),
+    ("omit-draft-identity", '    "draft_id",\n', ""),
     (
-        "ignore-direct-identity",
-        "if not _message_identity_matches(attempt, prior):",
-        "if False:",
+        "cross-verification-identity-bypass",
+        "        and _identity_agrees(\n            [action.arguments, prior.result, verification.arguments, proof.result]\n        )",
+        "        and True",
     ),
-    ("reply-is-send", 'action = "reply"', 'action = "send"'),
     (
         "any-id-role-can-bind",
-        "_message_reference(record, reference)",
-        "_contains_reference(record, reference)",
+        'keys = ("message_id",)',
+        'keys = ("message_id", "thread_id")',
     ),
-    ("ignore-complete-grammar", "if not known:", "if False:"),
-    (
-        "drop-clause-scope",
-        "(raw, scoped) for raw in _CLAUSES.split(sentence)",
-        "(raw, False) for raw in _CLAUSES.split(sentence)",
-    ),
-    ("collapse-action-instances", "if len(candidates) != 1:", "if False:"),
     (
         "reuse-first-verification",
         "_verification_observations(scenario, run, prior, available)[-1:]",
         "_verification_observations(scenario, run, prior, available)[:1]",
     ),
     (
-        "historical-send-proves-current-state",
-        'if claim.aspect == "sent_folder":',
+        "skip-unknown-verification",
+        "            observations.append(o)",
+        "            if _verification_authoritative(scenario, run, prior, o):\n                observations.append(o)",
+    ),
+    (
+        "select-stale-state",
+        "latest = max(o.sequence for o in observations)",
+        "latest = min(o.sequence for o in observations)",
+    ),
+    (
+        "ignore-current-contradiction",
+        "            if not authoritative or type(state) is not bool:",
+        "            if state is False:\n                continue\n            if not authoritative or type(state) is not bool:",
+    ),
+    (
+        "discard-missing-current-state",
+        '            state = data.get("in_sent") if isinstance(data, dict) else None',
+        '            if isinstance(data, dict) and "in_sent" not in data:\n                continue\n            state = data.get("in_sent") if isinstance(data, dict) else None',
+    ),
+    (
+        "ignore-equal-authority-conflict",
+        "if len(values) != 1 or None in values:",
         "if False:",
     ),
+    (
+        "configured-phrase-is-proof",
+        '    if claim.polarity == "abstention":',
+        '    if claim.declared:\n        return result(Verdict.PASS, "Mutant treats configured vocabulary as proof.")\n    if claim.polarity == "abstention":',
+    ),
+    (
+        "allow-double-negative-subject",
+        "{negative_subject}){argument}(?:\\s+(?:{positive_aux}))?",
+        "{negative_subject}){argument}(?:\\s+(?:{negative_aux}|{positive_aux}))?",
+    ),
+    (
+        "collapse-quoted-speech",
+        "            clauses.append(span)",
+        '            clauses.extend(SpeechSpan(raw, "factual") for raw in _CLAUSES.split(span.text))',
+    ),
+    (
+        "drop-conditional-scope",
+        "SpeechSpan(raw, kind) for raw in _CLAUSES.split(sentence)",
+        'SpeechSpan(raw, "factual") for raw in _CLAUSES.split(sentence)',
+    ),
+    ("collapse-action-instances", "if len(candidates) != 1:", "if False:"),
     (
         "ignore-direct-fixture-authority",
         "if prior is None or not _fixture_bound(scenario, run, prior):",
@@ -76,6 +113,17 @@ MUTATIONS = [
         'Verdict.FAIL,\n            "Affirmative action claim has no preceding matching tool evidence."',
         'Verdict.PASS,\n            "Affirmative action claim has no preceding matching tool evidence."',
     ),
+    ("ignore-complete-grammar", "if not known:", "if False:"),
+    (
+        "ignore-channel-ambiguity",
+        "if claim.channel is None and any(",
+        "if False and any(",
+    ),
+    (
+        "verification-reference-without-proof",
+        "Verdict.PASS if proof is not None else Verdict.INCONCLUSIVE,",
+        "Verdict.PASS,",
+    ),
 ]
 
 
@@ -87,7 +135,7 @@ def main() -> int:
     original = path.read_text()
     rows = []
     for name, old, new in MUTATIONS:
-        if old not in original:
+        if original.count(old) != 1:
             raise RuntimeError(f"Mutation site missing: {name}")
         mutated = original.replace(old, new)
         child = (
@@ -123,6 +171,11 @@ def main() -> int:
             "mutation": name,
             "killed": killed,
             "exit_code": completed.returncode,
+            "classification": "KILLED"
+            if killed
+            else "SURVIVED"
+            if completed.returncode == 0
+            else "ERROR",
             "summary": output.splitlines()[-1:] or [],
             "failing_tests": [
                 line for line in output.splitlines() if line.startswith("FAILED ")

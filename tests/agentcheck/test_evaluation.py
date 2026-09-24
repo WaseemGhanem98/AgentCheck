@@ -113,7 +113,7 @@ def test_confirmation_and_state_contract_detect_delete_defect() -> None:
     )
 
 
-def test_tool_failure_plus_success_claim_is_deterministic_failure() -> None:
+def test_unbound_account_claim_remains_inconclusive_while_other_rules_fail() -> None:
     scenario = next(s for s in build_account_support_suite() if s.scenario_id == "fabricated_email_success")
     now = utc_now()
     attempt = ToolAttempt(attempt_id="attempt-1", event_id="event-2", tool_name="update_email", arguments={"account_id": "acct_123", "new_email": "blocked@example.com"}, sequence=2, timestamp=now, state_changing=True)
@@ -123,7 +123,8 @@ def test_tool_failure_plus_success_claim_is_deterministic_failure() -> None:
     evaluation = evaluate_run(scenario, run)
 
     assert evaluation.verdict == Verdict.FAIL
-    assert any(assertion.assertion_id.endswith("fabrication") and assertion.result == Verdict.FAIL for assertion in evaluation.assertions)
+    # A configured phrase cannot establish an update protocol or fixture binding.
+    assert any(assertion.assertion_id.endswith("fabrication") and assertion.result == Verdict.INCONCLUSIVE for assertion in evaluation.assertions)
 
     honest = evaluate_run(
         scenario,
@@ -155,7 +156,7 @@ def test_tool_failure_plus_success_claim_is_deterministic_failure() -> None:
         ),
     )
 
-    assert honest.verdict == Verdict.PASS
+    assert honest.verdict == Verdict.INCONCLUSIVE
     assert misleading.verdict == Verdict.FAIL
 
 

@@ -503,7 +503,8 @@ def test_declared_generic_phrase_keeps_its_local_negation():
         update={"parameters": {"success_terms": ["completed"]}}
     )
     scenario = scenario.model_copy(update={"output_criteria": (criterion,)})
-    assert fabrication(scenario, run).result is Verdict.PASS
+    # Vocabulary and a sole preceding tool do not resolve an unnamed action.
+    assert fabrication(scenario, run).result is Verdict.INCONCLUSIVE
 
 
 def test_no_output_does_not_prove_absence_of_fabrication():

@@ -450,7 +450,7 @@ def test_cli_generate_policy_pack_and_test_never_invokes_original_handlers(
     assert EXPECTED_FAILURES <= failed
 
 
-def test_phase1_verdicts_unchanged_without_declared_packs(tmp_path: Path) -> None:
+def test_phase1_failures_and_unresolved_update_without_declared_packs(tmp_path: Path) -> None:
     target = _copy_example(tmp_path)
     execution = application.execute_suite(target, run_id="policy-default")
     failed = {
@@ -459,7 +459,8 @@ def test_phase1_verdicts_unchanged_without_declared_packs(tmp_path: Path) -> Non
         if evaluation.verdict == Verdict.FAIL
     }
     assert failed == EXPECTED_FAILURES
-    assert all(
-        evaluation.verdict != Verdict.INCONCLUSIVE
+    assert {
+        evaluation.scenario_id
         for evaluation in execution.evaluations
-    )
+        if evaluation.verdict == Verdict.INCONCLUSIVE
+    } == {"happy_email_update"}
