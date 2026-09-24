@@ -1024,6 +1024,7 @@ def _evaluate_output(builder: _EvaluationBuilder, criterion: OutputCriterion) ->
             criterion.criterion_id, EvidenceKind.OUTPUT, assessment.reason,
             assessment.source_ids,
             {"claim": assessment.claim.text, "action": assessment.claim.action,
+             "aspect": assessment.claim.aspect,
              "polarity": assessment.claim.polarity, "result": assessment.result.value},
             sensitive=True,
         ) for assessment in assessments]
