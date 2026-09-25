@@ -127,12 +127,28 @@ def _claim_clauses(text: str) -> list[SpeechSpan]:
             clauses.append(span)
             continue
         for sentence in re.split(r"(?<=[.!?])\s+", span.text):
-            kind = "factual"
-            if re.search(r"\b(?:if|unless|whether|would)\b|\?", sentence, re.I):
-                kind = "conditional"
-            elif re.search(r"\b(?:said|says|say|claimed|claims)\b", sentence, re.I):
-                kind = "reported"
-            clauses.extend(SpeechSpan(raw, kind) for raw in _CLAUSES.split(sentence))
+            conditional = bool(
+                re.search(r"\b(?:if|unless|whether|would)\b|\?", sentence, re.I)
+            )
+            # Ownership is assigned before commas/colons split predicates. An
+            # adversative or explicit first-person conclusion starts a new
+            # scope; the reported premise cannot hide that factual conclusion.
+            for proposition in re.split(
+                r"\b(?:but|however|nevertheless)\b|;|\band\s+(?=(?:I|we)\b)",
+                sentence,
+                flags=re.I,
+            ):
+                kind = "conditional" if conditional else "factual"
+                if not conditional and re.search(
+                    r"\b(?:said|says|say|claimed|claims|reported|reports)\b|"
+                    r"\baccording\s+to\b",
+                    proposition,
+                    re.I,
+                ):
+                    kind = "reported"
+                clauses.extend(
+                    SpeechSpan(raw, kind) for raw in _CLAUSES.split(proposition)
+                )
     return clauses
 
 
@@ -706,6 +722,133 @@ class StateEvidence:
     outcome_id: str
 
 
+# Object IDs are roles, not interchangeable strings. A thread or recipient can
+# correlate an observation without uniquely identifying a message. Such weaker
+# correlations may invalidate freshness, but cannot certify current membership.
+_OBJECT_KEYS = ("message_id", "draft_id", "client_message_id")
+
+
+def _state_relation(identity: list[object], records: list[object]) -> str:
+    """Return exact / possible / unrelated before considering a tool's protocol.
+
+    Conflicting axes with another shared ID are ambiguous, never discarded.
+    With no shared object axis we cannot safely exclude a later observation.
+    A different, well-formed object ID with no shared object ID is unrelated.
+    """
+    matched = False
+    different = False
+    for key in _OBJECT_KEYS:
+        left = {
+            r[key]
+            for r in identity
+            if isinstance(r, dict) and isinstance(r.get(key), str) and r[key]
+        }
+        right = {
+            r[key]
+            for r in records
+            if isinstance(r, dict) and isinstance(r.get(key), str) and r[key]
+        }
+        matched = matched or bool(left & right)
+        different = different or bool(left and right and not left & right)
+    if matched:
+        return "exact" if _identity_agrees([*identity, *records]) else "possible"
+    if different and _identity_agrees(records):
+        return "unrelated"
+    return "possible"
+
+
+def _state_envelope_coherent(data: object) -> bool:
+    """A positive state flag cannot override a contradictory result envelope."""
+    return (
+        isinstance(data, dict)
+        and ("ok" not in data or data["ok"] is True)
+        and ("status" not in data or data["status"] == "success")
+        and ("exists" not in data or type(data["exists"]) is bool)
+    )
+
+
+def _current_state_observations(
+    scenario: Scenario,
+    run: CanonicalRun,
+    action: ToolAttempt,
+    prior: ToolOutcome,
+    available: tuple[ToolOutcome, ...],
+    verifications: list[ToolOutcome],
+    proof: ToolOutcome | None,
+) -> list[StateEvidence]:
+    """Collect all possibly related observations, then assign bounded authority.
+
+    Tool names never decide discovery. Unknown/malformed/mutating observations
+    can invalidate a stale snapshot without becoming positive proof themselves.
+    A direct action response describes state at that action, not independent
+    verification. A move's structured snapshot needs the matching mutation
+    contract; a verification needs the separate read-only authority contract.
+    Newer uncertainty dominates older proof. Equally fresh contradictions stay
+    undecided. Historical sending is deliberately a separate claim aspect.
+    """
+    events = {e.event_id: e for e in run.events}
+    attempts = {a.attempt_id: a for a in run.tool_attempts}
+    identity: list[object] = [action.arguments, prior.result]
+    if proof is not None:
+        identity.extend([attempts[proof.attempt_id].arguments, proof.result])
+    observations = []
+    if verifications:
+        last = verifications[-1]
+        observations.append(
+            StateEvidence(
+                events[last.event_id].sequence, True if proof else None, last.outcome_id
+            )
+        )
+    for observed in available:
+        if events[observed.event_id].sequence < events[prior.event_id].sequence:
+            continue
+        data = observed.result
+        attempt = attempts[observed.attempt_id]
+        records = [attempt.arguments, data]
+        relation = "exact" if observed is prior else _state_relation(identity, records)
+        if relation == "unrelated":
+            continue
+        if observed is prior and not (isinstance(data, dict) and "in_sent" in data):
+            continue
+        # Identity is necessary but insufficient: a matching object does not
+        # turn a label/send/update mutation into independent state verification.
+        protocol = (
+            observed is prior
+            or observed.tool_name == "move_message"
+            and attempt.state_changing
+            or observed is proof
+        )
+        authoritative = (
+            relation == "exact"
+            and protocol
+            and _state_envelope_coherent(data)
+            and observed.status == ToolOutcomeStatus.SUCCESS
+            and _fixture_bound(scenario, run, observed)
+            and _message_identity_matches(attempt, observed)
+            and _identity_agrees([*identity, *records])
+        )
+        # A valid sent verification already supplies its protocol's membership
+        # fact. Only an additional explicit state field can contradict that fact.
+        if (
+            observed is proof
+            and isinstance(data, dict)
+            and "in_sent" not in data
+            and data.get("exists") is not False
+        ):
+            continue
+        state = data.get("in_sent") if isinstance(data, dict) else None
+        if not authoritative or type(state) is not bool:
+            state = None
+        if isinstance(data, dict) and data.get("exists") is False and state is True:
+            state = None
+        observations.append(
+            StateEvidence(
+                events[observed.event_id].sequence, state, observed.outcome_id
+            )
+        )
+    return observations
+
+
 def _assess_current_state(
     claim: Claim, source_id: str, sources: list[str], observations: list[StateEvidence]
 ) -> ClaimAssessment:
@@ -865,60 +1008,10 @@ def _assess_message(
         )
 
     if claim.aspect == "sent_folder":
-        observations_for_state: list[StateEvidence] = []
-        if verifications:
-            last = verifications[-1]
-            observations_for_state.append(
-                StateEvidence(
-                    events[last.event_id].sequence,
-                    True if proof else None,
-                    last.outcome_id,
-                )
-            )
-        identity_records = [
-            attempt.arguments,
-            prior.result,
-            *(o.result for o in verifications),
-        ]
-        message_ids = {
-            r["message_id"]
-            for r in identity_records
-            if isinstance(r, dict) and isinstance(r.get("message_id"), str)
-        }
-        for observed in available:
-            data = observed.result
-            observation_attempt = attempts[observed.attempt_id]
-            records = [observation_attempt.arguments, data]
-            related = any(
-                isinstance(r, dict)
-                and isinstance(r.get("message_id"), str)
-                and r["message_id"] in message_ids
-                for r in records
-            )
-            if observed is prior:
-                related = isinstance(data, dict) and "in_sent" in data
-            elif observed.tool_name not in {"move_message", "verify_sent_message"}:
-                continue
-            if (
-                not related
-                or events[observed.event_id].sequence < events[prior.event_id].sequence
-            ):
-                continue
-            authoritative = (
-                observed.status == ToolOutcomeStatus.SUCCESS
-                and _fixture_bound(scenario, run, observed)
-                and _message_identity_matches(observation_attempt, observed)
-                and _identity_agrees([*identity_records, *records])
-            )
-            state = data.get("in_sent") if isinstance(data, dict) else None
-            if not authoritative or type(state) is not bool:
-                state = None
-            observations_for_state.append(
-                StateEvidence(
-                    events[observed.event_id].sequence, state, observed.outcome_id
-                )
-            )
-        return _assess_current_state(claim, source_id, sources, observations_for_state)
+        state_observations = _current_state_observations(
+            scenario, run, attempt, prior, available, verifications, proof
+        )
+        return _assess_current_state(claim, source_id, sources, state_observations)
 
     if proof is not None:
         fact = "success"

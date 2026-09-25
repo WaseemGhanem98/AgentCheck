@@ -14,6 +14,7 @@ TESTS = [
     "tests/agentcheck/test_fabricated_success.py",
     "tests/agentcheck/test_fabricated_success_blockers.py",
     "tests/agentcheck/test_fabricated_success_attribution.py",
+    "tests/agentcheck/test_fabricated_success_evidence.py",
 ]
 MUTATIONS = [
     (
@@ -64,13 +65,13 @@ MUTATIONS = [
     ),
     (
         "ignore-current-contradiction",
-        "            if not authoritative or type(state) is not bool:",
-        "            if state is False:\n                continue\n            if not authoritative or type(state) is not bool:",
+        "        if not authoritative or type(state) is not bool:",
+        "        if state is False:\n            continue\n        if not authoritative or type(state) is not bool:",
     ),
     (
         "discard-missing-current-state",
-        '            state = data.get("in_sent") if isinstance(data, dict) else None',
-        '            if isinstance(data, dict) and "in_sent" not in data:\n                continue\n            state = data.get("in_sent") if isinstance(data, dict) else None',
+        '        state = data.get("in_sent") if isinstance(data, dict) else None',
+        '        if isinstance(data, dict) and "in_sent" not in data:\n            continue\n        state = data.get("in_sent") if isinstance(data, dict) else None',
     ),
     (
         "ignore-equal-authority-conflict",
@@ -94,8 +95,8 @@ MUTATIONS = [
     ),
     (
         "drop-conditional-scope",
-        "SpeechSpan(raw, kind) for raw in _CLAUSES.split(sentence)",
-        'SpeechSpan(raw, "factual") for raw in _CLAUSES.split(sentence)',
+        "SpeechSpan(raw, kind) for raw in _CLAUSES.split(proposition)",
+        'SpeechSpan(raw, "factual") for raw in _CLAUSES.split(proposition)',
     ),
     ("collapse-action-instances", "if len(candidates) != 1:", "if False:"),
     (
@@ -125,6 +126,45 @@ MUTATIONS = [
         "Verdict.PASS,",
     ),
 ]
+MUTATIONS.extend(
+    [
+        (
+            "ignore-state-envelope",
+            "            and _state_envelope_coherent(data)\n",
+            "",
+        ),
+        (
+            "remove-read-only-verification",
+            "        and not lookup.state_changing\n",
+            "",
+        ),
+        (
+            "remove-verification-operation",
+            '        and data.get("operation") == proof.tool_name\n',
+            "",
+        ),
+        (
+            "discover-state-by-tool-name",
+            "        data = observed.result",
+            '        if observed.tool_name not in {"move_message", "verify_sent_message", "send_email", "send_mail"}:\n            continue\n        data = observed.result',
+        ),
+        (
+            "discover-state-by-message-id-only",
+            '_OBJECT_KEYS = ("message_id", "draft_id", "client_message_id")',
+            '_OBJECT_KEYS = ("message_id",)',
+        ),
+        (
+            "object-identity-without-operation-authority",
+            "            and protocol\n",
+            "",
+        ),
+        (
+            "collapse-reported-ownership",
+            "                if not conditional and re.search(",
+            "                if False and re.search(",
+        ),
+    ]
+)
 
 
 def main() -> int:
