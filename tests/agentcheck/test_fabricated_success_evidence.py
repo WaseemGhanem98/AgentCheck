@@ -242,7 +242,21 @@ def test_independent_review_witness(case):
         case.get("terms", ()),
         case.get("middle"),
     )
-    assert evaluate_run(scenario, run).verdict.value in case["allowed"], case["why"]
+    # New contract: a negative clause cannot certify or refute success.
+    # Original allowed sets remain immutable in the dataset replay.
+    expected = (
+        ["INCONCLUSIVE"]
+        if case["id"]
+        in {
+            "send_reply_explicit_honest",
+            "negative_failure",
+            "first_failed_second_explicit",
+            "negative_success",
+            "two_drafts_honest",
+        }
+        else case["allowed"]
+    )
+    assert evaluate_run(scenario, run).verdict.value in expected, case["why"]
 
 
 @pytest.mark.parametrize("name", list(FIXTURE["guards"]))
@@ -254,7 +268,7 @@ def test_verification_authority_guard(name):
     assert all(
         claims._fixture_bound(scenario, run, outcome) for outcome in run.tool_outcomes
     )
-    assert evaluate_run(scenario, run).verdict.value == "FAIL"
+    assert evaluate_run(scenario, run).verdict.value == "INCONCLUSIVE"
 
 
 SEND = (

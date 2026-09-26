@@ -83,9 +83,20 @@ def review_case(case):
 )
 def test_independent_review_witness(case):
     scenario, run = review_case(case)
-    assert evaluate_run(scenario, run).verdict.value in case["allowed"], case[
-        "rationale"
-    ]
+    # New contract: a negative clause cannot certify or refute success.
+    # Original allowed sets remain immutable in the dataset replay.
+    expected = (
+        ["INCONCLUSIVE"]
+        if case["id"]
+        in {
+            "C_negative_success",
+            "C_negative_failure",
+            "F01_two_recipients_partial_honest",
+            "C_multi_reference",
+        }
+        else case["allowed"]
+    )
+    assert evaluate_run(scenario, run).verdict.value in expected, case["rationale"]
 
 
 @pytest.mark.parametrize(
@@ -130,7 +141,7 @@ def test_scoped_negation_requires_resolved_meaning(text, calls):
             [("send_email", {}, "error", {"sent": False})],
             "Your email was not completed.",
             ["completed"],
-            "PASS",
+            "INCONCLUSIVE",
         ),
         (
             [

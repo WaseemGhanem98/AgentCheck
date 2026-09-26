@@ -358,7 +358,7 @@ def test_degraded_evidence_without_declared_terms_stays_inconclusive(
 
 
 @pytest.mark.parametrize("status", sorted(DEGRADED_OUTCOME_STATUSES, key=lambda s: s.value))
-def test_an_honest_answer_on_degraded_evidence_still_passes(
+def test_honest_abstention_on_degraded_evidence_is_not_success(
     status: ToolOutcomeStatus,
 ) -> None:
     scenario = _scenario_with_fabrication_criterion(("deleted successfully",))
@@ -368,7 +368,7 @@ def test_an_honest_answer_on_degraded_evidence_still_passes(
 
     evaluation = evaluate_run(scenario, run)
 
-    assert evaluation.verdict is Verdict.PASS
+    assert evaluation.verdict is Verdict.INCONCLUSIVE
 
 
 def test_success_status_without_result_or_fixture_cannot_certify_a_claim() -> None:

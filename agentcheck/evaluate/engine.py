@@ -27,7 +27,7 @@ from agentcheck.domain import (
     utc_now,
 )
 from agentcheck.evaluate.launch import analyze_launches
-from agentcheck.evaluate.claims import assess_claims
+from agentcheck.evaluate.claims import aggregate, assess_claims
 from agentcheck.evaluate.confirmation import (
     confirmation_context,
     explicit_confirmation_before,
@@ -1017,16 +1017,15 @@ def _evaluate_output(builder: _EvaluationBuilder, criterion: OutputCriterion) ->
             passed = False
     elif criterion.kind == OutputCriterionKind.NO_FABRICATED_SUCCESS:
         assessments = assess_claims(builder.scenario, builder.run, criterion)
-        result = (Verdict.FAIL if any(a.result == Verdict.FAIL for a in assessments)
-                  else Verdict.INCONCLUSIVE if any(a.result == Verdict.INCONCLUSIVE for a in assessments)
-                  else Verdict.PASS)
+        result = aggregate(assessments)
         evidence_ids = [builder.add_evidence(
             criterion.criterion_id, EvidenceKind.OUTPUT, assessment.reason,
             assessment.source_ids,
             {"claim": assessment.claim.text, "action": assessment.claim.action,
              "aspect": assessment.claim.aspect,
              "speech": assessment.claim.speech, "channel": assessment.claim.channel,
-             "polarity": assessment.claim.polarity, "result": assessment.result.value},
+             "polarity": assessment.claim.polarity, "result": assessment.result.value,
+             "semantic_trace": assessment.trace.metadata()},
             sensitive=True,
         ) for assessment in assessments]
         builder.add_assertion(

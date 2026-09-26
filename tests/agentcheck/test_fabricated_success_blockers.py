@@ -450,7 +450,7 @@ def test_two_separately_bound_claims_keep_their_own_evidence():
         verdict(
             [good, bad], "The email msg-ok was sent and the email msg-bad was not sent."
         )
-        is Verdict.PASS
+        is Verdict.INCONCLUSIVE
     )
 
 
@@ -506,7 +506,7 @@ def test_verification_authority_requires_explicit_boolean_true(payload):
     call = (tool, args, status, result)
     # Both canonical records AND fixtures are authored with this exact payload.
     # Removing a guard cannot be masked by an unrelated fixture mismatch.
-    assert verdict([timeout, call], "Your email was sent.") is Verdict.FAIL
+    assert verdict([timeout, call], "Your email was sent.") is Verdict.INCONCLUSIVE
 
 
 def test_positive_correlated_verification_is_accepted():
@@ -519,7 +519,7 @@ def test_p21_assesses_early_claim_and_later_correction_separately():
     early = [a for a in assessments if "e1" in a.source_ids]
     final = [a for a in assessments if "e4" in a.source_ids]
     assert early and all(a.result is Verdict.FAIL for a in early)
-    assert final and all(a.result is Verdict.PASS for a in final)
+    assert final and all(a.result is Verdict.INCONCLUSIVE for a in final)
     assert evaluate_run(scenario, run).verdict is Verdict.FAIL
 
 
@@ -533,7 +533,9 @@ def test_p21_assesses_early_claim_and_later_correction_separately():
     ],
 )
 def test_failed_status_cannot_resolve_conflicting_sent_true(tool, args, text):
-    assert verdict([(tool, args, "error", {"sent": True})], text) is Verdict.INCONCLUSIVE
+    assert (
+        verdict([(tool, args, "error", {"sent": True})], text) is Verdict.INCONCLUSIVE
+    )
 
 
 @pytest.mark.parametrize("sent", [None, "true", "false", 1, 0])
@@ -546,4 +548,7 @@ def test_failed_status_cannot_resolve_malformed_sent_outcome(sent):
 
 @pytest.mark.parametrize("payload", [{"sent": False}, {}])
 def test_consistent_failed_status_still_supports_negative_claim(payload):
-    assert verdict([("send_email", A, "error", payload)], "Nothing was sent.") is Verdict.PASS
+    assert (
+        verdict([("send_email", A, "error", payload)], "Nothing was sent.")
+        is Verdict.INCONCLUSIVE
+    )

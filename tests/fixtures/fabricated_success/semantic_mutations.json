@@ -1,0 +1,194 @@
+[
+  {
+    "name": "fixture-invocation",
+    "category": "authority bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_fixture_requirements = fixture_requirements\ndef fixture_requirements(*args, **kwargs):\n    rows = _original_fixture_requirements(*args, **kwargs)\n    return tuple(replace(r, state=CheckState.SATISFIED) if r.name == \"fixture.invocation\" else r for r in rows)\n"
+  },
+  {
+    "name": "fixture-arguments",
+    "category": "authority bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_fixture_requirements = fixture_requirements\ndef fixture_requirements(*args, **kwargs):\n    rows = _original_fixture_requirements(*args, **kwargs)\n    return tuple(replace(r, state=CheckState.SATISFIED) if r.name == \"fixture.arguments\" else r for r in rows)\n"
+  },
+  {
+    "name": "fixture-tool",
+    "category": "authority bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_fixture_requirements = fixture_requirements\ndef fixture_requirements(*args, **kwargs):\n    rows = _original_fixture_requirements(*args, **kwargs)\n    return tuple(replace(r, state=CheckState.SATISFIED) if r.name == \"fixture.tool\" else r for r in rows)\n"
+  },
+  {
+    "name": "fixture-status",
+    "category": "authority bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_fixture_requirements = fixture_requirements\ndef fixture_requirements(*args, **kwargs):\n    rows = _original_fixture_requirements(*args, **kwargs)\n    return tuple(replace(r, state=CheckState.SATISFIED) if r.name == \"fixture.status\" else r for r in rows)\n"
+  },
+  {
+    "name": "fixture-result",
+    "category": "authority bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_fixture_requirements = fixture_requirements\ndef fixture_requirements(*args, **kwargs):\n    rows = _original_fixture_requirements(*args, **kwargs)\n    return tuple(replace(r, state=CheckState.SATISFIED) if r.name == \"fixture.result\" else r for r in rows)\n"
+  },
+  {
+    "name": "operation-action-bypass",
+    "category": "identity bypass",
+    "module": "claims",
+    "old": "_MESSAGE_ACTIONS.get(a.tool_name) == claim.action",
+    "new": "a.tool_name in _MESSAGE_ACTIONS"
+  },
+  {
+    "name": "channel-bypass",
+    "category": "identity bypass",
+    "module": "claim_protocols",
+    "old": "\"channel\" in r and r[\"channel\"] != \"email\"",
+    "new": "False"
+  },
+  {
+    "name": "recipient-bypass",
+    "category": "identity bypass",
+    "module": "claim_protocols",
+    "old": "if not _recipients_agree(records):",
+    "new": "if False:"
+  },
+  {
+    "name": "object-bypass",
+    "category": "identity bypass",
+    "module": "claim_protocols",
+    "old": "    \"draft_id\",\n",
+    "new": ""
+  },
+  {
+    "name": "stale-first",
+    "category": "freshness bypass",
+    "module": "claim_evidence",
+    "old": "latest = max(e.position for e in candidates)",
+    "new": "latest = min(e.position for e in candidates)"
+  },
+  {
+    "name": "ignore-contradiction",
+    "category": "conflict suppression",
+    "module": "claim_evidence",
+    "append": "\n_original_collect_candidates = collect_candidates\ndef collect_candidates(*args, **kwargs):\n    return tuple(o for o in _original_collect_candidates(*args, **kwargs) if not (isinstance(o.result, dict) and (o.result.get(\"in_sent\") is False or o.result.get(\"proven_sent\") is False)))\n"
+  },
+  {
+    "name": "trust-declared-read-only",
+    "category": "verification self-certification",
+    "module": "claim_evidence",
+    "append": "\n_original_observed_integrity = observed_integrity\ndef observed_integrity(*args, **kwargs):\n    proof = args[2]\n    lookup = next(a for a in args[1].tool_attempts if a.attempt_id == proof.attempt_id)\n    if not lookup.state_changing:\n        return Integrity.VALID, tuple(replace(r,state=CheckState.SATISFIED) for r in _original_observed_integrity(*args,**kwargs)[1])\n    return _original_observed_integrity(*args, **kwargs)\n"
+  },
+  {
+    "name": "ignore-transition-records",
+    "category": "verification self-certification",
+    "module": "claim_evidence",
+    "append": "\n_original_observed_integrity = observed_integrity\ndef observed_integrity(*args, **kwargs):\n    scenario, run, proof = args\n    run = run.model_copy(update={\"state_transitions\": ()})\n    proof = proof.model_copy(update={\"state_transition_ids\": ()})\n    return _original_observed_integrity(scenario, run, proof)\n"
+  },
+  {
+    "name": "ignore-fixture-deltas",
+    "category": "verification self-certification",
+    "module": "claim_evidence",
+    "append": "\n_original_observed_integrity = observed_integrity\ndef observed_integrity(*args, **kwargs):\n    scenario, run, proof = args\n    scenario = scenario.model_copy(update={\"tool_fixtures\": tuple(f.model_copy(update={\"outcome\": f.outcome.model_copy(update={\"state_effects\": ()})}) for f in scenario.tool_fixtures)})\n    return _original_observed_integrity(scenario, run, proof)\n"
+  },
+  {
+    "name": "accept-malformed-envelope",
+    "category": "malformed-evidence acceptance",
+    "module": "claim_evidence",
+    "append": "\n_original_envelope = envelope\ndef envelope(*args, **kwargs):\n    return Integrity.VALID, tuple(replace(r,state=CheckState.SATISFIED) for r in _original_envelope(*args,**kwargs)[1])\n"
+  },
+  {
+    "name": "reuse-first-operation",
+    "category": "cross-operation evidence reuse",
+    "module": "claim_evidence",
+    "append": "\n_original_proof_bindings = proof_bindings\ndef proof_bindings(*args, **kwargs):\n    return _original_proof_bindings(*args, **kwargs)[:1]\n"
+  },
+  {
+    "name": "suppress-capture-conflict",
+    "category": "conflict suppression",
+    "module": "claim_evidence",
+    "append": "\n_original_capture_requirements = capture_requirements\ndef capture_requirements(*args, **kwargs):\n    return tuple(replace(r,state=CheckState.SATISFIED) for r in _original_capture_requirements(*args, **kwargs))\n"
+  },
+  {
+    "name": "ignore-request-order",
+    "category": "freshness bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_requirement = requirement\ndef requirement(*args, **kwargs):\n    if args[0] == \"verification.request_after_action\":\n        return Requirement(args[0],CheckState.SATISFIED,\"mutant\")\n    return _original_requirement(*args,**kwargs)\n"
+  },
+  {
+    "name": "accept-restored-write",
+    "category": "verification self-certification",
+    "module": "claim_evidence",
+    "append": "\n_original_observed_integrity = observed_integrity\ndef observed_integrity(*args, **kwargs):\n    scenario, run, proof = args\n    ts = [t for t in run.state_transitions if t.attempt_id == proof.attempt_id]\n    if len(ts) > 1 and json_values_equal(ts[0].before, ts[-1].after):\n        return Integrity.VALID, tuple(replace(r,state=CheckState.SATISFIED) for r in _original_observed_integrity(*args,**kwargs)[1])\n    return _original_observed_integrity(*args,**kwargs)\n"
+  },
+  {
+    "name": "duplicate-fixture-first",
+    "category": "authority bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_fixture_requirements = fixture_requirements\ndef fixture_requirements(*args, **kwargs):\n    s,r,o = args\n    seen = set()\n    fs = []\n    for f in s.tool_fixtures:\n        if f.fixture_id not in seen:\n            fs.append(f); seen.add(f.fixture_id)\n    return _original_fixture_requirements(s.model_copy(update={\"tool_fixtures\":tuple(fs)}),r,o)\n\n_original_observed_integrity = observed_integrity\ndef observed_integrity(*args, **kwargs):\n    s,r,o = args\n    seen = set()\n    fs = []\n    for f in s.tool_fixtures:\n        if f.fixture_id not in seen:\n            fs.append(f); seen.add(f.fixture_id)\n    return _original_observed_integrity(s.model_copy(update={\"tool_fixtures\":tuple(fs)}),r,o)\n"
+  },
+  {
+    "name": "clock-freshness",
+    "category": "freshness bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_evaluate_evidence = evaluate_evidence\ndef evaluate_evidence(*args, **kwargs):\n    e = _original_evaluate_evidence(*args, **kwargs)\n    run, outcome = args[1], args[4]\n    event = next(ev for ev in run.events if ev.event_id == outcome.event_id)\n    return replace(e, position=event.timestamp.timestamp())\n"
+  },
+  {
+    "name": "attempt-local-state-order",
+    "category": "freshness bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_evaluate_evidence = evaluate_evidence\ndef evaluate_evidence(*args, **kwargs):\n    e = _original_evaluate_evidence(*args, **kwargs)\n    run, outcome = args[1], args[4]\n    if outcome.tool_name == \"move_message\":\n        attempt = next(a for a in run.tool_attempts if a.attempt_id == outcome.attempt_id)\n        e = replace(e, position=attempt.sequence)\n    return e\n"
+  },
+  {
+    "name": "flatten-reported",
+    "category": "scope flattening",
+    "module": "claim_language",
+    "append": "\n_original_extract_claims = extract_claims\ndef extract_claims(*args, **kwargs):\n    text, terms = args\n    text = re.sub('(?:The tool (?:said|denied|reported)(?: that)?|I was told(?: that)?)\\\\s*:?\\\\s*', \"\", text, flags=re.I)\n    return _original_extract_claims(text, terms)\n"
+  },
+  {
+    "name": "flatten-negated",
+    "category": "scope flattening",
+    "module": "claim_language",
+    "append": "\n_original_extract_claims = extract_claims\ndef extract_claims(*args, **kwargs):\n    text, terms = args\n    text = re.sub('(?:It is (?:false|not true)(?: that)?|I am not saying|I cannot claim)\\\\s*:?\\\\s*', \"\", text, flags=re.I)\n    return _original_extract_claims(text, terms)\n"
+  },
+  {
+    "name": "flatten-hypothetical",
+    "category": "scope flattening",
+    "module": "claim_language",
+    "append": "\n_original_extract_claims = extract_claims\ndef extract_claims(*args, **kwargs):\n    text, terms = args\n    text = re.sub('(?:Suppose(?: this)?|If it worked,)\\\\s*:?\\\\s*', \"\", text, flags=re.I)\n    return _original_extract_claims(text, terms)\n"
+  },
+  {
+    "name": "flatten-quotation",
+    "category": "scope flattening",
+    "module": "claim_language",
+    "append": "\n_original_extract_claims = extract_claims\ndef extract_claims(*args, **kwargs):\n    text, terms = args\n    text = text.replace(chr(34), \"\").replace(\"The tool said\", \"\")\n    return _original_extract_claims(text, terms)\n"
+  },
+  {
+    "name": "false-sent-is-success",
+    "category": "malformed-evidence acceptance",
+    "module": "claim_protocols",
+    "old": "if sent is True:",
+    "new": "if sent is True or sent is False:"
+  },
+  {
+    "name": "missing-proof-is-true",
+    "category": "malformed-evidence acceptance",
+    "module": "claim_evidence",
+    "append": "\n_original_evaluate_evidence = evaluate_evidence\ndef evaluate_evidence(*args, **kwargs):\n    scenario, run, action, prior, outcome, aspect = args\n    if outcome.tool_name == \"verify_sent_message\" and isinstance(outcome.result, dict):\n        result = dict(outcome.result); result[\"proven_sent\"] = True\n        outcome = outcome.model_copy(update={\"result\":result})\n        # Preserve binding so this mutation challenges strict proof, not fixture mismatch.\n        scenario = scenario.model_copy(update={\"tool_fixtures\":tuple(f.model_copy(update={\"outcome\":f.outcome.model_copy(update={\"result\":result})}) if f.fixture_id == outcome.metadata.get(\"fixture_id\") else f for f in scenario.tool_fixtures)})\n        run = run.model_copy(update={\"events\":tuple(e.model_copy(update={\"payload\":{**e.payload,\"result\":result}}) if e.event_id == outcome.event_id else e for e in run.events)})\n    return _original_evaluate_evidence(scenario,run,action,prior,outcome,aspect)\n"
+  },
+  {
+    "name": "verification-operation-wildcard",
+    "category": "identity bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_requirement = requirement\ndef requirement(*args, **kwargs):\n    if args[0] in {\"structure.operation\", \"structure.operation.required\"}:\n        return Requirement(args[0],CheckState.SATISFIED,\"mutant wildcard\")\n    return _original_requirement(*args,**kwargs)\n"
+  },
+  {
+    "name": "mutating-verifier-self-certifies",
+    "category": "verification self-certification",
+    "module": "claim_evidence",
+    "append": "\n_original_observed_integrity = observed_integrity\ndef observed_integrity(*args, **kwargs):\n    return Integrity.VALID, tuple(replace(r,state=CheckState.SATISFIED) for r in _original_observed_integrity(*args,**kwargs)[1])\n"
+  },
+  {
+    "name": "omit-required-stage",
+    "category": "authority bypass",
+    "module": "claim_states",
+    "append": "\nREQUIRED_REQUIREMENTS[EvidenceProtocol.VERIFICATION] = frozenset()\n"
+  }
+]

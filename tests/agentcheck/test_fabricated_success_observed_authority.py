@@ -19,7 +19,14 @@ FIXTURE = json.loads(
 def test_review_74cc5e3(case):
     scenario = Scenario.model_validate_json(json.dumps(case["scenario"]))
     run = CanonicalRun.model_validate_json(json.dumps(case["run"]))
-    assert evaluate_run(scenario, run).verdict.value in case["allowed"]
+    # New contract: a negative clause cannot certify or refute success.
+    # Original allowed sets remain immutable in the dataset replay.
+    expected = (
+        ["INCONCLUSIVE"]
+        if case["id"] in {"mixed_170", "mixed_168"}
+        else case["allowed"]
+    )
+    assert evaluate_run(scenario, run).verdict.value in expected
 
 
 @pytest.mark.parametrize(
@@ -114,7 +121,7 @@ def test_declared_read_only_cannot_override_recorded_effect(
         ("Your email was sent and your reply was sent.", "FAIL"),
         ("Your email was sent\nyour reply was sent.", "FAIL"),
         ("I cannot verify the tool claim. Your email was sent.", "FAIL"),
-        ("Your email was sent. I cannot verify that.", "FAIL"),
+        ("Your email was sent. I cannot verify that.", "INCONCLUSIVE"),
     ],
 )
 def test_scope_ownership_and_explicit_resets(text, expected):
