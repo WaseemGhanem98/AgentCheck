@@ -303,5 +303,64 @@
     "module": "claim_language",
     "old": "or outcome_target",
     "new": "or True"
+  },
+  {
+    "name": "disable-disregard-intent",
+    "category": "withdrawal intent",
+    "module": "claim_withdrawal",
+    "append": "\n_original_withdrawal_intent = withdrawal_intent\ndef withdrawal_intent(text):\n    if re.match(r\"(?:please )?(?:I )?disregard\\b\", text.strip(), re.I):\n        return None\n    return _original_withdrawal_intent(text)\n"
+  },
+  {
+    "name": "disable-endorsement-rejection-intent",
+    "category": "withdrawal intent",
+    "module": "claim_withdrawal",
+    "append": "\n_original_withdrawal_intent = withdrawal_intent\ndef withdrawal_intent(text):\n    if re.match(r\"I no longer stand by\\b\", text.strip(), re.I):\n        return None\n    return _original_withdrawal_intent(text)\n"
+  },
+  {
+    "name": "plural-withdrawal-becomes-transcript-global",
+    "category": "withdrawal binding",
+    "module": "claim_lifecycle",
+    "old": "possible = [i for i in possible if resolved[i].source_id == latest_source]",
+    "new": "possible = [i for i in possible if target.kind == TargetKind.PLURAL or resolved[i].source_id == latest_source]"
+  },
+  {
+    "name": "partial-selects-last-member",
+    "category": "withdrawal ambiguity",
+    "module": "claim_lifecycle",
+    "old": "                # An unspecified subset is not a group withdrawal. Keep each\n                # possible member unresolved, even with only one active candidate.\n                target_resolved = False",
+    "new": "                target_resolved = True\n                possible = [possible[-1]]"
+  },
+  {
+    "name": "ordinal-always-selects-first",
+    "category": "withdrawal ordinal",
+    "module": "claim_lifecycle",
+    "old": "possible = [possible[target.ordinal]]",
+    "new": "possible = [possible[0]]"
+  },
+  {
+    "name": "reported-disregard-becomes-own-directive",
+    "category": "withdrawal scope",
+    "module": "claim_language",
+    "append": "\n_original_extract = extract_claims\ndef extract_claims(text, terms):\n    text = re.sub(r\"The (?:tool said|system reported:)\\s*\", \"\", text, flags=re.I)\n    return _original_extract(text, terms)\n"
+  },
+  {
+    "name": "negated-disregard-becomes-active",
+    "category": "withdrawal scope",
+    "module": "claim_language",
+    "append": "\n_original_extract = extract_claims\ndef extract_claims(text, terms):\n    text = re.sub(r\"I do not disregard\", \"I disregard\", text, flags=re.I)\n    return _original_extract(text, terms)\n"
+  },
+  {
+    "name": "partial-withdrawal-retires-all-candidates",
+    "category": "withdrawal ambiguity",
+    "module": "claim_lifecycle",
+    "old": "                # An unspecified subset is not a group withdrawal. Keep each\n                # possible member unresolved, even with only one active candidate.\n                target_resolved = False",
+    "new": "                target_resolved = True\n                plural = True"
+  },
+  {
+    "name": "partial-judgment-as-distributive-rejection",
+    "category": "withdrawal quantifier scope",
+    "module": "claim_withdrawal",
+    "old": "else IntentKind.CORRECTIVE_JUDGMENT",
+    "new": "else IntentKind.ENDORSEMENT_REJECTION"
   }
 ]

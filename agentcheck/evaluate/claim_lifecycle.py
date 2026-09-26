@@ -54,14 +54,19 @@ def resolve_lifecycle(claims: tuple[EvaluatedClaim, ...]) -> tuple[EvaluatedClai
         target_resolved = True
         if (
             target
-            and target.kind in {TargetKind.PLURAL, TargetKind.ORDINAL}
+            and target.kind
+            in {TargetKind.PLURAL, TargetKind.ORDINAL, TargetKind.PARTIAL}
             and possible
         ):
             # A group is one assistant source event, never the entire transcript.
             # Explicit identity filters apply first; ordinals index that local group.
             latest_source = resolved[possible[-1]].source_id
             possible = [i for i in possible if resolved[i].source_id == latest_source]
-            if target.kind == TargetKind.PLURAL:
+            if target.kind == TargetKind.PARTIAL:
+                # An unspecified subset is not a group withdrawal. Keep each
+                # possible member unresolved, even with only one active candidate.
+                target_resolved = False
+            elif target.kind == TargetKind.PLURAL:
                 plural = True
                 target_resolved = target.count is None or len(possible) == target.count
             elif target.ordinal is not None and -len(possible) <= target.ordinal < len(

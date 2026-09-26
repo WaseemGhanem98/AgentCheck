@@ -13,6 +13,7 @@ import re
 class TargetKind(str, Enum):
     SINGULAR = "singular"
     PLURAL = "plural"
+    PARTIAL = "partial"
     ORDINAL = "ordinal"
     PROPOSITION = "proposition"
     UNRESOLVED = "unresolved"
@@ -27,16 +28,24 @@ class WithdrawalTarget:
     proposition: str | None = None
 
 
+class IntentKind(str, Enum):
+    PERFORMATIVE = "performative"
+    DIRECTIVE = "directive"
+    ENDORSEMENT_REJECTION = "endorsement_rejection"
+    CORRECTIVE_JUDGMENT = "corrective_judgment"
+
+
 @dataclass(frozen=True)
 class WithdrawalIntent:
     relation: str
     target: WithdrawalTarget
+    kind: IntentKind = IntentKind.PERFORMATIVE
 
 
 _NOUN = r"(?:claim|statement|assertion)"
 # Morphology belongs to the intent grammar; target cardinality and proposition
 # resolution are separate. Non-affirmative/modal/reported frames cannot match.
-_VERB = r"(?:retract|withdraw|revoke|disavow|disclaim|correct)"
+_VERB = r"(?:retract|withdraw|revoke|disavow|disclaim|correct|disregard|invalidate)"
 
 
 def withdrawal_intent(text: str) -> WithdrawalIntent | None:
@@ -45,6 +54,7 @@ def withdrawal_intent(text: str) -> WithdrawalIntent | None:
     if reset:
         body = reset.group(1)
     relation = "retracts"
+    kind = IntentKind.PERFORMATIVE
     act = re.fullmatch(rf"I (?P<verb>{_VERB}) (?P<target>.+)", body, re.I)
     target = None
     if act:
@@ -53,7 +63,14 @@ def withdrawal_intent(text: str) -> WithdrawalIntent | None:
             relation = "corrects"
     else:
         take = re.fullmatch(r"I take (?:back (.+)|(.+) back)", body, re.I)
-        wrong = re.fullmatch(r"(.+) was (?:wrong|incorrect)", body, re.I)
+        wrong = re.fullmatch(
+            r"(.+) (?:was|were) (?:wrong|incorrect|invalid)", body, re.I
+        )
+        dismissal = re.fullmatch(
+            r"(?:please )?(?:disregard|ignore|forget) (.+)", body, re.I
+        )
+        endorsement = re.fullmatch(r"I no longer stand by (.+)", body, re.I)
+        standing = re.fullmatch(r"(.+) no longer (?:stand|stands)", body, re.I)
         neither = re.fullmatch(
             rf"Neither of (?:those|these|my) ({_NOUN}s) should stand", body, re.I
         )
@@ -63,31 +80,65 @@ def withdrawal_intent(text: str) -> WithdrawalIntent | None:
             target = "that"
         elif wrong:
             target = wrong.group(1)
+            kind = IntentKind.CORRECTIVE_JUDGMENT
             relation = "corrects" if reset else "retracts"
+        elif endorsement or standing:
+            match = endorsement or standing
+            assert match is not None
+            target = match.group(1)
+            # Negating our endorsement of "either" rejects both; a judgment
+            # about an unspecified member still leaves the member unresolved.
+            kind = (
+                IntentKind.ENDORSEMENT_REJECTION
+                if endorsement
+                else IntentKind.CORRECTIVE_JUDGMENT
+            )
         elif neither:
             target = "both " + neither.group(1)
-        elif re.fullmatch(r"(?:forget|ignore) what I just said", body, re.I):
-            target = "that statement"
+            kind = IntentKind.ENDORSEMENT_REJECTION
+        elif dismissal:
+            target = dismissal.group(1)
+            kind = IntentKind.DIRECTIVE
     if target is None:
         return None
-    resolved = withdrawal_target(target)
-    return WithdrawalIntent(relation, resolved) if resolved else None
+    resolved = withdrawal_target(target, kind)
+    return WithdrawalIntent(relation, resolved, kind) if resolved else None
 
 
-def withdrawal_target(text: str) -> WithdrawalTarget | None:
+def withdrawal_target(
+    text: str, intent: IntentKind = IntentKind.PERFORMATIVE
+) -> WithdrawalTarget | None:
     target = text.strip()
-    # Cardinality is explicit. 'Both' is not a wildcard for any number of claims.
+    # Quantifiers select a set, an ordinal, or an unspecified subset. They are
+    # not interchangeable: "one/either of those" never licenses choosing a claim.
+    # Rejected endorsement distributes over "either" (neither is endorsed);
+    # affirmative "withdraw either" leaves the choice unresolved.
+    partial = re.fullmatch(
+        rf"(one|either) of (?:those|these|my) {_NOUN}s", target, re.I
+    )
+    if partial:
+        if (
+            partial.group(1).lower() == "either"
+            and intent == IntentKind.ENDORSEMENT_REJECTION
+        ):
+            return WithdrawalTarget(TargetKind.PLURAL, target, count=2)
+        return WithdrawalTarget(TargetKind.PARTIAL, target, count=1)
+    quantified = re.fullmatch(
+        rf"(both|all)(?: of (?:those|these|my))?(?: {_NOUN}s)?", target, re.I
+    )
+    if quantified:
+        return WithdrawalTarget(
+            TargetKind.PLURAL,
+            target,
+            count=2 if quantified.group(1).lower() == "both" else None,
+        )
     plural = re.fullmatch(
-        rf"(?:(both)(?: of (?:those|these|my))?|my(?: previous| earlier)?|those|these) {_NOUN}s",
-        target,
-        re.I,
+        rf"(?:my(?: previous| earlier)?|those|these) {_NOUN}s", target, re.I
     )
     if plural:
-        return WithdrawalTarget(
-            TargetKind.PLURAL, target, count=2 if plural.group(1) else None
-        )
+        return WithdrawalTarget(TargetKind.PLURAL, target)
     ordinal = re.fullmatch(
-        rf"(?:the|my) (first|second|third|last) {_NOUN}", target, re.I
+        rf"(?:the|my) (first|second|third|last) (?:{_NOUN}|one)", target, re.I
     )
     if ordinal:
         return WithdrawalTarget(
@@ -97,6 +148,8 @@ def withdrawal_target(text: str) -> WithdrawalTarget | None:
                 ordinal.group(1).lower()
             ],
         )
+    if re.fullmatch(r"what I (?:just )?(?:said|claimed|asserted)", target, re.I):
+        return WithdrawalTarget(TargetKind.SINGULAR, target)
     # A proposition is mentioned, not asserted. Capture it only after a claim
     # noun or an explicit reference to our earlier speech.
     complement = re.fullmatch(
