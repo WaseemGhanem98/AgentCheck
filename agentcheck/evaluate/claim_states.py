@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from enum import Enum
+
+from .claim_withdrawal import WithdrawalTarget
 from agentcheck.domain import Verdict
 
 
@@ -180,6 +182,7 @@ class EvaluatedClaim:
     relation: ClaimRelation | None = None
     transitions: tuple[ClaimTransition, ...] = ()
     antecedents: tuple[str, ...] = ()
+    withdrawal: WithdrawalTarget | None = None
 
 
 @dataclass(frozen=True)

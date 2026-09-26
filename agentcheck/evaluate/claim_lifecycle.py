@@ -2,6 +2,8 @@
 
 from dataclasses import replace
 
+from .claim_withdrawal import TargetKind
+
 from .claim_states import (
     ClaimLifecycle as Life,
     ClaimRelation as Relation,
@@ -38,11 +40,38 @@ def resolve_lifecycle(claims: tuple[EvaluatedClaim, ...]) -> tuple[EvaluatedClai
                 old.lifecycle in {Life.ACTIVE, Life.AMBIGUOUS}
                 or relation == Relation.CONFIRMS
                 or old.relation == Relation.HISTORY
+                or (
+                    claim.withdrawal is not None
+                    and claim.withdrawal.kind == TargetKind.ORDINAL
+                )
             )
             and (not claim.references or set(claim.references).issubset(old.references))
             and (claim.action is None or claim.action == old.action)
             and (claim.channel is None or old.channel == claim.channel)
         ]
+        target = claim.withdrawal
+        plural = False
+        target_resolved = True
+        if (
+            target
+            and target.kind in {TargetKind.PLURAL, TargetKind.ORDINAL}
+            and possible
+        ):
+            # A group is one assistant source event, never the entire transcript.
+            # Explicit identity filters apply first; ordinals index that local group.
+            latest_source = resolved[possible[-1]].source_id
+            possible = [i for i in possible if resolved[i].source_id == latest_source]
+            if target.kind == TargetKind.PLURAL:
+                plural = True
+                target_resolved = target.count is None or len(possible) == target.count
+            elif target.ordinal is not None and -len(possible) <= target.ordinal < len(
+                possible
+            ):
+                possible = [possible[target.ordinal]]
+            else:
+                target_resolved = False
+        if target and target.kind == TargetKind.UNRESOLVED:
+            target_resolved = False
         # A fresh reaffirmation may refer to the single most recent version of
         # one proposition, but never choose between distinct operations/recipients.
         if relation == Relation.CONFIRMS and possible:
@@ -52,7 +81,7 @@ def resolve_lifecycle(claims: tuple[EvaluatedClaim, ...]) -> tuple[EvaluatedClai
             }
             if len(identities) == 1:
                 possible = [possible[-1]]
-        if len(possible) != 1:
+        if not target_resolved or not possible or (not plural and len(possible) != 1):
             for i in possible:
                 old = resolved[i]
                 transition = ClaimTransition(
@@ -76,26 +105,26 @@ def resolve_lifecycle(claims: tuple[EvaluatedClaim, ...]) -> tuple[EvaluatedClai
                 )
             )
             continue
-        index = possible[0]
-        old = resolved[index]
         state = {
             Relation.RETRACTS: Life.RETRACTED,
             Relation.CORRECTS: Life.CORRECTED,
             Relation.CONFIRMS: Life.CONFIRMED,
         }[relation]
-        transition = ClaimTransition(
-            claim.claim_id,
-            old.claim_id,
-            relation,
-            old.lifecycle,
-            state,
-            Resolution.RESOLVED,
-        )
-        # Confirmation adds a NEW active assertion at its own temporal position.
-        # It does not retroactively replace the old claim's supporting evidence.
-        resolved[index] = replace(
-            old, lifecycle=state, transitions=(*old.transitions, transition)
-        )
+        for index in possible:
+            old = resolved[index]
+            transition = ClaimTransition(
+                claim.claim_id,
+                old.claim_id,
+                relation,
+                old.lifecycle,
+                state,
+                Resolution.RESOLVED,
+            )
+            resolved[index] = replace(
+                old, lifecycle=state, transitions=(*old.transitions, transition)
+            )
+        # Confirmation adds a new active assertion; withdrawal never supplies evidence.
+        old = resolved[possible[0]]
         if relation == Relation.CONFIRMS:
             claim = replace(
                 claim,
@@ -107,6 +136,10 @@ def resolve_lifecycle(claims: tuple[EvaluatedClaim, ...]) -> tuple[EvaluatedClai
                 antecedents=(old.claim_id,),
             )
         else:
-            claim = replace(claim, lifecycle=Life.CONTROL, antecedents=(old.claim_id,))
+            claim = replace(
+                claim,
+                lifecycle=Life.CONTROL,
+                antecedents=tuple(resolved[i].claim_id for i in possible),
+            )
         resolved.append(claim)
     return tuple(resolved)

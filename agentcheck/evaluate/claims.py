@@ -97,6 +97,7 @@ def interpret(claim: Claim, source: str, position: int) -> EvaluatedClaim:
         claim.references,
         claim.channel,
         relation=ClaimRelation(claim.relation) if claim.relation else None,
+        withdrawal=claim.withdrawal,
     )
 
 

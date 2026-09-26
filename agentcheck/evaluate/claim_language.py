@@ -11,6 +11,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 
+from .claim_withdrawal import TargetKind, WithdrawalTarget, withdrawal_intent
+
 
 # Vocabulary locates candidate predicates; grammar, action binding, and observed
 # evidence decide the verdict. Generic vocabulary alone never authorizes FAIL.
@@ -64,6 +66,7 @@ class Claim:
     channel: str | None = None
     speech: str = "factual"
     relation: str | None = None
+    withdrawal: WithdrawalTarget | None = None
 
 
 @dataclass(frozen=True)
@@ -167,11 +170,12 @@ def scope_tree(text: str) -> tuple[ScopeNode, ...]:
                 re.I,
             ):
                 kind = "negated"
-            if (
-                kind == "factual"
-                and not children
-                and lifecycle_clause(proposition) is not None
-            ):
+            owned_proposition = proposition
+            for n in re.findall(r"§(\d+)§", proposition):
+                owned_proposition = owned_proposition.replace(
+                    f"§{n}§", quotes[int(n)].text
+                )
+            if kind == "factual" and lifecycle_clause(owned_proposition) is not None:
                 kind = "lifecycle"
             fragments = _CLAUSES.split(proposition)
             introduction = fragments[0].strip()
@@ -479,34 +483,49 @@ _NON_ACTION_CLAUSE = re.compile(
 def lifecycle_clause(text: str) -> Claim | None:
     """Bounded own-speech-act productions, before clause flattening.
 
-    Called only for outer factual nodes without quoted children. A word such as
+    Called only for outer factual nodes; quoted target complements remain data. A word such as
     'retract' is not sufficient: the whole proposition must have a speech-act
     subject, verb and claim target. This parser has no evidence or verdict access.
     """
     clause = text.strip().rstrip(".!, ").replace("’", "'")
     reset = re.match(r"^(actually[, :]\s*|correction:\s*)(.+)$", clause, re.I)
     body = reset.group(2) if reset else clause
-    references = tuple(_REFERENCE.findall(body))
+    withdrawal = withdrawal_intent(clause)
+    target_spec = withdrawal.target if withdrawal else None
+    target_text = (target_spec.proposition or target_spec.text) if target_spec else body
+    references = tuple(_REFERENCE.findall(target_text))
     action = None
-    if re.search(r"\breply\b", body, re.I):
+    if re.search(r"\breply\b", target_text, re.I):
         action = "reply"
-    elif re.search(r"\b(?:email|send)\b", body, re.I):
+    elif re.search(r"\b(?:email|message|send|delivered)\b", target_text, re.I):
         action = "send"
-    elif re.search(r"\bdraft creation\b", body, re.I):
+    elif re.search(r"\bdraft(?: creation)?\b", target_text, re.I):
         action = "create"
     target = rf"(?:that|this)(?: claim| statement)?|(?:the|my) (?:claim|statement) about (?:{_REFERENCE.pattern})|my (?:email|send|reply|draft creation) claim"
     relation = None
     polarity = "abstention"
     speech = "control"
     aspect = "action"
-    if re.fullmatch(
-        rf"I (?:retract|withdraw) (?:{target})", body, re.I
-    ) or re.fullmatch(
-        r"(?:that|this) was (?:wrong|incorrect)|ignore that(?:, I was wrong)?",
-        body,
-        re.I,
-    ):
-        relation = "retracts"
+    if withdrawal:
+        relation = withdrawal.relation
+        if target_spec and target_spec.kind == TargetKind.PROPOSITION:
+            proposition = target_spec.proposition or ""
+            # Identifier-only complements name a claim directly. A proposition
+            # must instead describe the same positive outcome, not merely share
+            # an object noun/ID. Reuse the evidence-free scope/claim interpreter;
+            # nominal "being sent" is a mentioned predicate, not a new assertion.
+            atoms = _extract_claim_atoms(
+                re.sub(r"\bbeing\b", "was", proposition, flags=re.I), ()
+            )
+            outcome_target = (
+                len(atoms) == 1
+                and atoms[0].polarity == "positive"
+                and atoms[0].speech == "factual"
+            )
+            if not (references or action) or not (
+                _REFERENCE.fullmatch(proposition) or outcome_target
+            ):
+                target_spec = replace(target_spec, kind=TargetKind.UNRESOLVED)
     elif re.fullmatch(rf"I (?:confirm|reaffirm) (?:{target})", body, re.I):
         relation, polarity, speech = "confirms", "positive", "factual"
     elif re.fullmatch(
@@ -548,6 +567,7 @@ def lifecycle_clause(text: str) -> Claim | None:
         "email" if action in {"send", "reply"} else None,
         speech,
         relation,
+        target_spec,
     )
 
 

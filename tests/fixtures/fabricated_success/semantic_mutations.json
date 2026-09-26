@@ -208,8 +208,8 @@
     "name": "guess-ambiguous-retraction-target",
     "category": "claim lifecycle binding",
     "module": "claim_lifecycle",
-    "old": "        if len(possible) != 1:\n",
-    "new": "        if len(possible) > 1:\n            possible = [possible[-1]]\n        if len(possible) != 1:\n"
+    "old": "        if not target_resolved or not possible or (not plural and len(possible) != 1):\n",
+    "new": "        if len(possible) > 1:\n            possible = [possible[-1]]\n        if not target_resolved or not possible or (not plural and len(possible) != 1):\n"
   },
   {
     "name": "quoted-retraction-as-own-act",
@@ -236,5 +236,72 @@
     "module": "claim_states",
     "old": "    if trace.claim.lifecycle != ClaimLifecycle.ACTIVE:\n",
     "new": "    if False:\n"
+  },
+  {
+    "name": "disable-general-withdrawal-intent",
+    "category": "withdrawal intent",
+    "module": "claim_withdrawal",
+    "append": "\ndef withdrawal_intent(text):\n    return None\n"
+  },
+  {
+    "name": "disable-plural-withdrawal-binding",
+    "category": "withdrawal cardinality",
+    "module": "claim_lifecycle",
+    "old": "                plural = True",
+    "new": "                plural = False"
+  },
+  {
+    "name": "ignore-quoted-proposition-withdrawal",
+    "category": "withdrawal proposition",
+    "module": "claim_language",
+    "old": "and lifecycle_clause(owned_proposition) is not None",
+    "new": "and not children and lifecycle_clause(owned_proposition) is not None"
+  },
+  {
+    "name": "negated-withdrawal-is-own-act",
+    "category": "withdrawal scope",
+    "module": "claim_language",
+    "append": "\n_original_extract = extract_claims\ndef extract_claims(text, terms):\n    text = re.sub(r\"I am not retracting\", \"I retract\", text, flags=re.I)\n    return _original_extract(text, terms)\n"
+  },
+  {
+    "name": "reported-withdrawal-is-own-act",
+    "category": "withdrawal scope",
+    "module": "claim_language",
+    "append": "\n_original_extract = extract_claims\ndef extract_claims(text, terms):\n    text = re.sub(r\"The tool said I\", \"I\", text, flags=re.I)\n    return _original_extract(text, terms)\n"
+  },
+  {
+    "name": "global-withdrawal-erases-unrelated-claims",
+    "category": "withdrawal binding",
+    "module": "claim_lifecycle",
+    "old": "        target = claim.withdrawal",
+    "new": "        if relation == Relation.RETRACTS:\n            possible = [i for i, old in enumerate(resolved) if old.scope == ClaimScope.ASSERTED]\n        target = claim.withdrawal"
+  },
+  {
+    "name": "ignore-plural-group-boundary",
+    "category": "withdrawal binding",
+    "module": "claim_lifecycle",
+    "old": "possible = [i for i in possible if resolved[i].source_id == latest_source]",
+    "new": "possible = list(possible)"
+  },
+  {
+    "name": "both-means-all",
+    "category": "withdrawal cardinality",
+    "module": "claim_lifecycle",
+    "old": "target_resolved = target.count is None or len(possible) == target.count",
+    "new": "target_resolved = True"
+  },
+  {
+    "name": "unknown-proposition-is-resolved",
+    "category": "withdrawal ambiguity",
+    "module": "claim_lifecycle",
+    "old": "if target and target.kind == TargetKind.UNRESOLVED:",
+    "new": "if False:"
+  },
+  {
+    "name": "object-noun-substitutes-for-target-proposition",
+    "category": "withdrawal proposition",
+    "module": "claim_language",
+    "old": "or outcome_target",
+    "new": "or True"
   }
 ]
