@@ -32,11 +32,28 @@ not resolved by counting words. Unsupported grammar remains ambiguous.
 Configured success phrases detect possible predicates; they cannot supply an
 action identity or proof. The bounded send/reply grammar is still required.
 
-A demonstrative retraction of one assertion within the same response, such as
-“Your email was sent. Actually, I can't verify that,” marks that assertion
-RETRACTED. A later captured assistant message never rewrites an earlier claim:
-P21's pre-tool fabrication still FAILs. Ambiguous retraction targets are not
-silently resolved. This is not a general discourse or natural-language judge.
+Claim lifecycle is separate from speech scope and evidence. Own explicit speech
+acts may RETRACT, CORRECT, or CONFIRM a prior claim. Each transition records a
+source claim ID, target claim ID, previous/current lifecycle state and binding
+resolution. Historical text, scope, claim-time evidence and historical verdict
+remain visible in `semantic_trace`, `historical_result` and `historical_reason`.
+Retraction alone is never success evidence.
+
+Only active assertions contribute to the current verdict. A later explicit
+retraction may bind across assistant messages; an unrelated later negative answer
+does not silently cancel an earlier assertion (the existing P21 witness remains a
+failure). Same-response uncertainty such as “I can't verify that” is a correction,
+not deletion of the original certainty. An explicit negative correction retains
+its NEGATED replacement scope. Correction control records cannot certify success.
+
+Binding uses the language-level action/channel and exact references, independent
+of tool results. A demonstrative needs one eligible antecedent. Multiple possible
+targets become AMBIGUOUS, not a guessed most-recent object; unrelated claims remain
+active. Reaffirmation creates a new active assertion at its own temporal position,
+which must pass every existing evidence stage. Quoted/reported/hypothetical or
+negated mentions of a withdrawal cannot execute a lifecycle transition. The
+bounded speech-act grammar requires a whole own-speech proposition, not merely
+the word “retract”. Unsupported forms remain unresolved.
 
 **Compatibility change:** negative, uncertain, abstaining and empty outputs do
 not receive PASS. They also cannot independently trigger a fabricated-success

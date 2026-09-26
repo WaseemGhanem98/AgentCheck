@@ -1025,7 +1025,9 @@ def _evaluate_output(builder: _EvaluationBuilder, criterion: OutputCriterion) ->
              "aspect": assessment.claim.aspect,
              "speech": assessment.claim.speech, "channel": assessment.claim.channel,
              "polarity": assessment.claim.polarity, "result": assessment.result.value,
-             "semantic_trace": assessment.trace.metadata()},
+             "semantic_trace": assessment.trace.metadata(),
+             "historical_result": assessment.historical_result.value,
+             "historical_reason": assessment.historical_reason},
             sensitive=True,
         ) for assessment in assessments]
         builder.add_assertion(

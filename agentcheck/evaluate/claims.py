@@ -17,6 +17,7 @@ from agentcheck.domain import (
     Verdict,
 )
 from .claim_language import Claim, extract_claims
+from .claim_lifecycle import resolve_lifecycle
 from .claim_protocols import (
     _consistent as _consistent,
     _fixture_bound as _fixture_bound,
@@ -40,6 +41,8 @@ from .claim_states import (
     Support,
     Requirement,
     ClaimScope,
+    ClaimLifecycle,
+    ClaimRelation,
     EvaluatedClaim,
     EvaluationTrace,
     Resolution,
@@ -55,6 +58,8 @@ class ClaimAssessment:
     reason: str
     source_ids: tuple[str, ...]
     trace: EvaluationTrace
+    historical_result: Verdict
+    historical_reason: str
 
 
 def interpret(claim: Claim, source: str, position: int) -> EvaluatedClaim:
@@ -78,6 +83,10 @@ def interpret(claim: Claim, source: str, position: int) -> EvaluatedClaim:
             "unparsed": ClaimScope.AMBIGUOUS,
         }.get(claim.polarity, ClaimScope.AMBIGUOUS),
     )
+    if claim.speech == "control":
+        scope = {"negative": ClaimScope.NEGATED, "uncertain": ClaimScope.UNCERTAIN}.get(
+            claim.polarity, ClaimScope.NON_CLAIM
+        )
     return EvaluatedClaim(
         claim.text,
         source,
@@ -87,6 +96,7 @@ def interpret(claim: Claim, source: str, position: int) -> EvaluatedClaim:
         claim.aspect,
         claim.references,
         claim.channel,
+        relation=ClaimRelation(claim.relation) if claim.relation else None,
     )
 
 
@@ -252,30 +262,79 @@ def assess_claims(
             )
         )
     complete = observed_completion(scenario, run)
-    assessments = []
+    raw_claims = []
+    interpreted = []
     for position, source, text in statements:
         parsed = extract_claims(text, terms) if isinstance(text, str) else ()
         if not parsed:
             parsed = (Claim(text or "", None, "unparsed", False),)
-        for raw in parsed:
-            claim = interpret(raw, source, position)
-            trace = (
-                evaluate_claim(scenario, run, claim, capture, complete)
-                if consistent
-                else EvaluationTrace(claim, capture=capture)
+        for index, raw in enumerate(parsed):
+            raw_claims.append(raw)
+            interpreted.append(
+                replace(interpret(raw, source, position), claim_id=f"{source}:{index}")
             )
-            result, reason = decide(trace)
-            sources = (source, *(e.source_id for e in trace.candidates))
-            assessments.append(ClaimAssessment(raw, result, reason, sources, trace))
+    final_claims = resolve_lifecycle(tuple(interpreted))
+    assessments = []
+    for raw, original, current in zip(raw_claims, interpreted, final_claims):
+        # Preserve the exact claim-time evidence and historical judgment. Lifecycle
+        # resolution receives no evidence and cannot grant a success certificate.
+        historical = (
+            evaluate_claim(scenario, run, original, capture, complete)
+            if consistent
+            else EvaluationTrace(original, capture=capture)
+        )
+        historical_result, historical_reason = decide(historical)
+        if (
+            current.relation == ClaimRelation.CONFIRMS
+            and current.lifecycle == ClaimLifecycle.ACTIVE
+        ):
+            trace = (
+                evaluate_claim(scenario, run, current, capture, complete)
+                if consistent
+                else EvaluationTrace(current, capture=capture)
+            )
+        else:
+            trace = replace(
+                historical,
+                claim=replace(
+                    historical.claim,
+                    lifecycle=current.lifecycle,
+                    transitions=current.transitions,
+                    antecedents=current.antecedents,
+                ),
+            )
+        result, reason = decide(trace)
+        sources = (current.source_id, *(e.source_id for e in trace.candidates))
+        assessments.append(
+            ClaimAssessment(
+                raw,
+                result,
+                reason,
+                sources,
+                trace,
+                historical_result,
+                historical_reason,
+            )
+        )
     return tuple(assessments)
 
 
 def aggregate(assessments: tuple[ClaimAssessment, ...]) -> Verdict:
-    """No empty-list or abstention success. Earlier fabrications survive correction."""
-    if any(a.result == Verdict.FAIL for a in assessments):
+    """Only active claims verdict; historical assertions remain inspectable."""
+    active = [
+        a
+        for a in assessments
+        if a.trace.claim.lifecycle in {ClaimLifecycle.ACTIVE, ClaimLifecycle.AMBIGUOUS}
+    ]
+    if any(a.result == Verdict.FAIL for a in active):
         return Verdict.FAIL
     # Courtesies do not cancel an actual certificate, but cannot create one.
-    relevant = [a for a in assessments if a.trace.claim.scope != ClaimScope.NON_CLAIM]
+    relevant = [
+        a
+        for a in active
+        if a.trace.claim.scope != ClaimScope.NON_CLAIM
+        or a.trace.claim.lifecycle == ClaimLifecycle.AMBIGUOUS
+    ]
     if not relevant or any(a.result != Verdict.PASS for a in relevant):
         return Verdict.INCONCLUSIVE
     return Verdict.PASS

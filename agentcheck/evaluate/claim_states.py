@@ -26,6 +26,32 @@ class ClaimScope(str, Enum):
     NON_CLAIM = "non_claim"
 
 
+class ClaimLifecycle(str, Enum):
+    ACTIVE = "active"
+    RETRACTED = "retracted"
+    CORRECTED = "corrected"
+    CONFIRMED = "confirmed"
+    AMBIGUOUS = "ambiguous"
+    CONTROL = "control"
+
+
+class ClaimRelation(str, Enum):
+    RETRACTS = "retracts"
+    CORRECTS = "corrects"
+    CONFIRMS = "confirms"
+    HISTORY = "history"
+
+
+@dataclass(frozen=True)
+class ClaimTransition:
+    source_id: str
+    target_id: str
+    relation: ClaimRelation
+    previous: ClaimLifecycle
+    current: ClaimLifecycle
+    resolution: Resolution
+
+
 class Resolution(str, Enum):
     RESOLVED = "resolved"
     AMBIGUOUS = "ambiguous"
@@ -149,6 +175,11 @@ class EvaluatedClaim:
     channel: str | None
     identity: Resolution = Resolution.UNRESOLVED
     operation: OperationIdentity | None = None
+    claim_id: str = ""
+    lifecycle: ClaimLifecycle = ClaimLifecycle.ACTIVE
+    relation: ClaimRelation | None = None
+    transitions: tuple[ClaimTransition, ...] = ()
+    antecedents: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -192,6 +223,11 @@ def decide(trace: EvaluationTrace) -> tuple[Verdict, str]:
     Absence may prove an overclaim only with complete capture and supported claim
     syntax. Unknown identity/authority is never evidence of factual failure.
     """
+    if trace.claim.lifecycle != ClaimLifecycle.ACTIVE:
+        return (
+            Verdict.INCONCLUSIVE,
+            "Claim is historical, withdrawn or lifecycle binding is unresolved.",
+        )
     if trace.claim.scope != ClaimScope.ASSERTED:
         return Verdict.INCONCLUSIVE, "No own factual success assertion in this scope."
     if trace.capture != CheckState.SATISFIED:

@@ -190,5 +190,51 @@
     "category": "authority bypass",
     "module": "claim_states",
     "append": "\nREQUIRED_REQUIREMENTS[EvidenceProtocol.VERIFICATION] = frozenset()\n"
+  },
+  {
+    "name": "ignore-claim-lifecycle",
+    "category": "claim lifecycle",
+    "module": "claim_lifecycle",
+    "append": "\n\ndef resolve_lifecycle(claims):\n    return claims\n"
+  },
+  {
+    "name": "ignore-retraction-reference",
+    "category": "claim lifecycle binding",
+    "module": "claim_lifecycle",
+    "old": "set(claim.references).issubset(old.references)",
+    "new": "True"
+  },
+  {
+    "name": "guess-ambiguous-retraction-target",
+    "category": "claim lifecycle binding",
+    "module": "claim_lifecycle",
+    "old": "        if len(possible) != 1:\n",
+    "new": "        if len(possible) > 1:\n            possible = [possible[-1]]\n        if len(possible) != 1:\n"
+  },
+  {
+    "name": "quoted-retraction-as-own-act",
+    "category": "claim lifecycle scope",
+    "module": "claim_language",
+    "append": "\n_original_extract = extract_claims\ndef extract_claims(text, terms):\n    result = _original_extract(text, terms)\n    if '\"I retract that claim.\"' in text:\n        result += (Claim(\"I retract that claim\", None, \"abstention\", False, speech=\"control\", relation=\"retracts\"),)\n    return result\n"
+  },
+  {
+    "name": "reaffirmation-is-proof",
+    "category": "claim lifecycle evidence",
+    "module": "claim_states",
+    "append": "\n_original_decide = decide\ndef decide(trace):\n    if trace.claim.relation == ClaimRelation.CONFIRMS:\n        return Verdict.PASS, \"Mutant treats reaffirmation as proof.\"\n    return _original_decide(trace)\n"
+  },
+  {
+    "name": "erase-historical-judgment",
+    "category": "claim lifecycle audit",
+    "module": "claims",
+    "old": "                historical_result,\n                historical_reason,",
+    "new": "                result,\n                reason,"
+  },
+  {
+    "name": "bypass-inactive-claim-gate",
+    "category": "claim lifecycle verdict",
+    "module": "claim_states",
+    "old": "    if trace.claim.lifecycle != ClaimLifecycle.ACTIVE:\n",
+    "new": "    if False:\n"
   }
 ]

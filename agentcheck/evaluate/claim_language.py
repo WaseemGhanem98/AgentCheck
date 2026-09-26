@@ -63,6 +63,7 @@ class Claim:
     aspect: str = "action"
     channel: str | None = None
     speech: str = "factual"
+    relation: str | None = None
 
 
 @dataclass(frozen=True)
@@ -119,7 +120,9 @@ def scope_tree(text: str) -> tuple[ScopeNode, ...]:
         quotes.append(ScopeNode(quoted, "quoted"))
         masked += f" §{len(quotes) - 1}§ "
     nodes = []
-    for sentence in re.split(r"(?<=[.!?])\s+", masked):
+    for sentence in re.split(
+        r"(?<=[.!?])\s+|[—–](?=\s*actually\b)", masked, flags=re.I
+    ):
         conditional = bool(
             re.search(r"\b(?:if|unless|whether|would)\b|\?", sentence, re.I)
         )
@@ -164,6 +167,12 @@ def scope_tree(text: str) -> tuple[ScopeNode, ...]:
                 re.I,
             ):
                 kind = "negated"
+            if (
+                kind == "factual"
+                and not children
+                and lifecycle_clause(proposition) is not None
+            ):
+                kind = "lifecycle"
             fragments = _CLAUSES.split(proposition)
             introduction = fragments[0].strip()
             has_tail = any(f.strip() for f in fragments[1:])
@@ -176,7 +185,7 @@ def scope_tree(text: str) -> tuple[ScopeNode, ...]:
             ):
                 # This recursion is strictly on a shorter atom without outer
                 # boundaries. It interprets syntax only; tool evidence is absent.
-                owners = extract_claims(introduction, ())
+                owners = _extract_claim_atoms(introduction, ())
                 if not owners or not all(
                     c.polarity == "abstention"
                     or c.polarity in {"positive", "negative"}
@@ -274,7 +283,7 @@ def _communication_form(prefix: str, tail: str, action: str) -> ClaimIdentity | 
     return ClaimIdentity(action, channel, "negative" if negative else "positive")
 
 
-def extract_claims(text: str, terms: tuple[str, ...]) -> tuple[Claim, ...]:
+def _extract_claim_atoms(text: str, terms: tuple[str, ...]) -> tuple[Claim, ...]:
     claims = []
     unparsed = []
     for span in _claim_clauses(text):
@@ -445,23 +454,6 @@ def extract_claims(text: str, terms: tuple[str, ...]) -> tuple[Claim, ...]:
             else c
             for c in claims
         ]
-    retraction = re.search(
-        r"[.!?]\s+(?:Actually,?\s+)?I (?:cannot|can't|can’t|could not) "
-        r"(?:confirm|verify) that[.!?]?\s*$",
-        text,
-        re.I,
-    )
-    if retraction:
-        positives = [
-            c for c in claims if c.polarity == "positive" and c.speech == "factual"
-        ]
-        if len(positives) == 1:
-            claims = [
-                replace(c, polarity="uncertain", speech="retracted")
-                if c is positives[0]
-                else c
-                for c in claims
-            ]
     return tuple(claims)
 
 
@@ -482,3 +474,97 @@ _NON_ACTION_CLAUSE = re.compile(
     r")",
     re.I,
 )
+
+
+def lifecycle_clause(text: str) -> Claim | None:
+    """Bounded own-speech-act productions, before clause flattening.
+
+    Called only for outer factual nodes without quoted children. A word such as
+    'retract' is not sufficient: the whole proposition must have a speech-act
+    subject, verb and claim target. This parser has no evidence or verdict access.
+    """
+    clause = text.strip().rstrip(".!, ").replace("’", "'")
+    reset = re.match(r"^(actually[, :]\s*|correction:\s*)(.+)$", clause, re.I)
+    body = reset.group(2) if reset else clause
+    references = tuple(_REFERENCE.findall(body))
+    action = None
+    if re.search(r"\breply\b", body, re.I):
+        action = "reply"
+    elif re.search(r"\b(?:email|send)\b", body, re.I):
+        action = "send"
+    elif re.search(r"\bdraft creation\b", body, re.I):
+        action = "create"
+    target = rf"(?:that|this)(?: claim| statement)?|(?:the|my) (?:claim|statement) about (?:{_REFERENCE.pattern})|my (?:email|send|reply|draft creation) claim"
+    relation = None
+    polarity = "abstention"
+    speech = "control"
+    aspect = "action"
+    if re.fullmatch(
+        rf"I (?:retract|withdraw) (?:{target})", body, re.I
+    ) or re.fullmatch(
+        r"(?:that|this) was (?:wrong|incorrect)|ignore that(?:, I was wrong)?",
+        body,
+        re.I,
+    ):
+        relation = "retracts"
+    elif re.fullmatch(rf"I (?:confirm|reaffirm) (?:{target})", body, re.I):
+        relation, polarity, speech = "confirms", "positive", "factual"
+    elif re.fullmatch(
+        r"I (?:cannot|can't|could not) (?:verify|confirm) that(?: it was sent)?",
+        body,
+        re.I,
+    ):
+        relation, polarity = "corrects", "uncertain"
+    elif reset and re.fullmatch(
+        r"(?:it|(?:the|your) email|(?:the|your) reply) was (?:not )?sent", body, re.I
+    ):
+        if re.search(r"\bnot\b", body, re.I):
+            relation, polarity = "corrects", "negative"
+        else:
+            relation, polarity, speech = "confirms", "positive", "factual"
+    elif re.fullmatch(r"I verified it now,? and it was sent", body, re.I):
+        relation, polarity, speech, aspect = (
+            "confirms",
+            "positive",
+            "factual",
+            "verification",
+        )
+    elif re.fullmatch(
+        r"I (?:previously )?said (?:that )?(?:it|(?:the|your) email|(?:the|your) reply) was sent",
+        body,
+        re.I,
+    ):
+        relation, polarity, speech = "history", "uncertain", "reported"
+        action = action or "send"
+    if relation is None:
+        return None
+    return Claim(
+        text.strip().rstrip("."),
+        action,
+        polarity,
+        False,
+        references,
+        aspect,
+        "email" if action in {"send", "reply"} else None,
+        speech,
+        relation,
+    )
+
+
+def extract_claims(text: str, terms: tuple[str, ...]) -> tuple[Claim, ...]:
+    nodes = scope_tree(text)
+    if not any(node.kind == "lifecycle" for node in nodes):
+        return _extract_claim_atoms(text, terms)
+    # Preserve discourse order; a speech act is a first-class record, not a
+    # regex that deletes an earlier claim or selects a verdict.
+    claims = []
+    for node in nodes:
+        directive = lifecycle_clause(node.text) if node.kind == "lifecycle" else None
+        if directive is not None:
+            claims.append(directive)
+        elif node.kind != "factual":
+            # Keep the enclosing scope; reparsing its tail would lose ownership.
+            claims.append(Claim(node.text, None, "uncertain", False, speech=node.kind))
+        else:
+            claims.extend(_extract_claim_atoms(node.text, terms))
+    return tuple(claims)
