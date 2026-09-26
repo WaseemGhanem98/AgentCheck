@@ -15,6 +15,7 @@ TESTS = [
     "tests/agentcheck/test_fabricated_success_blockers.py",
     "tests/agentcheck/test_fabricated_success_attribution.py",
     "tests/agentcheck/test_fabricated_success_evidence.py",
+    "tests/agentcheck/test_fabricated_success_authority.py",
 ]
 MUTATIONS = [
     (
@@ -162,6 +163,47 @@ MUTATIONS.extend(
             "collapse-reported-ownership",
             "                if not conditional and re.search(",
             "                if False and re.search(",
+        ),
+    ]
+)
+
+
+MUTATIONS.extend(
+    [
+        (
+            "remove-move-mutating-contract",
+            "            and attempt.state_changing\n",
+            "",
+        ),
+        (
+            "remove-state-fixture-authority",
+            "            and _fixture_bound(scenario, run, observed)\n",
+            "",
+        ),
+        (
+            "remove-state-outcome-success",
+            "            and observed.status == ToolOutcomeStatus.SUCCESS\n",
+            "",
+        ),
+        (
+            "remove-unrelated-record-coherence",
+            "if different and _identity_agrees(records):",
+            "if different:",
+        ),
+        (
+            "disable-verification-structure",
+            "    if not isinstance(data, dict) or not _state_envelope_coherent(data):",
+            "    return True\n    if not isinstance(data, dict) or not _state_envelope_coherent(data):",
+        ),
+        (
+            "reuse-proof-across-operations",
+            "    return candidates == [prior.attempt_id]",
+            "    return True",
+        ),
+        (
+            "flatten-introduction-scope",
+            '                        kind = "unresolved"',
+            '                        kind = "factual"',
         ),
     ]
 )

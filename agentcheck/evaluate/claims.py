@@ -146,6 +146,24 @@ def _claim_clauses(text: str) -> list[SpeechSpan]:
                     re.I,
                 ):
                     kind = "reported"
+                # A colon introduces an embedded proposition. Splitting it
+                # is safe only when the introduction has independently resolved
+                # scope. Unknown introductions must not expose an affirmative
+                # fragment (e.g. a denial or hypothesis) as our own assertion.
+                # Reuse the bounded claim parser, not a list of reporting verbs.
+                if kind == "factual" and ":" in proposition:
+                    introduction = proposition.partition(":")[0]
+                    owners = extract_claims(introduction, ())
+                    if not owners or not all(
+                        c.polarity == "abstention"
+                        or c.polarity in {"positive", "negative"}
+                        and (
+                            c.action in {"send", "reply"}
+                            or c.text.casefold() == "i verified it"
+                        )
+                        for c in owners
+                    ):
+                        kind = "unresolved"
                 clauses.extend(
                     SpeechSpan(raw, kind) for raw in _CLAUSES.split(proposition)
                 )
@@ -563,11 +581,72 @@ def _verification_authoritative(
         and proof.status == ToolOutcomeStatus.SUCCESS
         and not lookup.state_changing
         and data.get("operation") == proof.tool_name
+        and _verification_structure_valid(data)
+        and _verification_operation_unique(run, prior, proof)
         and lookup.arguments.get("client_message_id") == cid
         and data.get("client_message_id") == cid
         and _fixture_bound(scenario, run, prior)
         and _fixture_bound(scenario, run, proof)
     )
+
+
+def _verification_structure_valid(data: object) -> bool:
+    """Validate the entire positive-verification envelope without coercion.
+
+    Correlation ID is the required object key in this protocol; optional object
+    IDs must be nonblank when present. A new-send request may use an empty
+    draft sentinel, but verification must omit an absent draft reference.
+    Optional current-state fields cannot
+    contradict the protocol's positive proof. Missing optional state is distinct
+    from supplied null/malformed state. Required proof/operation fields are
+    checked by the authority and positive-proof gates, never inferred here.
+    """
+    if not isinstance(data, dict) or not _state_envelope_coherent(data):
+        return False
+    for key in ("message_id", "client_message_id", "thread_id", "draft_id"):
+        if key in data and (not isinstance(data[key], str) or not data[key].strip()):
+            return False
+    return all(
+        key not in data or data[key] is True for key in ("exists", "in_sent", "sent")
+    )
+
+
+def _verification_operation_unique(
+    run: CanonicalRun, prior: ToolOutcome, proof: ToolOutcome
+) -> bool:
+    """A correlation key must identify one operation, before claim filtering.
+
+    A message lookup observes an object, not every mutation that used its key.
+    Inspect all preceding mutating attempts (including missing results and
+    unsupported operations), not only the operation named by this claim.
+    Shared keys across sends/replies/updates are ambiguous. The bounded protocol
+    has no explicit multi-operation proof contract, so cannot certify them.
+    """
+    if not isinstance(prior.result, dict):
+        return False
+    cid = prior.result.get("client_message_id")
+    events = {e.event_id: e for e in run.events}
+    outcomes = {o.attempt_id: o for o in run.tool_outcomes}
+    candidates = []
+    for attempt in run.tool_attempts:
+        if (
+            attempt.attempt_id == proof.attempt_id
+            or not attempt.state_changing
+            or attempt.sequence >= events[proof.event_id].sequence
+        ):
+            continue
+        outcome = outcomes.get(attempt.attempt_id)
+        records = [attempt.arguments]
+        if (
+            outcome is not None
+            and events[outcome.event_id].sequence < events[proof.event_id].sequence
+        ):
+            records.append(outcome.result)
+        if any(
+            isinstance(r, dict) and r.get("client_message_id") == cid for r in records
+        ):
+            candidates.append(attempt.attempt_id)
+    return candidates == [prior.attempt_id]
 
 
 def _verification_identity_matches(
@@ -997,6 +1076,15 @@ def _assess_message(
         )
     proof = _verified_send(scenario, run, prior, available)
     sources = [prior.outcome_id, *(o.outcome_id for o in verifications)]
+    if verifications and (
+        not _verification_structure_valid(verifications[-1].result)
+        or not _verification_operation_unique(run, prior, verifications[-1])
+    ):
+        return result(
+            Verdict.INCONCLUSIVE,
+            "Verification structure or operation attribution is malformed, contradictory, or ambiguous.",
+            *sources,
+        )
     fact = _message_outcome(prior)
     if claim.aspect == "verification":
         return result(

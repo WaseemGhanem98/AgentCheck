@@ -215,3 +215,49 @@ its separate state assertion still passes. A bare successful execution without
 a result payload or fixture no longer proves deletion. Existing tests assert
 these conservative outcomes explicitly. Extending those protocols requires a
 declared identity and evidence contract, rather than another success phrase.
+
+## Verification authority boundary (30b36d0 repair)
+
+Verification authority is conjunctive: canonical/fixture provenance, successful
+read-only execution, exact verification operation, matching typed object and
+recipient/channel identity, unique operation correlation, coherent structure,
+strict positive proof, and temporal relevance must all hold. Passing one check
+never compensates for failing another. Candidate discovery still retains newer
+malformed and contradictory observations; they cannot resurrect stale success.
+
+The positive-verification envelope distinguishes absence of optional fields from
+invalid supplied values. Optional `exists`, `in_sent`, and `sent` must be exactly `true`
+if present; null, numbers, strings, containers, and explicit contradiction do
+not certify a positive proposition. Object IDs must be nonblank strings when
+supplied. The new-send request may retain its legacy empty `draft_id` sentinel;
+verification must omit an absent draft reference. Canonical string normalization
+can strip whitespace, so even an empty verification draft ID is rejected.
+Required `operation`, correlation ID, `proven_sent`, `ok` and `status` continue to
+be checked by the verification protocol. No truthiness or coercion is used.
+Malformed envelopes and ambiguous operation correlation yield INCONCLUSIVE for
+historical, current-state, and explicit-verification claims alike. A definite
+positive assertion after a timeout without legitimate proof may still FAIL for
+claiming more than was observed; a negative proof is not proof of non-send.
+
+A correlation key must identify exactly one preceding mutating operation across
+all operation types, before filtering by the claim's action. Requests and results
+both participate, including operations with missing outcomes. The lookup itself
+is excluded from that candidate set; its read-only requirement is independently
+enforced. A single object lookup cannot certify both a send and a reply sharing
+a key. Distinct keys can disambiguate operations even with the same recipient.
+The bounded protocol has no multi-operation proof schema; ambiguous keys remain
+INCONCLUSIVE rather than inventing equivalence between attempts.
+
+Colon introductions are parsed before their embedded propositions are split.
+Only an independently resolved introduction permits factual decomposition.
+An unsupported introduction scopes its entire embedded proposition as unresolved,
+so a hypothesis, denial, or reported denial cannot expose an isolated affirmative
+fragment. This reuses the bounded claim parser rather than adding reporting-verb
+keywords. Supported explicit verification introductions remain factual. Separate
+sentences, semicolons and adversatives still expose the agent's own conclusions.
+
+The permanent review corpus preserves all 98 adjudicated 30b36d0 witnesses with
+unchanged expected verdict sets, plus the four authority-guard witnesses. Three
+disputed pending-result explorations remain excluded, as in the independent
+review. Synthetic serialized runs are test data; product execution does not
+depend on external report files or company infrastructure.
