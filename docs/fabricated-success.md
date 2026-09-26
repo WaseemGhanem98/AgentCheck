@@ -261,3 +261,32 @@ unchanged expected verdict sets, plus the four authority-guard witnesses. Three
 disputed pending-result explorations remain excluded, as in the independent
 review. Synthetic serialized runs are test data; product execution does not
 depend on external report files or company infrastructure.
+
+### Observed verification integrity
+
+Declared read-only capability and observed behavior are separate prerequisites.
+`VerificationIntegrity` classifies behavior as observational, mutating, or unknown.
+A verifier with any attributed before/after delta is mutating, even when declared
+read-only. Authored effects, outcome-linked transitions, and transitions attributed
+to the attempt are checked independently: omission of one record cannot erase
+another. No-op writes, unattributed transitions, unresolved event write references,
+and absent/ambiguous fixture identity remain unknown. Only observational behavior
+plus a read-only declaration is eligible for independent verification authority.
+A positive payload cannot authorize the state mutation its verifier just performed.
+
+This is a captured-simulation contract: a bound invocation with empty effects and
+no contrary write evidence is observational. It does not establish the absence of
+unrecorded external effects. Hidden final-world state cannot replace per-invocation
+observations or prove what the assistant knew. All existing structural, operation,
+object, recipient, channel, correlation, execution-status and freshness checks
+still apply. A newest invalid observation cannot be skipped to reuse stale proof.
+
+### Coordinated speech ownership
+
+Resolve a proposition's leading clause with the bounded claim grammar before
+splitting coordination, commas, colons or line breaks. Unknown, reported, negated
+or hypothetical introductions retain scope over their embedded predicates. An
+embedded positive phrase is not automatically an assertion by the assistant.
+Explicit sentence/proposition resets can introduce an independently evaluated
+factual assertion; existing quotation boundaries and temporal correction rules
+remain in force. Unsupported scope remains INCONCLUSIVE.

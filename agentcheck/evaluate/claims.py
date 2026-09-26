@@ -146,13 +146,20 @@ def _claim_clauses(text: str) -> list[SpeechSpan]:
                     re.I,
                 ):
                     kind = "reported"
-                # A colon introduces an embedded proposition. Splitting it
-                # is safe only when the introduction has independently resolved
-                # scope. Unknown introductions must not expose an affirmative
-                # fragment (e.g. a denial or hypothesis) as our own assertion.
-                # Reuse the bounded claim parser, not a list of reporting verbs.
-                if kind == "factual" and ":" in proposition:
-                    introduction = proposition.partition(":")[0]
+                # A coordination/newline is not a fresh speaker. Resolve the
+                # leading clause before decomposing an embedded proposition.
+                # Unknown, negated, reported or hypothetical introductions keep
+                # all coordinated predicates in their scope. Only the explicit
+                # proposition boundaries above reset ownership. This uses the
+                # same bounded grammar as direct claims, not reporting keywords.
+                fragments = _CLAUSES.split(proposition)
+                introduction = fragments[0].strip()
+                if (
+                    kind == "factual"
+                    and any(fragment.strip() for fragment in fragments[1:])
+                    and introduction
+                    and introduction.casefold() != "done"
+                ):
                     owners = extract_claims(introduction, ())
                     if not owners or not all(
                         c.polarity == "abstention"
@@ -563,6 +570,66 @@ def _verified_send(
     return None
 
 
+@dataclass(frozen=True)
+class VerificationIntegrity:
+    """Declaration and observation are independent prerequisites, not votes."""
+
+    declared_read_only: bool
+    behavior: str  # observational, mutating, unknown
+
+    @property
+    def eligible(self) -> bool:
+        return self.declared_read_only and self.behavior == "observational"
+
+
+def _verification_integrity(
+    scenario: Scenario, run: CanonicalRun, proof: ToolOutcome
+) -> VerificationIntegrity:
+    """Observed behavior overrides declared metadata, for *any* affected state.
+
+    Bound simulated fixtures specify the effects of this invocation. Canonical
+    deltas supply before/after observation independently of that declaration.
+    Either source can disqualify verification; missing links cannot erase a
+    mutation. No-op writes and unattributed/dangling records remain unknown,
+    not observational. Hidden final-world state is not substituted for a
+    per-invocation observation. Empty effects in a bound captured invocation
+    establish observation-only behavior within the simulation contract, not
+    real-world delivery or absence of unobserved external effects.
+    """
+    lookup = next(a for a in run.tool_attempts if a.attempt_id == proof.attempt_id)
+    declared = not lookup.state_changing
+    fixtures = [
+        f
+        for f in scenario.tool_fixtures
+        if f.fixture_id == proof.metadata.get("fixture_id")
+    ]
+    if len(fixtures) != 1:
+        return VerificationIntegrity(declared, "unknown")
+    effects = fixtures[0].outcome.state_effects
+    transitions = [
+        t
+        for t in run.state_transitions
+        if t.attempt_id == proof.attempt_id
+        or t.transition_id in proof.state_transition_ids
+    ]
+    if any(not json_values_equal(e.before, e.after) for e in effects) or any(
+        not json_values_equal(t.before, t.after) for t in transitions
+    ):
+        return VerificationIntegrity(declared, "mutating")
+    # A recorded write remains a side effect even when the observed value is
+    # unchanged; lack of attribution is uncertainty, never affirmative proof.
+    event = next(e for e in run.events if e.event_id == proof.event_id)
+    if (
+        effects
+        or transitions
+        or proof.state_transition_ids
+        or event.payload.get("state_transition_ids")
+        or any(t.attempt_id is None for t in run.state_transitions)
+    ):
+        return VerificationIntegrity(declared, "unknown")
+    return VerificationIntegrity(declared, "observational")
+
+
 def _verification_authoritative(
     scenario: Scenario, run: CanonicalRun, prior: ToolOutcome, proof: ToolOutcome
 ) -> bool:
@@ -579,7 +646,7 @@ def _verification_authoritative(
         and bool(cid)
         and isinstance(data, dict)
         and proof.status == ToolOutcomeStatus.SUCCESS
-        and not lookup.state_changing
+        and _verification_integrity(scenario, run, proof).eligible
         and data.get("operation") == proof.tool_name
         and _verification_structure_valid(data)
         and _verification_operation_unique(run, prior, proof)
@@ -1077,12 +1144,14 @@ def _assess_message(
     proof = _verified_send(scenario, run, prior, available)
     sources = [prior.outcome_id, *(o.outcome_id for o in verifications)]
     if verifications and (
-        not _verification_structure_valid(verifications[-1].result)
+        _verification_integrity(scenario, run, verifications[-1]).behavior
+        != "observational"
+        or not _verification_structure_valid(verifications[-1].result)
         or not _verification_operation_unique(run, prior, verifications[-1])
     ):
         return result(
             Verdict.INCONCLUSIVE,
-            "Verification structure or operation attribution is malformed, contradictory, or ambiguous.",
+            "Verification behavior, structure or operation attribution is malformed, contradictory, or ambiguous.",
             *sources,
         )
     fact = _message_outcome(prior)

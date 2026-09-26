@@ -16,6 +16,7 @@ TESTS = [
     "tests/agentcheck/test_fabricated_success_attribution.py",
     "tests/agentcheck/test_fabricated_success_evidence.py",
     "tests/agentcheck/test_fabricated_success_authority.py",
+    "tests/agentcheck/test_fabricated_success_observed_authority.py",
 ]
 MUTATIONS = [
     (
@@ -136,8 +137,8 @@ MUTATIONS.extend(
         ),
         (
             "remove-read-only-verification",
-            "        and not lookup.state_changing\n",
-            "",
+            "    declared = not lookup.state_changing",
+            "    declared = True",
         ),
         (
             "remove-verification-operation",
@@ -161,8 +162,9 @@ MUTATIONS.extend(
         ),
         (
             "collapse-reported-ownership",
-            "                if not conditional and re.search(",
-            "                if False and re.search(",
+            '                    kind = "reported"',
+            '                    kind = "factual"\n'
+            '                    proposition = re.sub(r"^.*?(?::|\\bthat\\b)", "", proposition, count=1, flags=re.I)',
         ),
     ]
 )
@@ -204,6 +206,72 @@ MUTATIONS.extend(
             "flatten-introduction-scope",
             '                        kind = "unresolved"',
             '                        kind = "factual"',
+        ),
+    ]
+)
+
+
+MUTATIONS.extend(
+    [
+        (
+            "uniqueness-ignore-pending",
+            "        records = [attempt.arguments]\n",
+            "        if outcome is None:\n            continue\n        records = [attempt.arguments]\n",
+        ),
+        (
+            "uniqueness-ignore-request",
+            "        records = [attempt.arguments]\n",
+            "        records = []\n",
+        ),
+        (
+            "verification-ignore-status",
+            "        and proof.status == ToolOutcomeStatus.SUCCESS\n",
+            "",
+        ),
+        (
+            "verification-ignore-request-cid",
+            '        and lookup.arguments.get("client_message_id") == cid\n',
+            "",
+        ),
+        (
+            "verification-ignore-result-cid",
+            '        and data.get("client_message_id") == cid\n',
+            "",
+        ),
+        (
+            "trust-declared-read-only",
+            'return VerificationIntegrity(declared, "mutating")',
+            'return VerificationIntegrity(declared, "observational")',
+        ),
+        (
+            "ignore-observed-integrity",
+            "    declared = not lookup.state_changing",
+            '    return VerificationIntegrity(True, "observational")\n    declared = not lookup.state_changing',
+        ),
+        (
+            "ignore-authored-verifier-effects",
+            "effects = fixtures[0].outcome.state_effects",
+            "effects = ()",
+        ),
+        (
+            "ignore-unlinked-verifier-deltas",
+            "if t.attempt_id == proof.attempt_id\n        or t.transition_id in proof.state_transition_ids",
+            "if t.transition_id in proof.state_transition_ids",
+        ),
+        (
+            "accept-unattributed-writes",
+            "or any(t.attempt_id is None for t in run.state_transitions)",
+            "or False",
+        ),
+        (
+            "ignore-event-only-write-record",
+            'or event.payload.get("state_transition_ids")',
+            "or False",
+        ),
+        (
+            "flatten-coordinated-scope",
+            "and any(fragment.strip() for fragment in fragments[1:])",
+            'and ":" in proposition',
         ),
     ]
 )
