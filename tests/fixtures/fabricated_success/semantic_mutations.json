@@ -426,7 +426,7 @@
     "name": "confirmation-drops-aspect",
     "category": "claim lifecycle semantics",
     "module": "claim_lifecycle",
-    "old": "aspect=old.aspect,",
+    "old": "aspect=old.aspect if claim.aspect == \"action\" else claim.aspect,",
     "new": "aspect=\"action\","
   },
   {
@@ -442,5 +442,19 @@
     "module": "claim_evidence",
     "old": "requirement(\"state.mutation_contract\", attempt.state_changing)",
     "new": "requirement(\"state.mutation_contract\", direct or attempt.state_changing)"
+  },
+  {
+    "name": "confirmation-erases-explicit-verification",
+    "category": "claim lifecycle semantics",
+    "module": "claim_lifecycle",
+    "old": "aspect=old.aspect if claim.aspect == \"action\" else claim.aspect,",
+    "new": "aspect=old.aspect,"
+  },
+  {
+    "name": "confirmation-discards-incomparable-aspect",
+    "category": "claim lifecycle ambiguity",
+    "module": "claim_lifecycle",
+    "old": "if claim.aspect != \"action\" and old_aspect not in {\"action\", claim.aspect}:",
+    "new": "if False:"
   }
 ]

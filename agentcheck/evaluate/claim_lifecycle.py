@@ -91,6 +91,14 @@ def resolve_lifecycle(claims: tuple[EvaluatedClaim, ...]) -> tuple[EvaluatedClai
             }
             if len(identities) == 1:
                 possible = [possible[-1]]
+        # Bare reaffirmation inherits the proposition. Explicit verification is
+        # an additional obligation, never erased by a weaker historical action.
+        # Distinct non-default aspects require conjunction, which this bounded
+        # lifecycle does not resolve: retain ambiguity rather than drop one.
+        if relation == Relation.CONFIRMS and len(possible) == 1:
+            old_aspect = resolved[possible[0]].aspect
+            if claim.aspect != "action" and old_aspect not in {"action", claim.aspect}:
+                target_resolved = False
         if not target_resolved or not possible or (not plural and len(possible) != 1):
             for i in possible:
                 old = resolved[i]
@@ -141,7 +149,7 @@ def resolve_lifecycle(claims: tuple[EvaluatedClaim, ...]) -> tuple[EvaluatedClai
                 claim,
                 scope=ClaimScope.ASSERTED,
                 action=old.action,
-                aspect=old.aspect,
+                aspect=old.aspect if claim.aspect == "action" else claim.aspect,
                 references=old.references,
                 channel=old.channel,
                 lifecycle=Life.ACTIVE,
