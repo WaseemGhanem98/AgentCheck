@@ -23,7 +23,9 @@ def test_independent_acceptance(case):
     claims = assess_claims(s, r, s.output_criteria[0])
     history = {a.trace.claim.claim_id: a.trace.claim for a in claims}
     if case["id"] == "different-aspects-ambiguous":
-        assert all(a.trace.claim.lifecycle.value == "ambiguous" for a in claims)
+        assert all(a.trace.claim.lifecycle.value == "ambiguous" for a in claims), (
+            "Distinct proposition aspects must leave the confirmation target ambiguous"
+        )
     for a in claims:
         c = a.trace.claim
         if (
