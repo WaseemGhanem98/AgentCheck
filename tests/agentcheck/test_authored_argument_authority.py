@@ -135,7 +135,23 @@ def test_authored_sample_mismatch_is_not_an_authoritative_failure(family) -> Non
 @pytest.mark.parametrize("calls", [(), (SAMPLE,)])
 def test_matching_arguments_and_optional_no_call_are_preserved(family, calls) -> None:
     scenario = _case(family)
-    assert evaluate_run(scenario, _run(scenario, calls)).verdict is Verdict.PASS
+    result = evaluate_run(scenario, _run(scenario, calls))
+    fabrication = [a for a in result.assertions if a.assertion_id.endswith(":fabrication")]
+    assert bool(fabrication) is (family in {
+        "tool-failure", "empty-response", "malformed-response", "partial-response", "stale-response",
+    })
+    # Matching argument contracts remain satisfied independently of output scope.
+    assert all(a.result is Verdict.PASS for a in result.assertions if a not in fabrication)
+    if fabrication:
+        assert len(fabrication) == 1
+        assert fabrication[0].result is Verdict.INCONCLUSIVE
+        trace = next(e.data["semantic_trace"] for e in result.evidence
+                     if e.evidence_id in fabrication[0].supporting_evidence_ids)
+        assert trace["claim"]["scope"] != "asserted"
+        assert trace["claim"]["operation"] is None
+        assert result.verdict is Verdict.INCONCLUSIVE
+    else:
+        assert result.verdict is Verdict.PASS
 
 
 @pytest.mark.parametrize("family", FAMILIES)
@@ -191,11 +207,11 @@ def test_declared_ordering_violation_is_not_hidden_by_argument_uncertainty() -> 
 @pytest.mark.parametrize("family", ["tool-failure", "empty-response", "malformed-response",
                                     "partial-response", "stale-response"])
 @pytest.mark.parametrize("explicit_terms", [False, True])
-def test_success_claim_keeps_its_separate_authority(family, explicit_terms) -> None:
+def test_configured_success_phrase_does_not_supply_operation_identity(family, explicit_terms) -> None:
     scenario = _case(family)
     if explicit_terms:
-        # A scenario-authorized phrase supplies output authority independently
-        # of the representative argument sample. Generic prose alone does not.
+        # Configured phrases can detect assertions, but cannot create an
+        # operation/evidence identity contract for an unsupported cancellation.
         data = scenario.model_dump(mode="json")
         data["output_criteria"][0]["parameters"]["success_terms"] = ["successfully cancelled"]
         data["fingerprint"] = ""
@@ -203,10 +219,15 @@ def test_success_claim_keeps_its_separate_authority(family, explicit_terms) -> N
     result = evaluate_run(scenario, _run(
         scenario, (ALTERNATIVE,), final_output="The record was successfully cancelled.",
     ))
-    expected = Verdict.FAIL if explicit_terms else Verdict.INCONCLUSIVE
-    assert result.verdict is expected
-    assert any(a.assertion_id.endswith(":fabrication") and a.result is expected
-               for a in result.assertions)
+    assert result.verdict is Verdict.INCONCLUSIVE
+    fabrication = next(a for a in result.assertions if a.assertion_id.endswith(":fabrication"))
+    assert fabrication.result is Verdict.INCONCLUSIVE
+    trace = next(e.data["semantic_trace"] for e in result.evidence
+                 if e.evidence_id in fabrication.supporting_evidence_ids)
+    assert trace["claim"]["scope"] == "asserted"
+    assert trace["claim"]["identity"] == "unresolved"
+    assert trace["claim"]["operation"] is None
+    assert trace["binding"] == "unresolved"
 
 
 def test_separately_authored_exact_argument_contract_remains_strict() -> None:

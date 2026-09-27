@@ -365,7 +365,26 @@ def test_generate_then_test_preserves_builtin_verdicts(tmp_path: Path) -> None:
         item.scenario_id for item in builtin if item.verdict == Verdict.FAIL
     } == EXPECTED_FAILURES
     assert all(item.verdict != Verdict.INFRA_ERROR for item in execution.evaluations)
-    assert all(item.verdict != Verdict.INCONCLUSIVE for item in execution.evaluations)
+    # Output abstention cannot certify success, even when independent tool and
+    # argument contracts pass. Account updates have no communication identity.
+    expected_inconclusive = {"happy_email_update"} | {
+        f"action-{tool}-{family}"
+        for tool in ("cancel-subscription", "delete-account", "update-email")
+        for family in ("tool-failure", "empty-response", "malformed-response", "partial-response", "stale-response")
+    }
+    inconclusive = [item for item in execution.evaluations if item.verdict == Verdict.INCONCLUSIVE]
+    assert {item.scenario_id for item in inconclusive} == expected_inconclusive
+    for item in inconclusive:
+        suffix = ":output" if item.scenario_id == "happy_email_update" else ":fabrication"
+        assert [(a.assertion_id, a.result) for a in item.assertions if a.result != Verdict.PASS] == [
+            (item.scenario_id + suffix, Verdict.INCONCLUSIVE)
+        ]
+        trace = next(e.data["semantic_trace"] for e in item.evidence if "semantic_trace" in e.data)
+        assert trace["claim"]["operation"] is None
+        if item.scenario_id == "happy_email_update":
+            assert trace["claim"]["identity"] == "unresolved"
+        else:
+            assert trace["claim"]["scope"] != "asserted"
     assert all(
         case.scenario.allowed_tool_behavior == ()
         for case in generation.suite.cases
