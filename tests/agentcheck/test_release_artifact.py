@@ -791,6 +791,104 @@ def test_json_release_smoke_rejects_wrong_typed_verdict(monkeypatch, kind):
         gate.semantic_smoke()
 
 
+def test_fabricated_success_probe_pins_positive_negative_and_unknown_verdicts():
+    assert gate.fabricated_success_smoke() == [
+        "membership-confirm", "valid-membership-confirm",
+        "direct-membership-changing-False", "substring-message-reference",
+        "explicit-new-verification-0", "explicit-new-verification-1",
+    ]
+
+
+@pytest.mark.parametrize("case_index", range(6))
+def test_fabricated_success_probe_rejects_each_wrong_installed_verdict(monkeypatch, case_index):
+    import agentcheck.evaluate as evaluator
+
+    original = evaluator.evaluate_run
+    seen = []
+
+    def wrong_verdict(*args):
+        result = original(*args)
+        seen.append(result.verdict.value)
+        if len(seen) - 1 == case_index:
+            wrong = "INCONCLUSIVE" if result.verdict.value != "INCONCLUSIVE" else "PASS"
+            return SimpleNamespace(verdict=SimpleNamespace(value=wrong))
+        return result
+
+    monkeypatch.setattr(evaluator, "evaluate_run", wrong_verdict)
+    with pytest.raises(ValueError, match=gate.FABRICATED_SUCCESS_CASES[case_index]):
+        gate.fabricated_success_smoke()
+    assert len(seen) == case_index + 1
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "malformed"])
+def test_fabricated_success_probe_refuses_bad_canonical_fixture(monkeypatch, mutation):
+    original = Path.read_text
+
+    def changed_fixture(path, *args, **kwargs):
+        text = original(path, *args, **kwargs)
+        if path.name != "review_5d4d1fe.json":
+            return text
+        payload = json.loads(text)
+        selected = next(c for c in payload["cases"] if c["id"] == "membership-confirm")
+        if mutation == "missing":
+            payload["cases"].remove(selected)
+        elif mutation == "duplicate":
+            payload["cases"].append(deepcopy(selected))
+        else:
+            selected["run"] = {}
+        return json.dumps(payload)
+
+    monkeypatch.setattr(Path, "read_text", changed_fixture)
+    with pytest.raises(ValueError):
+        gate.fabricated_success_smoke()
+
+
+@pytest.mark.parametrize("extra", gate.EXTRAS)
+def test_missing_fabricated_success_receipt_is_not_qualified(
+    distributions, fake_runner, monkeypatch, extra,
+):
+    execute, _ = fake_runner
+
+    def missing_cases(command, scratch):
+        result = execute(command, scratch)
+        if "--probe" in command and command[command.index("--extra") + 1] == extra:
+            proof = json.loads(result)
+            proof["semantic_cases"] = [
+                case for case in proof["semantic_cases"]
+                if case not in gate.FABRICATED_SUCCESS_CASES
+            ]
+            return json.dumps(proof)
+        return result
+
+    monkeypatch.setattr(gate, "run", missing_cases)
+    with pytest.raises(ValueError, match="receipt incomplete"):
+        gate.qualify(distributions[0], VERSION, SOURCE)
+
+
+def test_installed_probe_runs_fabricated_controls_after_identity_check(monkeypatch, tmp_path):
+    import agentcheck.runner.network_guard as network
+
+    phases = []
+    monkeypatch.setattr(gate, "deny_probe_network", lambda: lambda: None)
+    monkeypatch.setattr(gate, "check_identity", lambda *args: phases.append("identity"))
+    monkeypatch.setattr(network, "install_network_guard", lambda **kwargs: None)
+    monkeypatch.setattr(network, "denied_destinations", lambda: [])
+    monkeypatch.setattr(gate, "check_frameworks", lambda extra: None)
+    monkeypatch.setattr(gate, "semantic_smoke", lambda: list(gate.SEMANTIC_CASES))
+    monkeypatch.setattr(gate, "unsupported_manifest_smoke", lambda extra: list(gate.CUSTOM_MANIFEST_CASES))
+    original = gate.fabricated_success_smoke
+
+    def checked_probe():
+        assert phases == ["identity"]
+        phases.append("fabricated-success")
+        return original()
+
+    monkeypatch.setattr(gate, "fabricated_success_smoke", checked_probe)
+    receipt = gate.installed_probe(tmp_path / "wheel.whl", "digest", VERSION, tmp_path, "")
+    assert phases == ["identity", "fabricated-success"]
+    assert receipt == gate.probe_receipt("digest", VERSION, "", gate.expected_semantic_cases(""))
+
+
 def test_pydantic_receipt_requires_adapter_cases(distributions, fake_runner, monkeypatch):
     dist, _, _ = distributions
     execute, _ = fake_runner
@@ -811,9 +909,9 @@ def test_pydantic_receipt_requires_adapter_cases(distributions, fake_runner, mon
 def test_pydantic_instruction_probe_executes_only_in_its_extra():
     pytest.importorskip("pydantic_ai")
     assert gate.pydantic_instruction_smoke() == list(gate.PYDANTIC_INSTRUCTION_CASES)
-    assert gate.expected_semantic_cases("") == [*gate.SEMANTIC_CASES, *gate.CUSTOM_MANIFEST_CASES]
-    assert gate.expected_semantic_cases("openai-agents") == [*gate.SEMANTIC_CASES, *gate.CUSTOM_MANIFEST_CASES, *gate.OPENAI_MANIFEST_CASES]
-    assert gate.expected_semantic_cases("pydantic-ai") == [*gate.SEMANTIC_CASES, *gate.PYDANTIC_INSTRUCTION_CASES, *gate.CUSTOM_MANIFEST_CASES]
+    assert gate.expected_semantic_cases("") == [*gate.SEMANTIC_CASES, *gate.FABRICATED_SUCCESS_CASES, *gate.CUSTOM_MANIFEST_CASES]
+    assert gate.expected_semantic_cases("openai-agents") == [*gate.SEMANTIC_CASES, *gate.FABRICATED_SUCCESS_CASES, *gate.CUSTOM_MANIFEST_CASES, *gate.OPENAI_MANIFEST_CASES]
+    assert gate.expected_semantic_cases("pydantic-ai") == [*gate.SEMANTIC_CASES, *gate.FABRICATED_SUCCESS_CASES, *gate.PYDANTIC_INSTRUCTION_CASES, *gate.CUSTOM_MANIFEST_CASES]
 
 
 def test_pydantic_release_probe_rejects_cross_snapshot_toolset_identity(monkeypatch):
@@ -871,7 +969,7 @@ def test_release_unsupported_manifest_probe_is_extra_specific(extra):
         pytest.importorskip("agents")
     expected = [*gate.CUSTOM_MANIFEST_CASES, *(gate.OPENAI_MANIFEST_CASES if extra == "openai-agents" else ())]
     assert gate.unsupported_manifest_smoke(extra) == expected
-    assert len(gate.expected_semantic_cases(extra)) == {"": 23, "openai-agents": 24, "pydantic-ai": 33}[extra]
+    assert len(gate.expected_semantic_cases(extra)) == {"": 29, "openai-agents": 30, "pydantic-ai": 39}[extra]
 
 
 @pytest.mark.parametrize("adapter_name,extra", [("CustomAgentAdapter", ""), ("OpenAIAgentsAdapter", "openai-agents")])

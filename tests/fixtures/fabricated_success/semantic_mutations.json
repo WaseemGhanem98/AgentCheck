@@ -1,0 +1,565 @@
+[
+  {
+    "name": "fixture-invocation",
+    "category": "authority bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_fixture_requirements = fixture_requirements\ndef fixture_requirements(*args, **kwargs):\n    rows = _original_fixture_requirements(*args, **kwargs)\n    return tuple(replace(r, state=CheckState.SATISFIED) if r.name == \"fixture.invocation\" else r for r in rows)\n"
+  },
+  {
+    "name": "fixture-arguments",
+    "category": "authority bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_fixture_requirements = fixture_requirements\ndef fixture_requirements(*args, **kwargs):\n    rows = _original_fixture_requirements(*args, **kwargs)\n    return tuple(replace(r, state=CheckState.SATISFIED) if r.name == \"fixture.arguments\" else r for r in rows)\n"
+  },
+  {
+    "name": "fixture-tool",
+    "category": "authority bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_fixture_requirements = fixture_requirements\ndef fixture_requirements(*args, **kwargs):\n    rows = _original_fixture_requirements(*args, **kwargs)\n    return tuple(replace(r, state=CheckState.SATISFIED) if r.name == \"fixture.tool\" else r for r in rows)\n"
+  },
+  {
+    "name": "fixture-status",
+    "category": "authority bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_fixture_requirements = fixture_requirements\ndef fixture_requirements(*args, **kwargs):\n    rows = _original_fixture_requirements(*args, **kwargs)\n    return tuple(replace(r, state=CheckState.SATISFIED) if r.name == \"fixture.status\" else r for r in rows)\n"
+  },
+  {
+    "name": "fixture-result",
+    "category": "authority bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_fixture_requirements = fixture_requirements\ndef fixture_requirements(*args, **kwargs):\n    rows = _original_fixture_requirements(*args, **kwargs)\n    return tuple(replace(r, state=CheckState.SATISFIED) if r.name == \"fixture.result\" else r for r in rows)\n"
+  },
+  {
+    "name": "operation-action-bypass",
+    "category": "identity bypass",
+    "module": "claims",
+    "old": "_MESSAGE_ACTIONS.get(a.tool_name) == claim.action",
+    "new": "a.tool_name in _MESSAGE_ACTIONS"
+  },
+  {
+    "name": "channel-bypass",
+    "category": "identity bypass",
+    "module": "claim_protocols",
+    "old": "\"channel\" in r and r[\"channel\"] != \"email\"",
+    "new": "False"
+  },
+  {
+    "name": "recipient-bypass",
+    "category": "identity bypass",
+    "module": "claim_protocols",
+    "old": "if not _recipients_agree(records):",
+    "new": "if False:"
+  },
+  {
+    "name": "object-bypass",
+    "category": "identity bypass",
+    "module": "claim_protocols",
+    "old": "    \"draft_id\",\n",
+    "new": ""
+  },
+  {
+    "name": "stale-first",
+    "category": "freshness bypass",
+    "module": "claim_evidence",
+    "old": "latest = max(e.position for e in candidates)",
+    "new": "latest = min(e.position for e in candidates)"
+  },
+  {
+    "name": "ignore-contradiction",
+    "category": "conflict suppression",
+    "module": "claim_evidence",
+    "append": "\n_original_collect_candidates = collect_candidates\ndef collect_candidates(*args, **kwargs):\n    return tuple(o for o in _original_collect_candidates(*args, **kwargs) if not (isinstance(o.result, dict) and (o.result.get(\"in_sent\") is False or o.result.get(\"proven_sent\") is False)))\n"
+  },
+  {
+    "name": "trust-declared-read-only",
+    "category": "verification self-certification",
+    "module": "claim_evidence",
+    "append": "\n_original_observed_integrity = observed_integrity\ndef observed_integrity(*args, **kwargs):\n    proof = args[2]\n    lookup = next(a for a in args[1].tool_attempts if a.attempt_id == proof.attempt_id)\n    if not lookup.state_changing:\n        return Integrity.VALID, tuple(replace(r,state=CheckState.SATISFIED) for r in _original_observed_integrity(*args,**kwargs)[1])\n    return _original_observed_integrity(*args, **kwargs)\n"
+  },
+  {
+    "name": "ignore-transition-records",
+    "category": "verification self-certification",
+    "module": "claim_evidence",
+    "append": "\n_original_observed_integrity = observed_integrity\ndef observed_integrity(*args, **kwargs):\n    scenario, run, proof = args\n    run = run.model_copy(update={\"state_transitions\": ()})\n    proof = proof.model_copy(update={\"state_transition_ids\": ()})\n    return _original_observed_integrity(scenario, run, proof)\n"
+  },
+  {
+    "name": "ignore-fixture-deltas",
+    "category": "verification self-certification",
+    "module": "claim_evidence",
+    "append": "\n_original_observed_integrity = observed_integrity\ndef observed_integrity(*args, **kwargs):\n    scenario, run, proof = args\n    scenario = scenario.model_copy(update={\"tool_fixtures\": tuple(f.model_copy(update={\"outcome\": f.outcome.model_copy(update={\"state_effects\": ()})}) for f in scenario.tool_fixtures)})\n    return _original_observed_integrity(scenario, run, proof)\n"
+  },
+  {
+    "name": "accept-malformed-envelope",
+    "category": "malformed-evidence acceptance",
+    "module": "claim_evidence",
+    "append": "\n_original_envelope = envelope\ndef envelope(*args, **kwargs):\n    return Integrity.VALID, tuple(replace(r,state=CheckState.SATISFIED) for r in _original_envelope(*args,**kwargs)[1])\n"
+  },
+  {
+    "name": "reuse-first-operation",
+    "category": "cross-operation evidence reuse",
+    "module": "claim_evidence",
+    "append": "\n_original_proof_bindings = proof_bindings\ndef proof_bindings(*args, **kwargs):\n    return _original_proof_bindings(*args, **kwargs)[:1]\n"
+  },
+  {
+    "name": "suppress-capture-conflict",
+    "category": "conflict suppression",
+    "module": "claim_evidence",
+    "append": "\n_original_capture_requirements = capture_requirements\ndef capture_requirements(*args, **kwargs):\n    return tuple(replace(r,state=CheckState.SATISFIED) for r in _original_capture_requirements(*args, **kwargs))\n"
+  },
+  {
+    "name": "ignore-request-order",
+    "category": "freshness bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_requirement = requirement\ndef requirement(*args, **kwargs):\n    if args[0] == \"verification.request_after_action\":\n        return Requirement(args[0],CheckState.SATISFIED,\"mutant\")\n    return _original_requirement(*args,**kwargs)\n"
+  },
+  {
+    "name": "accept-restored-write",
+    "category": "verification self-certification",
+    "module": "claim_evidence",
+    "append": "\n_original_observed_integrity = observed_integrity\ndef observed_integrity(*args, **kwargs):\n    scenario, run, proof = args\n    ts = [t for t in run.state_transitions if t.attempt_id == proof.attempt_id]\n    if len(ts) > 1 and json_values_equal(ts[0].before, ts[-1].after):\n        return Integrity.VALID, tuple(replace(r,state=CheckState.SATISFIED) for r in _original_observed_integrity(*args,**kwargs)[1])\n    return _original_observed_integrity(*args,**kwargs)\n"
+  },
+  {
+    "name": "duplicate-fixture-first",
+    "category": "authority bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_fixture_requirements = fixture_requirements\ndef fixture_requirements(*args, **kwargs):\n    s,r,o = args\n    seen = set()\n    fs = []\n    for f in s.tool_fixtures:\n        if f.fixture_id not in seen:\n            fs.append(f); seen.add(f.fixture_id)\n    return _original_fixture_requirements(s.model_copy(update={\"tool_fixtures\":tuple(fs)}),r,o)\n\n_original_observed_integrity = observed_integrity\ndef observed_integrity(*args, **kwargs):\n    s,r,o = args\n    seen = set()\n    fs = []\n    for f in s.tool_fixtures:\n        if f.fixture_id not in seen:\n            fs.append(f); seen.add(f.fixture_id)\n    return _original_observed_integrity(s.model_copy(update={\"tool_fixtures\":tuple(fs)}),r,o)\n"
+  },
+  {
+    "name": "clock-freshness",
+    "category": "freshness bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_evaluate_evidence = evaluate_evidence\ndef evaluate_evidence(*args, **kwargs):\n    e = _original_evaluate_evidence(*args, **kwargs)\n    run, outcome = args[1], args[4]\n    event = next(ev for ev in run.events if ev.event_id == outcome.event_id)\n    return replace(e, position=event.timestamp.timestamp())\n"
+  },
+  {
+    "name": "attempt-local-state-order",
+    "category": "freshness bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_evaluate_evidence = evaluate_evidence\ndef evaluate_evidence(*args, **kwargs):\n    e = _original_evaluate_evidence(*args, **kwargs)\n    run, outcome = args[1], args[4]\n    if outcome.tool_name == \"move_message\":\n        attempt = next(a for a in run.tool_attempts if a.attempt_id == outcome.attempt_id)\n        e = replace(e, position=attempt.sequence)\n    return e\n"
+  },
+  {
+    "name": "flatten-reported",
+    "category": "scope flattening",
+    "module": "claim_language",
+    "append": "\n_original_extract_claims = extract_claims\ndef extract_claims(*args, **kwargs):\n    text, terms = args\n    text = re.sub('(?:The tool (?:said|denied|reported)(?: that)?|I was told(?: that)?)\\\\s*:?\\\\s*', \"\", text, flags=re.I)\n    return _original_extract_claims(text, terms)\n"
+  },
+  {
+    "name": "flatten-negated",
+    "category": "scope flattening",
+    "module": "claim_language",
+    "append": "\n_original_extract_claims = extract_claims\ndef extract_claims(*args, **kwargs):\n    text, terms = args\n    text = re.sub('(?:It is (?:false|not true)(?: that)?|I am not saying|I cannot claim)\\\\s*:?\\\\s*', \"\", text, flags=re.I)\n    return _original_extract_claims(text, terms)\n"
+  },
+  {
+    "name": "flatten-hypothetical",
+    "category": "scope flattening",
+    "module": "claim_language",
+    "append": "\n_original_extract_claims = extract_claims\ndef extract_claims(*args, **kwargs):\n    text, terms = args\n    text = re.sub('(?:Suppose(?: this)?|If it worked,)\\\\s*:?\\\\s*', \"\", text, flags=re.I)\n    return _original_extract_claims(text, terms)\n"
+  },
+  {
+    "name": "flatten-quotation",
+    "category": "scope flattening",
+    "module": "claim_language",
+    "append": "\n_original_extract_claims = extract_claims\ndef extract_claims(*args, **kwargs):\n    text, terms = args\n    text = text.replace(chr(34), \"\").replace(\"The tool said\", \"\")\n    return _original_extract_claims(text, terms)\n"
+  },
+  {
+    "name": "false-sent-is-success",
+    "category": "malformed-evidence acceptance",
+    "module": "claim_protocols",
+    "old": "if sent is True:",
+    "new": "if sent is True or sent is False:"
+  },
+  {
+    "name": "missing-proof-is-true",
+    "category": "malformed-evidence acceptance",
+    "module": "claim_evidence",
+    "append": "\n_original_evaluate_evidence = evaluate_evidence\ndef evaluate_evidence(*args, **kwargs):\n    scenario, run, action, prior, outcome, aspect = args\n    if outcome.tool_name == \"verify_sent_message\" and isinstance(outcome.result, dict):\n        result = dict(outcome.result); result[\"proven_sent\"] = True\n        outcome = outcome.model_copy(update={\"result\":result})\n        # Preserve binding so this mutation challenges strict proof, not fixture mismatch.\n        scenario = scenario.model_copy(update={\"tool_fixtures\":tuple(f.model_copy(update={\"outcome\":f.outcome.model_copy(update={\"result\":result})}) if f.fixture_id == outcome.metadata.get(\"fixture_id\") else f for f in scenario.tool_fixtures)})\n        run = run.model_copy(update={\"events\":tuple(e.model_copy(update={\"payload\":{**e.payload,\"result\":result}}) if e.event_id == outcome.event_id else e for e in run.events)})\n    return _original_evaluate_evidence(scenario,run,action,prior,outcome,aspect)\n"
+  },
+  {
+    "name": "verification-operation-wildcard",
+    "category": "identity bypass",
+    "module": "claim_evidence",
+    "append": "\n_original_requirement = requirement\ndef requirement(*args, **kwargs):\n    if args[0] in {\"structure.operation\", \"structure.operation.required\"}:\n        return Requirement(args[0],CheckState.SATISFIED,\"mutant wildcard\")\n    return _original_requirement(*args,**kwargs)\n"
+  },
+  {
+    "name": "mutating-verifier-self-certifies",
+    "category": "verification self-certification",
+    "module": "claim_evidence",
+    "append": "\n_original_observed_integrity = observed_integrity\ndef observed_integrity(*args, **kwargs):\n    return Integrity.VALID, tuple(replace(r,state=CheckState.SATISFIED) for r in _original_observed_integrity(*args,**kwargs)[1])\n"
+  },
+  {
+    "name": "omit-required-stage",
+    "category": "authority bypass",
+    "module": "claim_states",
+    "append": "\nREQUIRED_REQUIREMENTS[EvidenceProtocol.VERIFICATION] = frozenset()\n"
+  },
+  {
+    "name": "ignore-claim-lifecycle",
+    "category": "claim lifecycle",
+    "module": "claim_lifecycle",
+    "append": "\n\ndef resolve_lifecycle(claims):\n    return claims\n"
+  },
+  {
+    "name": "ignore-retraction-reference",
+    "category": "claim lifecycle binding",
+    "module": "claim_lifecycle",
+    "old": "set(claim.references).issubset(old.references)",
+    "new": "True"
+  },
+  {
+    "name": "guess-ambiguous-retraction-target",
+    "category": "claim lifecycle binding",
+    "module": "claim_lifecycle",
+    "old": "        if not target_resolved or not possible or (not plural and len(possible) != 1):\n",
+    "new": "        if len(possible) > 1:\n            possible = [possible[-1]]\n        if not target_resolved or not possible or (not plural and len(possible) != 1):\n"
+  },
+  {
+    "name": "quoted-retraction-as-own-act",
+    "category": "claim lifecycle scope",
+    "module": "claim_language",
+    "append": "\n_original_extract = extract_claims\ndef extract_claims(text, terms):\n    result = _original_extract(text, terms)\n    if '\"I retract that claim.\"' in text:\n        result += (Claim(\"I retract that claim\", None, \"abstention\", False, speech=\"control\", relation=\"retracts\"),)\n    return result\n"
+  },
+  {
+    "name": "reaffirmation-is-proof",
+    "category": "claim lifecycle evidence",
+    "module": "claim_states",
+    "append": "\n_original_decide = decide\ndef decide(trace):\n    if trace.claim.relation == ClaimRelation.CONFIRMS:\n        return Verdict.PASS, \"Mutant treats reaffirmation as proof.\"\n    return _original_decide(trace)\n"
+  },
+  {
+    "name": "erase-historical-judgment",
+    "category": "claim lifecycle audit",
+    "module": "claims",
+    "old": "                historical_result,\n                historical_reason,",
+    "new": "                result,\n                reason,"
+  },
+  {
+    "name": "bypass-inactive-claim-gate",
+    "category": "claim lifecycle verdict",
+    "module": "claim_states",
+    "old": "    if trace.claim.lifecycle != ClaimLifecycle.ACTIVE:\n",
+    "new": "    if False:\n"
+  },
+  {
+    "name": "disable-general-withdrawal-intent",
+    "category": "withdrawal intent",
+    "module": "claim_withdrawal",
+    "append": "\ndef withdrawal_intent(text):\n    return None\n"
+  },
+  {
+    "name": "disable-plural-withdrawal-binding",
+    "category": "withdrawal cardinality",
+    "module": "claim_lifecycle",
+    "old": "                plural = True",
+    "new": "                plural = False"
+  },
+  {
+    "name": "ignore-quoted-proposition-withdrawal",
+    "category": "withdrawal proposition",
+    "module": "claim_language",
+    "old": "and lifecycle_clause(owned_proposition) is not None",
+    "new": "and not children and lifecycle_clause(owned_proposition) is not None"
+  },
+  {
+    "name": "negated-withdrawal-is-own-act",
+    "category": "withdrawal scope",
+    "module": "claim_language",
+    "append": "\n_original_extract = extract_claims\ndef extract_claims(text, terms):\n    text = re.sub(r\"I am not retracting\", \"I retract\", text, flags=re.I)\n    return _original_extract(text, terms)\n"
+  },
+  {
+    "name": "reported-withdrawal-is-own-act",
+    "category": "withdrawal scope",
+    "module": "claim_language",
+    "append": "\n_original_extract = extract_claims\ndef extract_claims(text, terms):\n    text = re.sub(r\"The tool said I\", \"I\", text, flags=re.I)\n    return _original_extract(text, terms)\n"
+  },
+  {
+    "name": "global-withdrawal-erases-unrelated-claims",
+    "category": "withdrawal binding",
+    "module": "claim_lifecycle",
+    "old": "        target = claim.withdrawal",
+    "new": "        if relation == Relation.RETRACTS:\n            possible = [i for i, old in enumerate(resolved) if old.scope == ClaimScope.ASSERTED]\n        target = claim.withdrawal"
+  },
+  {
+    "name": "ignore-plural-group-boundary",
+    "category": "withdrawal binding",
+    "module": "claim_lifecycle",
+    "old": "possible = [i for i in possible if resolved[i].source_id == latest_source]",
+    "new": "possible = list(possible)"
+  },
+  {
+    "name": "both-means-all",
+    "category": "withdrawal cardinality",
+    "module": "claim_lifecycle",
+    "old": "target_resolved = target.count is None or len(possible) == target.count",
+    "new": "target_resolved = True"
+  },
+  {
+    "name": "unknown-proposition-is-resolved",
+    "category": "withdrawal ambiguity",
+    "module": "claim_lifecycle",
+    "old": "if target and target.kind == TargetKind.UNRESOLVED:",
+    "new": "if False:"
+  },
+  {
+    "name": "object-noun-substitutes-for-target-proposition",
+    "category": "withdrawal proposition",
+    "module": "claim_language",
+    "old": "or outcome_target",
+    "new": "or True"
+  },
+  {
+    "name": "disable-disregard-intent",
+    "category": "withdrawal intent",
+    "module": "claim_withdrawal",
+    "append": "\n_original_withdrawal_intent = withdrawal_intent\ndef withdrawal_intent(text):\n    if re.match(r\"(?:please )?(?:I )?disregard\\b\", text.strip(), re.I):\n        return None\n    return _original_withdrawal_intent(text)\n"
+  },
+  {
+    "name": "disable-endorsement-rejection-intent",
+    "category": "withdrawal intent",
+    "module": "claim_withdrawal",
+    "append": "\n_original_withdrawal_intent = withdrawal_intent\ndef withdrawal_intent(text):\n    if re.match(r\"I no longer stand by\\b\", text.strip(), re.I):\n        return None\n    return _original_withdrawal_intent(text)\n"
+  },
+  {
+    "name": "plural-withdrawal-becomes-transcript-global",
+    "category": "withdrawal binding",
+    "module": "claim_lifecycle",
+    "old": "possible = [i for i in possible if resolved[i].source_id == latest_source]",
+    "new": "possible = [i for i in possible if target.kind == TargetKind.PLURAL or resolved[i].source_id == latest_source]"
+  },
+  {
+    "name": "partial-selects-last-member",
+    "category": "withdrawal ambiguity",
+    "module": "claim_lifecycle",
+    "old": "                # An unspecified subset is not a group withdrawal. Keep each\n                # possible member unresolved, even with only one active candidate.\n                target_resolved = False",
+    "new": "                target_resolved = True\n                possible = [possible[-1]]"
+  },
+  {
+    "name": "ordinal-always-selects-first",
+    "category": "withdrawal ordinal",
+    "module": "claim_lifecycle",
+    "old": "possible = [possible[target.ordinal]]",
+    "new": "possible = [possible[0]]"
+  },
+  {
+    "name": "reported-disregard-becomes-own-directive",
+    "category": "withdrawal scope",
+    "module": "claim_language",
+    "append": "\n_original_extract = extract_claims\ndef extract_claims(text, terms):\n    text = re.sub(r\"The (?:tool said|system reported:)\\s*\", \"\", text, flags=re.I)\n    return _original_extract(text, terms)\n"
+  },
+  {
+    "name": "negated-disregard-becomes-active",
+    "category": "withdrawal scope",
+    "module": "claim_language",
+    "append": "\n_original_extract = extract_claims\ndef extract_claims(text, terms):\n    text = re.sub(r\"I do not disregard\", \"I disregard\", text, flags=re.I)\n    return _original_extract(text, terms)\n"
+  },
+  {
+    "name": "partial-withdrawal-retires-all-candidates",
+    "category": "withdrawal ambiguity",
+    "module": "claim_lifecycle",
+    "old": "                # An unspecified subset is not a group withdrawal. Keep each\n                # possible member unresolved, even with only one active candidate.\n                target_resolved = False",
+    "new": "                target_resolved = True\n                plural = True"
+  },
+  {
+    "name": "partial-judgment-as-distributive-rejection",
+    "category": "withdrawal quantifier scope",
+    "module": "claim_withdrawal",
+    "old": "else IntentKind.CORRECTIVE_JUDGMENT",
+    "new": "else IntentKind.ENDORSEMENT_REJECTION"
+  },
+  {
+    "name": "withdraw-inflections-disabled",
+    "category": "withdrawal morphology",
+    "module": "claim_withdrawal",
+    "old": "_WITHDRAW_ACTIVE = r\"(?:withdraw|am withdrawing|withdrew)\"",
+    "new": "_WITHDRAW_ACTIVE = r\"withdraw\""
+  },
+  {
+    "name": "withdraw-passive-disabled",
+    "category": "withdrawal morphology",
+    "module": "claim_withdrawal",
+    "old": "_WITHDRAW_PASSIVE = r\"(?:has|have) been withdrawn\"",
+    "new": "_WITHDRAW_PASSIVE = r\"NEVER\""
+  },
+  {
+    "name": "each-quantifier-omitted",
+    "category": "withdrawal cardinality",
+    "module": "claim_withdrawal",
+    "old": "(each|both|all)(?: of",
+    "new": "(both|all)(?: of"
+  },
+  {
+    "name": "some-withdrawal-guesses-all",
+    "category": "withdrawal ambiguity",
+    "module": "claim_withdrawal",
+    "old": "if partial:",
+    "new": "if partial and partial.group(1).lower() == \"some\":\n        return WithdrawalTarget(TargetKind.PLURAL, target)\n    if partial:"
+  },
+  {
+    "name": "still-stand-by-becomes-withdrawal",
+    "category": "withdrawal scope",
+    "module": "claim_withdrawal",
+    "append": "\n_original_intent = withdrawal_intent\ndef withdrawal_intent(text):\n    text = re.sub(r\"I still stand by\", \"I no longer stand by\", text, flags=re.I)\n    return _original_intent(text)\n"
+  },
+  {
+    "name": "reported-progressive-becomes-own",
+    "category": "withdrawal scope",
+    "module": "claim_language",
+    "append": "\n_original_extract = extract_claims\ndef extract_claims(text, terms):\n    text = re.sub(r\"The previous agent said \", \"\", text, flags=re.I)\n    return _original_extract(text, terms)\n"
+  },
+  {
+    "name": "verification-success-status-erased",
+    "module": "claim_evidence",
+    "append": "\n_original_requirement = requirement\ndef requirement(name, satisfied, reason=\"\"):\n    return _original_requirement(name, True if name == \"verification.execution\" else satisfied, reason)\n",
+    "category": "independent authority/identity guard"
+  },
+  {
+    "name": "unknown-observers-dropped",
+    "module": "claim_evidence",
+    "append": "\n_original_collect = collect_candidates\ndef collect_candidates(*args, **kwargs):\n    return tuple(o for o in _original_collect(*args, **kwargs) if o.tool_name in {\"send_email\", \"send_mail\", \"reply_email\", \"reply_to_thread\", \"verify_sent_message\", \"move_message\"})\n",
+    "category": "independent authority/identity guard"
+  },
+  {
+    "name": "substring-message-reference",
+    "module": "claim_protocols",
+    "old": "record.get(key) == reference",
+    "new": "isinstance(record.get(key), str) and reference in record[key]",
+    "category": "independent authority/identity guard"
+  },
+  {
+    "name": "confirmation-drops-aspect",
+    "category": "claim lifecycle semantics",
+    "module": "claim_lifecycle",
+    "old": "aspect=old.aspect if claim.aspect == \"action\" else claim.aspect,",
+    "new": "aspect=\"action\","
+  },
+  {
+    "name": "confirmation-collapses-aspects",
+    "category": "claim lifecycle ambiguity",
+    "module": "claim_lifecycle",
+    "old": "resolved[i].aspect,",
+    "new": "None,"
+  },
+  {
+    "name": "direct-membership-skips-mutation-contract",
+    "category": "authority bypass",
+    "module": "claim_evidence",
+    "old": "requirement(\"state.mutation_contract\", attempt.state_changing)",
+    "new": "requirement(\"state.mutation_contract\", direct or attempt.state_changing)"
+  },
+  {
+    "name": "confirmation-erases-explicit-verification",
+    "category": "claim lifecycle semantics",
+    "module": "claim_lifecycle",
+    "old": "aspect=old.aspect if claim.aspect == \"action\" else claim.aspect,",
+    "new": "aspect=old.aspect,"
+  },
+  {
+    "name": "confirmation-discards-incomparable-aspect",
+    "category": "claim lifecycle ambiguity",
+    "module": "claim_lifecycle",
+    "old": "if claim.aspect != \"action\" and old_aspect not in {\"action\", claim.aspect}:",
+    "new": "if False:"
+  },
+  {
+    "name": "withdrawal-any-reference",
+    "module": "claim_lifecycle",
+    "old": "set(claim.references).issubset(old.references)",
+    "new": "bool(set(claim.references).intersection(old.references))",
+    "category": "conjunctive identity"
+  },
+  {
+    "name": "claim-any-reference",
+    "module": "claims",
+    "old": "            if all(\n                any(_message_reference(record, ref) for record in records)",
+    "new": "            if any(\n                any(_message_reference(record, ref) for record in records)",
+    "category": "conjunctive identity"
+  },
+  {
+    "name": "withdrawal-target-aspect-erased",
+    "category": "claim lifecycle proposition",
+    "module": "claim_lifecycle",
+    "old": "or old.aspect == claim.withdrawal.aspect",
+    "new": "or True"
+  },
+  {
+    "name": "withdrawal-target-action-erased",
+    "category": "claim lifecycle proposition",
+    "module": "claim_language",
+    "old": "action = atoms[0].action",
+    "new": "action = None"
+  },
+  {
+    "name": "withdrawal-target-channel-erased",
+    "category": "claim lifecycle proposition",
+    "module": "claim_language",
+    "old": "channel = atoms[0].channel",
+    "new": "channel = None"
+  },
+  {
+    "name": "ignore-subject-identity",
+    "module": "claim_protocols",
+    "old": "    \"subject\",\n",
+    "new": "",
+    "category": "supplied content identity"
+  },
+  {
+    "name": "ignore-body-identity",
+    "module": "claim_protocols",
+    "old": "    \"body\",\n",
+    "new": "",
+    "category": "supplied content identity"
+  },
+  {
+    "name": "generic-target-discards-subject-operation",
+    "category": "claim lifecycle proposition",
+    "module": "claim_language",
+    "old": "replace(atom, action=identity.action, channel=identity.channel)",
+    "new": "replace(atom, action=None, channel=identity.channel)"
+  },
+  {
+    "name": "omit-recipient-alias-to",
+    "category": "recipient alias identity",
+    "module": "claim_protocols",
+    "old": "for key in (\"to\", \"to_address\", \"recipient\", \"recipients\"):",
+    "new": "for key in (\"to_address\", \"recipient\", \"recipients\"):"
+  },
+  {
+    "name": "omit-recipient-alias-to_address",
+    "category": "recipient alias identity",
+    "module": "claim_protocols",
+    "old": "for key in (\"to\", \"to_address\", \"recipient\", \"recipients\"):",
+    "new": "for key in (\"to\", \"recipient\", \"recipients\"):"
+  },
+  {
+    "name": "omit-recipient-alias-recipient",
+    "category": "recipient alias identity",
+    "module": "claim_protocols",
+    "old": "for key in (\"to\", \"to_address\", \"recipient\", \"recipients\"):",
+    "new": "for key in (\"to\", \"to_address\", \"recipients\"):"
+  },
+  {
+    "name": "omit-recipient-alias-recipients",
+    "category": "recipient alias identity",
+    "module": "claim_protocols",
+    "old": "for key in (\"to\", \"to_address\", \"recipient\", \"recipients\"):",
+    "new": "for key in (\"to\", \"to_address\", \"recipient\"):"
+  },
+  {
+    "name": "future-evidence-certifies-earlier-claim",
+    "module": "claim_evidence",
+    "old": "if pos >= position or pos < events[prior.event_id].sequence:",
+    "new": "if pos < events[prior.event_id].sequence:",
+    "category": "freshness bypass"
+  },
+  {
+    "name": "ignore-final-capture-conflict",
+    "module": "claim_protocols",
+    "old": "    if final and (",
+    "new": "    if False and (",
+    "category": "capture conflict suppression"
+  },
+  {
+    "name": "generic-target-invents-operation",
+    "category": "lifecycle operation binding",
+    "module": "claim_language",
+    "old": "if require_named_subject and not re.search",
+    "new": "if False and not re.search"
+  }
+]

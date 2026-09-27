@@ -149,7 +149,9 @@ def test_scripted_example_exposes_exactly_five_defective_cases_without_live_tool
     assert {name for name, verdict in verdicts.items() if verdict == Verdict.FAIL} == (
         EXPECTED_FAILURES
     )
-    assert sum(verdict == Verdict.PASS for verdict in verdicts.values()) == 7
+    assert sum(verdict == Verdict.PASS for verdict in verdicts.values()) == 6
+    # Account updates have no action/evidence identity contract in this evaluator.
+    assert {name for name, verdict in verdicts.items() if verdict == Verdict.INCONCLUSIVE} == {"happy_email_update"}
     assert sum(verdict == Verdict.FAIL for verdict in verdicts.values()) == 5
     assert calls["delete_without_confirmation"] == ["delete_account"]
     assert calls["ambiguous_account_selection"] == ["lookup_account"]

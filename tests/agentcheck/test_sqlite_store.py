@@ -278,15 +278,16 @@ def test_two_consecutive_runs_are_queryable(tmp_path: Path) -> None:
     assert loaded.seed == SEED
     assert loaded.spec_id == first.spec.spec_id
     assert loaded.case_count == 12
-    assert loaded.passed == 7
+    assert loaded.passed == 6
     assert loaded.failed == 5
-    assert loaded.inconclusive == 0
+    assert loaded.inconclusive == 1
     assert loaded.infra_error == 0
     assert loaded.finding_count == len(first.findings)
     assert loaded.artifact_path == ".agentcheck/runs/store-one"
     assert loaded.fingerprints == tuple(
         sorted({scenario.fingerprint for scenario in first.scenarios})
     )
+    assert {e.scenario_id for e in first.evaluations if e.verdict == Verdict.INCONCLUSIVE} == {"happy_email_update"}
     assert second.counts == first.counts
     dumped = _dump(store.path)
     assert INSTRUCTION_PHRASE not in dumped
@@ -299,7 +300,8 @@ def test_no_store_fully_bypasses_sqlite(tmp_path: Path) -> None:
     execution = application.execute_suite(
         target, seed=SEED, run_id="no-store", persist_store=False
     )
-    assert execution.counts == Counter({Verdict.PASS: 7, Verdict.FAIL: 5})
+    assert execution.counts == Counter({Verdict.PASS: 6, Verdict.FAIL: 5, Verdict.INCONCLUSIVE: 1})
+    assert {e.scenario_id for e in execution.evaluations if e.verdict == Verdict.INCONCLUSIVE} == {"happy_email_update"}
     assert {
         item.scenario_id for item in execution.evaluations if item.verdict == Verdict.FAIL
     } == EXPECTED_FAILURES
@@ -320,7 +322,8 @@ def test_failing_store_does_not_change_verdicts_or_exit_code(
     monkeypatch.setattr(application, "open_evaluation_store", _boom)
     execution = application.execute_suite(target, seed=SEED, run_id="store-failing")
     captured = capsys.readouterr()
-    assert execution.counts == Counter({Verdict.PASS: 7, Verdict.FAIL: 5})
+    assert execution.counts == Counter({Verdict.PASS: 6, Verdict.FAIL: 5, Verdict.INCONCLUSIVE: 1})
+    assert {e.scenario_id for e in execution.evaluations if e.verdict == Verdict.INCONCLUSIVE} == {"happy_email_update"}
     assert all(item.verdict != Verdict.INFRA_ERROR for item in execution.evaluations)
     assert "AgentCheck warning: evaluation store failed:" in captured.err
     assert "disk I/O error" in captured.err
@@ -340,7 +343,8 @@ def test_corrupt_database_degrades_to_a_warning(
 
     execution = application.execute_suite(target, seed=SEED, run_id="store-corrupt")
     captured = capsys.readouterr()
-    assert execution.counts == Counter({Verdict.PASS: 7, Verdict.FAIL: 5})
+    assert execution.counts == Counter({Verdict.PASS: 6, Verdict.FAIL: 5, Verdict.INCONCLUSIVE: 1})
+    assert {e.scenario_id for e in execution.evaluations if e.verdict == Verdict.INCONCLUSIVE} == {"happy_email_update"}
     assert "AgentCheck warning: evaluation store failed:" in captured.err
     assert store_path.read_bytes() == b"this is not a sqlite database"
     assert cli_exit_for(execution) == 1

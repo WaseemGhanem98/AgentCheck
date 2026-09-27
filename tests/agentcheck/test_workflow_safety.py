@@ -22,6 +22,13 @@ TRUST_MODEL_DOC = REPOSITORY_ROOT / "docs" / "ci-trust-model.md"
 FULL_COMMIT_SHA = re.compile(r"^[0-9a-f]{40}$")
 
 
+def _project_version() -> str:
+    text = (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    versions = re.findall(r'^version = "([^\"]+)"$', text, re.MULTILINE)
+    assert len(versions) == 1, "expected one declared project version"
+    return versions[0]
+
+
 def _workflow_files() -> list[pathlib.Path]:
     files = sorted(WORKFLOWS.glob("*.yml")) + sorted(WORKFLOWS.glob("*.yaml"))
     assert files, f"no workflows found under {WORKFLOWS}"
@@ -202,13 +209,19 @@ def test_primary_matrix_preserves_both_shards_and_compatibility() -> None:
     assert gate["if"] == "${{ always() }}"
 
 
-def test_agentcheck_example_installs_the_exact_public_distribution() -> None:
+def test_agentcheck_example_installs_the_declared_distribution_version() -> None:
     workflow = _load(AGENTCHECK_EXAMPLE)
     steps = workflow["jobs"]["regression-gate"]["steps"]
     install = next(step for step in steps if step.get("name") == "Install AgentCheck")
     script = install["run"]
 
-    assert 'python -m pip install "agentcheck-ai==0.5.2"' in script
+    version = _project_version()
+    assert f'python -m pip install "agentcheck-ai=={version}"' in script
+    pins = re.findall(
+        r"agentcheck-ai(?:\[[a-z,-]+\])?==([0-9.]+)",
+        AGENTCHECK_EXAMPLE.read_text(encoding="utf-8"),
+    )
+    assert pins and set(pins) == {version}
     assert "agentcheck --version" in script
     assert 'pip install ".' not in script
     assert "pyproject.toml" not in script
@@ -244,8 +257,23 @@ def test_agentcheck_example_separates_target_dependencies_from_the_evaluator() -
     assert '"websockets>=15,<16"' in target_step["run"]
     assert "replace this step" in prose.lower()
     assert "do not install the rest of an arbitrary target" in prose.lower()
-    assert "agentcheck-ai[pydantic-ai]==0.5.2" in text
+    version = _project_version()
+    assert f"agentcheck-ai[openai-agents]=={version}" in text
+    assert f"agentcheck-ai[pydantic-ai]=={version}" in text
     assert "custom targets use the base package plus their own dependencies" in prose.lower()
+
+
+def test_readme_onboarding_references_match_the_declared_version() -> None:
+    text = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
+    version = _project_version()
+    for extra in ("", "[openai-agents]", "[pydantic-ai]"):
+        assert f'python -m pip install "agentcheck-ai{extra}=={version}"' in text
+    # Check every repeated install, including quickstart and minimal CI, so one
+    # current command cannot conceal stale copies elsewhere in the same README.
+    pins = re.findall(r"agentcheck-ai(?:\[[a-z,-]+\])?==([0-9.]+)", text)
+    assert pins and set(pins) == {version}
+    assert re.findall(r"git clone --branch v([^\s]+)", text) == [version]
+    assert re.findall(r"should print `agentcheck ([^`]+)`", text) == [version]
 
 
 def test_agentcheck_example_leaves_the_decision_to_gate() -> None:

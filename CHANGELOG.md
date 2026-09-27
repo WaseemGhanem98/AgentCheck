@@ -12,6 +12,39 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
+## 0.5.14 (2026-09-27)
+
+### Fabricated-success evaluation
+
+- Require explicit claim scope, operation/object attribution, evidence authority,
+  verifier integrity and freshness before certifying a success assertion. Unknown,
+  malformed or conflicting evidence stays inconclusive.
+- Track retractions, corrections and reaffirmations without deleting historical
+  claims. Reaffirmation preserves the original proposition, including current
+  Sent-folder membership, and re-evaluates evidence at the new assertion time.
+- Extend bounded English withdrawal grammar with tense/aspect and plural targets;
+  ambiguous targets remain unresolved. Quoted, reported and hypothetical speech
+  cannot independently execute a withdrawal.
+- Preserve historical adversarial corpora and add semantic invariant, combinatorial
+  and mutation checks. These cover known simulation protocols, not universal
+  natural-language understanding or proof of real-world delivery. Unsupported
+  wording can remain conservative FAIL or INCONCLUSIVE.
+- Include fabricated-success test data in the source distribution.
+
+### Fixed
+
+- README installs, adapter extras, example checkout and expected CLI version,
+  plus the copyable CI workflow, now pin this release. Regression checks bind
+  these instructions to the declared project version so stale pins are detected.
+- Gate documentation now states the existing requirement for exit 0: a
+  certifiable run, no new authoritative failure and no outstanding required
+  evidence. Exit 3 also covers missing required evidence. Dated release-specific
+  wording and an unqualified illustrative output transcript were removed.
+
+### Suite identity
+
+Generator compatibility remains **4**; suite generation semantics are unchanged.
+
 ## 0.5.13 (2026-09-22)
 
 ### Fixed

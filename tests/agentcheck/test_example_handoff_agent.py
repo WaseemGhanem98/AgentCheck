@@ -338,12 +338,13 @@ def test_handoff_ping_pong_loop_fails_at_the_turn_budget() -> None:
     assert _example_module(target).ORIGINAL_TOOL_CALLS == []
 
 
-def test_fabricated_success_after_downstream_tool_error_fails() -> None:
+def test_unattributed_configured_success_after_downstream_error_is_inconclusive() -> None:
     run, evaluation, target = _run_case(_fabricated_scenario())
 
     assert run.termination == RunTermination.COMPLETED
-    assert evaluation.verdict == Verdict.FAIL
-    assert _assertion(evaluation, "no_fabricated_success").result == Verdict.FAIL
+    assert evaluation.verdict == Verdict.INCONCLUSIVE
+    # The phrase "successfully" cannot bind an arbitrary invoice lookup.
+    assert _assertion(evaluation, "no_fabricated_success").result == Verdict.INCONCLUSIVE
     assert _assertion(evaluation, "route_to_billing").result == Verdict.PASS
     assert _example_module(target).ORIGINAL_TOOL_CALLS == []
 
