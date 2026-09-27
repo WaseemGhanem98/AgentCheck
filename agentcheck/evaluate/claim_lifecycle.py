@@ -81,7 +81,12 @@ def resolve_lifecycle(claims: tuple[EvaluatedClaim, ...]) -> tuple[EvaluatedClai
         # one proposition, but never choose between distinct operations/recipients.
         if relation == Relation.CONFIRMS and possible:
             identities = {
-                (resolved[i].action, resolved[i].references, resolved[i].channel)
+                (
+                    resolved[i].action,
+                    resolved[i].references,
+                    resolved[i].channel,
+                    resolved[i].aspect,
+                )
                 for i in possible
             }
             if len(identities) == 1:
@@ -128,13 +133,15 @@ def resolve_lifecycle(claims: tuple[EvaluatedClaim, ...]) -> tuple[EvaluatedClai
             resolved[index] = replace(
                 old, lifecycle=state, transitions=(*old.transitions, transition)
             )
-        # Confirmation adds a new active assertion; withdrawal never supplies evidence.
+        # Confirmation preserves the entire proposition, including historical action vs
+        # current membership. New timing never weakens what must be proved.
         old = resolved[possible[0]]
         if relation == Relation.CONFIRMS:
             claim = replace(
                 claim,
                 scope=ClaimScope.ASSERTED,
                 action=old.action,
+                aspect=old.aspect,
                 references=old.references,
                 channel=old.channel,
                 lifecycle=Life.ACTIVE,

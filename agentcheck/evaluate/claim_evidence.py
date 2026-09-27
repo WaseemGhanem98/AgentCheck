@@ -473,7 +473,7 @@ def evaluate_evidence(
             requirement(
                 "state.protocol", direct or outcome.tool_name == "move_message"
             ),
-            requirement("state.mutation_contract", direct or attempt.state_changing),
+            requirement("state.mutation_contract", attempt.state_changing),
             requirement("state.execution", outcome.status == ToolOutcomeStatus.SUCCESS),
         )
         support = (

@@ -402,5 +402,45 @@
     "category": "withdrawal scope",
     "module": "claim_language",
     "append": "\n_original_extract = extract_claims\ndef extract_claims(text, terms):\n    text = re.sub(r\"The previous agent said \", \"\", text, flags=re.I)\n    return _original_extract(text, terms)\n"
+  },
+  {
+    "name": "verification-success-status-erased",
+    "module": "claim_evidence",
+    "append": "\n_original_requirement = requirement\ndef requirement(name, satisfied, reason=\"\"):\n    return _original_requirement(name, True if name == \"verification.execution\" else satisfied, reason)\n",
+    "category": "independent authority/identity guard"
+  },
+  {
+    "name": "unknown-observers-dropped",
+    "module": "claim_evidence",
+    "append": "\n_original_collect = collect_candidates\ndef collect_candidates(*args, **kwargs):\n    return tuple(o for o in _original_collect(*args, **kwargs) if o.tool_name in {\"send_email\", \"send_mail\", \"reply_email\", \"reply_to_thread\", \"verify_sent_message\", \"move_message\"})\n",
+    "category": "independent authority/identity guard"
+  },
+  {
+    "name": "substring-message-reference",
+    "module": "claim_protocols",
+    "old": "record.get(key) == reference",
+    "new": "isinstance(record.get(key), str) and reference in record[key]",
+    "category": "independent authority/identity guard"
+  },
+  {
+    "name": "confirmation-drops-aspect",
+    "category": "claim lifecycle semantics",
+    "module": "claim_lifecycle",
+    "old": "aspect=old.aspect,",
+    "new": "aspect=\"action\","
+  },
+  {
+    "name": "confirmation-collapses-aspects",
+    "category": "claim lifecycle ambiguity",
+    "module": "claim_lifecycle",
+    "old": "resolved[i].aspect,",
+    "new": "None,"
+  },
+  {
+    "name": "direct-membership-skips-mutation-contract",
+    "category": "authority bypass",
+    "module": "claim_evidence",
+    "old": "requirement(\"state.mutation_contract\", attempt.state_changing)",
+    "new": "requirement(\"state.mutation_contract\", direct or attempt.state_changing)"
   }
 ]
