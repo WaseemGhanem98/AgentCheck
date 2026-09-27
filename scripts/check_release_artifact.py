@@ -47,6 +47,15 @@ PYDANTIC_INSTRUCTION_CASES = (
 )
 CUSTOM_MANIFEST_CASES = ("custom-mcp-manifest-refusal",)
 OPENAI_MANIFEST_CASES = ("openai-mcp-manifest-refusal",)
+FABRICATED_SUCCESS_EXPECTATIONS = (
+    ("review_5d4d1fe.json", "membership-confirm", "FAIL"),
+    ("review_5d4d1fe.json", "valid-membership-confirm", "PASS"),
+    ("review_5d4d1fe.json", "direct-membership-changing-False", "INCONCLUSIVE"),
+    ("review_5d4d1fe.json", "substring-message-reference", "FAIL"),
+    ("review_ffb8dcc.json", "explicit-new-verification-0", "INCONCLUSIVE"),
+    ("review_ffb8dcc.json", "explicit-new-verification-1", "PASS"),
+)
+FABRICATED_SUCCESS_CASES = tuple(case for _, case, _ in FABRICATED_SUCCESS_EXPECTATIONS)
 SCRIPT = Path(__file__).resolve()
 
 
@@ -990,8 +999,37 @@ def unsupported_manifest_smoke(extra: str) -> list[str]:
     return completed
 
 
+def fabricated_success_smoke() -> list[str]:
+    # Only canonical JSON comes from the reviewed release checkout. All executable
+    # evaluator/model code imports from the origin-checked installed wheel; never
+    # add the checkout to sys.path or import its tests to reconstruct these cases.
+    from agentcheck.domain import CanonicalRun, Scenario
+    from agentcheck.evaluate import evaluate_run
+
+    fixtures = SCRIPT.parent.parent / "tests/fixtures/fabricated_success"
+    corpora = {
+        filename: json.loads((fixtures / filename).read_text(encoding="utf-8"))["cases"]
+        for filename in dict.fromkeys(row[0] for row in FABRICATED_SUCCESS_EXPECTATIONS)
+    }
+    completed = []
+    for filename, case_id, expected in FABRICATED_SUCCESS_EXPECTATIONS:
+        matches = [case for case in corpora[filename] if case["id"] == case_id]
+        require(len(matches) == 1, f"fabricated success {case_id}: missing or duplicate fixture")
+        case = matches[0]
+        scenario = Scenario.model_validate_json(json.dumps(case["scenario"]))
+        record = CanonicalRun.model_validate_json(json.dumps(case["run"]))
+        verdict = evaluate_run(scenario, record).verdict.value
+        # Historical allowed sets sometimes include multiple verdicts. The release
+        # contract intentionally pins one outcome instead of trusting those sets.
+        require(verdict == expected,
+                f"fabricated success {case_id}: expected {expected}, found {verdict}")
+        completed.append(case_id)
+    return completed
+
+
 def expected_semantic_cases(extra: str) -> list[str]:
-    return [*SEMANTIC_CASES, *(PYDANTIC_INSTRUCTION_CASES if extra == "pydantic-ai" else ()),
+    return [*SEMANTIC_CASES, *FABRICATED_SUCCESS_CASES,
+            *(PYDANTIC_INSTRUCTION_CASES if extra == "pydantic-ai" else ()),
             *CUSTOM_MANIFEST_CASES, *(OPENAI_MANIFEST_CASES if extra == "openai-agents" else ())]
 
 
@@ -1009,6 +1047,7 @@ def installed_probe(
     install_network_guard(allow_network=False)
     check_frameworks(extra)
     cases = semantic_smoke()
+    cases.extend(fabricated_success_smoke())
     if extra == "pydantic-ai":
         cases.extend(pydantic_instruction_smoke())
     cases.extend(unsupported_manifest_smoke(extra))

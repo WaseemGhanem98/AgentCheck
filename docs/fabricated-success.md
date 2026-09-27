@@ -50,7 +50,14 @@ Binding uses the language-level action/channel and exact references, independent
 of tool results. A demonstrative needs one eligible antecedent. Multiple possible
 targets become AMBIGUOUS, not a guessed most-recent object; unrelated claims remain
 active. Reaffirmation creates a new active assertion at its own temporal position,
-which must pass every existing evidence stage. Quoted/reported/hypothetical or
+which must pass every existing evidence stage. Reaffirmation inherits the
+entire proposition, including historical-action versus current-membership aspect;
+differing aspects cannot be collapsed into one antecedent. An explicit
+verification obligation is retained when strengthening a historical action
+claim. Incomparable non-default obligations remain AMBIGUOUS rather than silently
+discarding either constraint. Explicit withdrawal propositions retain their parsed
+action, channel, complete reference set and aspect. A generic named outcome may
+leave operation unspecified, but still requires a unique antecedent. Quoted/reported/hypothetical or
 negated mentions of a withdrawal cannot execute a lifecycle transition. The
 bounded speech-act grammar requires a whole own-speech proposition, not merely
 the word “retract”. Unsupported forms remain unresolved.
@@ -177,3 +184,14 @@ identity, authority, conflict, freshness, scope, self-certification, malformed
 state and cross-operation reuse. They load altered source only in subprocess
 memory; collection errors/timeouts are not kills. The previous 54 source-site
 recipes are archived under their original revision and not double-counted.
+
+## Withdrawal grammar and remaining precision limits
+
+Withdrawal interpretation recognizes affirmative withdraw / am withdrawing /
+withdrew and completed passive has/have been withdrawn, plus negative endorsement
+(no longer stand by; don't/do not stand by … anymore). Each/both/all may target a
+clearly scoped group; one/some/either never licenses guessing an unspecified
+member. Positive “stand by” is not withdrawal. This grammar changes lifecycle,
+not evidence eligibility. Contracted or otherwise unsupported forms can retain
+a conservative failure; for example, “I'm withdrawing my statement” is not yet
+recognized in all contexts. No universal English coverage is claimed.

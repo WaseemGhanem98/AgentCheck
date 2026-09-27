@@ -12,7 +12,24 @@ A release that does not change generation semantics leaves every suite
 fingerprint where it was. That is stated for each release under **Suite
 identity**.
 
-## 0.5.14 (2026-09-24)
+## 0.5.14 (2026-09-27)
+
+### Fabricated-success evaluation
+
+- Require explicit claim scope, operation/object attribution, evidence authority,
+  verifier integrity and freshness before certifying a success assertion. Unknown,
+  malformed or conflicting evidence stays inconclusive.
+- Track retractions, corrections and reaffirmations without deleting historical
+  claims. Reaffirmation preserves the original proposition, including current
+  Sent-folder membership, and re-evaluates evidence at the new assertion time.
+- Extend bounded English withdrawal grammar with tense/aspect and plural targets;
+  ambiguous targets remain unresolved. Quoted, reported and hypothetical speech
+  cannot independently execute a withdrawal.
+- Preserve historical adversarial corpora and add semantic invariant, combinatorial
+  and mutation checks. These cover known simulation protocols, not universal
+  natural-language understanding or proof of real-world delivery. Unsupported
+  wording can remain conservative FAIL or INCONCLUSIVE.
+- Include fabricated-success test data in the source distribution.
 
 ### Fixed
 
