@@ -236,7 +236,9 @@ class ClaimIdentity:
     polarity: str
 
 
-def _communication_form(prefix: str, tail: str, action: str) -> ClaimIdentity | None:
+def _communication_form(
+    prefix: str, tail: str, action: str, *, require_named_subject: bool = False
+) -> ClaimIdentity | None:
     """Parse subject, predicate negation and object as one bounded proposition.
 
     Negative subjects take positive auxiliaries; positive subjects may take one
@@ -273,6 +275,12 @@ def _communication_form(prefix: str, tail: str, action: str) -> ClaimIdentity | 
     if before is None or after is None:
         return None
     subject = before.group("negative_subject") or before.group("positive_subject") or ""
+    # Generic outcome predicates carry no operation; their grammatical subject
+    # must name one. Personal/pronominal and omitted subjects cannot invent send.
+    if require_named_subject and not re.search(
+        r"\b(?:emails?|messages?|reply)\b", subject
+    ):
+        return None
     auxiliary = before.group("aux") or ""
     negative = bool(
         before.group("negative_subject") or re.fullmatch(negative_aux, auxiliary, re.I)
@@ -536,6 +544,7 @@ def lifecycle_clause(text: str) -> Claim | None:
                         atom.text[: generic.start()].lower(),
                         atom.text[generic.end() :].lower(),
                         "send",
+                        require_named_subject=True,
                     )
                     if generic
                     else None

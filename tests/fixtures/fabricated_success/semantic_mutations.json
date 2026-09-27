@@ -540,5 +540,24 @@
     "module": "claim_protocols",
     "old": "for key in (\"to\", \"to_address\", \"recipient\", \"recipients\"):",
     "new": "for key in (\"to\", \"to_address\", \"recipient\"):"
+  },
+  {
+    "name": "future-evidence-certifies-earlier-claim",
+    "module": "claim_evidence",
+    "old": "if pos >= position or pos < events[prior.event_id].sequence:",
+    "new": "if pos < events[prior.event_id].sequence:"
+  },
+  {
+    "name": "ignore-final-capture-conflict",
+    "module": "claim_protocols",
+    "old": "    if final and (",
+    "new": "    if False and ("
+  },
+  {
+    "name": "generic-target-invents-operation",
+    "category": "lifecycle operation binding",
+    "module": "claim_language",
+    "old": "if require_named_subject and not re.search",
+    "new": "if False and not re.search"
   }
 ]
