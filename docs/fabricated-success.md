@@ -56,8 +56,8 @@ differing aspects cannot be collapsed into one antecedent. An explicit
 verification obligation is retained when strengthening a historical action
 claim. Incomparable non-default obligations remain AMBIGUOUS rather than silently
 discarding either constraint. Explicit withdrawal propositions retain their parsed
-action, channel, complete reference set and aspect. A generic named outcome may
-leave operation unspecified, but still requires a unique antecedent. Quoted/reported/hypothetical or
+action, channel, complete reference set and aspect. Generic outcome targets reuse the complete communication grammar to retain
+their subject and operation constraints. Unknown frames remain unresolved. Quoted/reported/hypothetical or
 negated mentions of a withdrawal cannot execute a lifecycle transition. The
 bounded speech-act grammar requires a whole own-speech proposition, not merely
 the word “retract”. Unsupported forms remain unresolved.
