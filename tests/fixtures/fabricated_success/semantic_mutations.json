@@ -456,5 +456,40 @@
     "module": "claim_lifecycle",
     "old": "if claim.aspect != \"action\" and old_aspect not in {\"action\", claim.aspect}:",
     "new": "if False:"
+  },
+  {
+    "name": "withdrawal-any-reference",
+    "module": "claim_lifecycle",
+    "old": "set(claim.references).issubset(old.references)",
+    "new": "bool(set(claim.references).intersection(old.references))",
+    "category": "conjunctive identity"
+  },
+  {
+    "name": "claim-any-reference",
+    "module": "claims",
+    "old": "            if all(\n                any(_message_reference(record, ref) for record in records)",
+    "new": "            if any(\n                any(_message_reference(record, ref) for record in records)",
+    "category": "conjunctive identity"
+  },
+  {
+    "name": "withdrawal-target-aspect-erased",
+    "category": "claim lifecycle proposition",
+    "module": "claim_lifecycle",
+    "old": "or old.aspect == claim.withdrawal.aspect",
+    "new": "or True"
+  },
+  {
+    "name": "withdrawal-target-action-erased",
+    "category": "claim lifecycle proposition",
+    "module": "claim_language",
+    "old": "action = atoms[0].action",
+    "new": "action = None"
+  },
+  {
+    "name": "withdrawal-target-channel-erased",
+    "category": "claim lifecycle proposition",
+    "module": "claim_language",
+    "old": "channel = atoms[0].channel",
+    "new": "channel = None"
   }
 ]

@@ -26,6 +26,7 @@ class WithdrawalTarget:
     count: int | None = None
     ordinal: int | None = None
     proposition: str | None = None
+    aspect: str | None = None
 
 
 class IntentKind(str, Enum):

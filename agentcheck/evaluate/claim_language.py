@@ -506,6 +506,7 @@ def lifecycle_clause(text: str) -> Claim | None:
     polarity = "abstention"
     speech = "control"
     aspect = "action"
+    channel = "email" if action in {"send", "reply"} else None
     if withdrawal:
         relation = withdrawal.relation
         if target_spec and target_spec.kind == TargetKind.PROPOSITION:
@@ -522,7 +523,19 @@ def lifecycle_clause(text: str) -> Claim | None:
                 and atoms[0].polarity == "positive"
                 and atoms[0].speech == "factual"
             )
-            if not (references or action) or not (
+            named_subject = bool(references or action)
+            if outcome_target:
+                # Bind the parsed proposition, not object-noun guesses. Preserve
+                # operation, all references, channel and outcome aspect together.
+                action = atoms[0].action
+                references = atoms[0].references
+                channel = atoms[0].channel
+                target_spec = replace(target_spec, aspect=atoms[0].aspect)
+            # Generic outcomes (for example, "message was delivered") may
+            # name a discourse target without specifying a send/reply operation.
+            # Leave that operation unspecified; the binder must find one unique
+            # antecedent rather than restoring the old object-noun guess.
+            if not (references or action or (outcome_target and named_subject)) or not (
                 _REFERENCE.fullmatch(proposition) or outcome_target
             ):
                 target_spec = replace(target_spec, kind=TargetKind.UNRESOLVED)
@@ -564,7 +577,7 @@ def lifecycle_clause(text: str) -> Claim | None:
         False,
         references,
         aspect,
-        "email" if action in {"send", "reply"} else None,
+        channel if withdrawal else ("email" if action in {"send", "reply"} else None),
         speech,
         relation,
         target_spec,

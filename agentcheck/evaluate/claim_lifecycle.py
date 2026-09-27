@@ -48,6 +48,11 @@ def resolve_lifecycle(claims: tuple[EvaluatedClaim, ...]) -> tuple[EvaluatedClai
             and (not claim.references or set(claim.references).issubset(old.references))
             and (claim.action is None or claim.action == old.action)
             and (claim.channel is None or old.channel == claim.channel)
+            and (
+                claim.withdrawal is None
+                or claim.withdrawal.aspect is None
+                or old.aspect == claim.withdrawal.aspect
+            )
         ]
         target = claim.withdrawal
         plural = False
