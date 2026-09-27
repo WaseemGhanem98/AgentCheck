@@ -202,12 +202,14 @@ def test_offline_cli_runs_complete_phase1_flow_with_intercepted_tools(
 
     assert execution.returncode == 1, execution.stderr
     assert execution.stderr == ""
-    assert len(
-        re.findall(r"^\[\d+/12\].+\sPASS$", execution.stdout, flags=re.MULTILINE)
-    ) == 7
-    assert len(
-        re.findall(r"^\[\d+/12\].+\sFAIL$", execution.stdout, flags=re.MULTILINE)
-    ) == 5
+    assert (
+        len(re.findall(r"^\[\d+/12\].+\sPASS$", execution.stdout, flags=re.MULTILINE))
+        == 6
+    )
+    assert (
+        len(re.findall(r"^\[\d+/12\].+\sFAIL$", execution.stdout, flags=re.MULTILINE))
+        == 5
+    )
     stages = (
         "Inspecting agent...",
         "Inspection complete. ✓",
@@ -220,10 +222,10 @@ def test_offline_cli_runs_complete_phase1_flow_with_intercepted_tools(
     assert positions == sorted(positions)
     assert "\r" not in execution.stdout
     assert "\x1b" not in execution.stdout
-    assert "Observed suite pass rate: 58.3%" in execution.stdout
-    assert "Passed:        7" in execution.stdout
+    assert "Observed suite pass rate: 50.0%" in execution.stdout
+    assert "Passed:        6" in execution.stdout
     assert "Failed:        5" in execution.stdout
-    assert "Inconclusive:  0" in execution.stdout
+    assert "Inconclusive:  1" in execution.stdout
     assert "Infra errors:  0" in execution.stdout
     assert "Declared behavioral coverage:" in execution.stdout
     coverage_output = execution.stdout.split("Declared behavioral coverage:", 1)[1]
@@ -293,12 +295,33 @@ def test_offline_cli_runs_complete_phase1_flow_with_intercepted_tools(
     )
 
     counts = Counter(evaluation.verdict for evaluation in evaluations)
-    assert counts == Counter({Verdict.PASS: 7, Verdict.FAIL: 5})
+    assert counts == Counter(
+        {Verdict.PASS: 6, Verdict.FAIL: 5, Verdict.INCONCLUSIVE: 1}
+    )
     assert {
         evaluation.scenario_id
         for evaluation in evaluations
         if evaluation.verdict == Verdict.FAIL
     } == EXPECTED_FAILURES
+    # A successful account mutation does not supply a supported communication
+    # operation identity. Keep that conservative boundary visible in CLI artifacts.
+    inconclusive = [e for e in evaluations if e.verdict == Verdict.INCONCLUSIVE]
+    assert [e.scenario_id for e in inconclusive] == ["happy_email_update"]
+    account_update = inconclusive[0]
+    assert [
+        (a.assertion_id, a.result)
+        for a in account_update.assertions
+        if a.result != Verdict.PASS
+    ] == [("happy_email_update:output", Verdict.INCONCLUSIVE)]
+    traces = [
+        e.data["semantic_trace"]
+        for e in account_update.evidence
+        if "semantic_trace" in e.data
+    ]
+    assert len(traces) == 1
+    assert traces[0]["claim"]["identity"] == "unresolved"
+    assert traces[0]["claim"]["operation"] is None
+    assert traces[0]["binding"] == "unresolved"
     assert all(evaluation.infrastructure_error is None for evaluation in evaluations)
     assert all(
         any(
@@ -343,11 +366,11 @@ def test_offline_cli_runs_complete_phase1_flow_with_intercepted_tools(
         "git_revision": None,
         "suite_size": 12,
         "invalid_scenarios": 0,
-        "observed_suite_pass_rate": 7 / 12,
+        "observed_suite_pass_rate": 6 / 12,
         "counts": {
-            "PASS": 7,
+            "PASS": 6,
             "FAIL": 5,
-            "INCONCLUSIVE": 0,
+            "INCONCLUSIVE": 1,
             "INFRA_ERROR": 0,
         },
         "finding_count": 5,
@@ -367,9 +390,9 @@ def test_offline_cli_runs_complete_phase1_flow_with_intercepted_tools(
     assert "Content-Security-Policy" in report
     assert "<script" not in report.casefold()
     assert "https://" not in report
-    assert "<span>Passed</span><strong>7</strong>" in report
+    assert "<span>Passed</span><strong>6</strong>" in report
     assert "<span>Failed</span><strong>5</strong>" in report
-    assert "<span>Inconclusive</span><strong>0</strong>" in report
+    assert "<span>Inconclusive</span><strong>1</strong>" in report
     assert "<span>Infra errors</span><strong>0</strong>" in report
     assert "Raw system instructions are hidden by default." in report
     assert all(scenario.scenario_id in report for scenario in scenarios)
