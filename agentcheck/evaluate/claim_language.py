@@ -523,7 +523,29 @@ def lifecycle_clause(text: str) -> Claim | None:
                 and atoms[0].polarity == "positive"
                 and atoms[0].speech == "factual"
             )
-            named_subject = bool(references or action)
+            if outcome_target and atoms[0].action is None:
+                # Generic outcomes still carry a grammatical subject. Reuse the
+                # complete communication frame; never substitute a noun found
+                # somewhere in an otherwise unknown proposition.
+                atom = atoms[0]
+                generic = re.search(
+                    r"\b(?:" + "|".join(_GENERIC) + r")\b", atom.text, re.I
+                )
+                identity = (
+                    _communication_form(
+                        atom.text[: generic.start()].lower(),
+                        atom.text[generic.end() :].lower(),
+                        "send",
+                    )
+                    if generic
+                    else None
+                )
+                if identity is None or identity.polarity != "positive":
+                    outcome_target = False
+                else:
+                    atoms = (
+                        replace(atom, action=identity.action, channel=identity.channel),
+                    )
             if outcome_target:
                 # Bind the parsed proposition, not object-noun guesses. Preserve
                 # operation, all references, channel and outcome aspect together.
@@ -531,11 +553,7 @@ def lifecycle_clause(text: str) -> Claim | None:
                 references = atoms[0].references
                 channel = atoms[0].channel
                 target_spec = replace(target_spec, aspect=atoms[0].aspect)
-            # Generic outcomes (for example, "message was delivered") may
-            # name a discourse target without specifying a send/reply operation.
-            # Leave that operation unspecified; the binder must find one unique
-            # antecedent rather than restoring the old object-noun guess.
-            if not (references or action or (outcome_target and named_subject)) or not (
+            if not (references or action) or not (
                 _REFERENCE.fullmatch(proposition) or outcome_target
             ):
                 target_spec = replace(target_spec, kind=TargetKind.UNRESOLVED)

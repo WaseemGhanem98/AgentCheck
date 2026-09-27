@@ -491,5 +491,54 @@
     "module": "claim_language",
     "old": "channel = atoms[0].channel",
     "new": "channel = None"
+  },
+  {
+    "name": "ignore-subject-identity",
+    "module": "claim_protocols",
+    "old": "    \"subject\",\n",
+    "new": "",
+    "category": "supplied content identity"
+  },
+  {
+    "name": "ignore-body-identity",
+    "module": "claim_protocols",
+    "old": "    \"body\",\n",
+    "new": "",
+    "category": "supplied content identity"
+  },
+  {
+    "name": "generic-target-discards-subject-operation",
+    "category": "claim lifecycle proposition",
+    "module": "claim_language",
+    "old": "replace(atom, action=identity.action, channel=identity.channel)",
+    "new": "replace(atom, action=None, channel=identity.channel)"
+  },
+  {
+    "name": "omit-recipient-alias-to",
+    "category": "recipient alias identity",
+    "module": "claim_protocols",
+    "old": "for key in (\"to\", \"to_address\", \"recipient\", \"recipients\"):",
+    "new": "for key in (\"to_address\", \"recipient\", \"recipients\"):"
+  },
+  {
+    "name": "omit-recipient-alias-to_address",
+    "category": "recipient alias identity",
+    "module": "claim_protocols",
+    "old": "for key in (\"to\", \"to_address\", \"recipient\", \"recipients\"):",
+    "new": "for key in (\"to\", \"recipient\", \"recipients\"):"
+  },
+  {
+    "name": "omit-recipient-alias-recipient",
+    "category": "recipient alias identity",
+    "module": "claim_protocols",
+    "old": "for key in (\"to\", \"to_address\", \"recipient\", \"recipients\"):",
+    "new": "for key in (\"to\", \"to_address\", \"recipients\"):"
+  },
+  {
+    "name": "omit-recipient-alias-recipients",
+    "category": "recipient alias identity",
+    "module": "claim_protocols",
+    "old": "for key in (\"to\", \"to_address\", \"recipient\", \"recipients\"):",
+    "new": "for key in (\"to\", \"to_address\", \"recipient\"):"
   }
 ]
