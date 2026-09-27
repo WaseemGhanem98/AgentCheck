@@ -545,13 +545,15 @@
     "name": "future-evidence-certifies-earlier-claim",
     "module": "claim_evidence",
     "old": "if pos >= position or pos < events[prior.event_id].sequence:",
-    "new": "if pos < events[prior.event_id].sequence:"
+    "new": "if pos < events[prior.event_id].sequence:",
+    "category": "freshness bypass"
   },
   {
     "name": "ignore-final-capture-conflict",
     "module": "claim_protocols",
     "old": "    if final and (",
-    "new": "    if False and ("
+    "new": "    if False and (",
+    "category": "capture conflict suppression"
   },
   {
     "name": "generic-target-invents-operation",
