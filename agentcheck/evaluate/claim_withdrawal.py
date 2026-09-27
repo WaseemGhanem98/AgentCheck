@@ -46,6 +46,10 @@ _NOUN = r"(?:claim|statement|assertion)"
 # Morphology belongs to the intent grammar; target cardinality and proposition
 # resolution are separate. Non-affirmative/modal/reported frames cannot match.
 _VERB = r"(?:retract|withdraw|revoke|disavow|disclaim|correct|disregard|invalidate)"
+# Tense/aspect changes the form, not the lifecycle effect. Keep affirmative
+# active and completed passive frames separate so negation/modal scope survives.
+_WITHDRAW_ACTIVE = r"(?:withdraw|am withdrawing|withdrew)"
+_WITHDRAW_PASSIVE = r"(?:has|have) been withdrawn"
 
 
 def withdrawal_intent(text: str) -> WithdrawalIntent | None:
@@ -55,13 +59,16 @@ def withdrawal_intent(text: str) -> WithdrawalIntent | None:
         body = reset.group(1)
     relation = "retracts"
     kind = IntentKind.PERFORMATIVE
-    act = re.fullmatch(rf"I (?P<verb>{_VERB}) (?P<target>.+)", body, re.I)
+    act = re.fullmatch(
+        rf"I (?P<verb>{_VERB}|{_WITHDRAW_ACTIVE}) (?P<target>.+)", body, re.I
+    )
     target = None
     if act:
         target = act.group("target")
         if act.group("verb").lower() == "correct":
             relation = "corrects"
     else:
+        passive = re.fullmatch(rf"(.+) {_WITHDRAW_PASSIVE}", body, re.I)
         take = re.fullmatch(r"I take (?:back (.+)|(.+) back)", body, re.I)
         wrong = re.fullmatch(
             r"(.+) (?:was|were) (?:wrong|incorrect|invalid)", body, re.I
@@ -69,12 +76,18 @@ def withdrawal_intent(text: str) -> WithdrawalIntent | None:
         dismissal = re.fullmatch(
             r"(?:please )?(?:disregard|ignore|forget) (.+)", body, re.I
         )
-        endorsement = re.fullmatch(r"I no longer stand by (.+)", body, re.I)
+        endorsement = re.fullmatch(
+            r"I (?:no longer stand by (.+)|(?:don't|do not) stand by (.+) anymore)",
+            body,
+            re.I,
+        )
         standing = re.fullmatch(r"(.+) no longer (?:stand|stands)", body, re.I)
         neither = re.fullmatch(
             rf"Neither of (?:those|these|my) ({_NOUN}s) should stand", body, re.I
         )
-        if take:
+        if passive:
+            target = passive.group(1)
+        elif take:
             target = take.group(1) or take.group(2)
         elif re.fullmatch(r"ignore that(?:, I was wrong)?", body, re.I):
             target = "that"
@@ -85,7 +98,11 @@ def withdrawal_intent(text: str) -> WithdrawalIntent | None:
         elif endorsement or standing:
             match = endorsement or standing
             assert match is not None
-            target = match.group(1)
+            target = (
+                (endorsement.group(1) or endorsement.group(2))
+                if endorsement
+                else match.group(1)
+            )
             # Negating our endorsement of "either" rejects both; a judgment
             # about an unspecified member still leaves the member unresolved.
             kind = (
@@ -114,7 +131,7 @@ def withdrawal_target(
     # Rejected endorsement distributes over "either" (neither is endorsed);
     # affirmative "withdraw either" leaves the choice unresolved.
     partial = re.fullmatch(
-        rf"(one|either) of (?:those|these|my) {_NOUN}s", target, re.I
+        rf"(one|either|some) of (?:those|these|my) {_NOUN}s", target, re.I
     )
     if partial:
         if (
@@ -122,9 +139,13 @@ def withdrawal_target(
             and intent == IntentKind.ENDORSEMENT_REJECTION
         ):
             return WithdrawalTarget(TargetKind.PLURAL, target, count=2)
-        return WithdrawalTarget(TargetKind.PARTIAL, target, count=1)
+        return WithdrawalTarget(
+            TargetKind.PARTIAL,
+            target,
+            count=None if partial.group(1).lower() == "some" else 1,
+        )
     quantified = re.fullmatch(
-        rf"(both|all)(?: of (?:those|these|my))?(?: {_NOUN}s)?", target, re.I
+        rf"(each|both|all)(?: of (?:those|these|my))?(?: {_NOUN}s)?", target, re.I
     )
     if quantified:
         return WithdrawalTarget(

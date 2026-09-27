@@ -362,5 +362,45 @@
     "module": "claim_withdrawal",
     "old": "else IntentKind.CORRECTIVE_JUDGMENT",
     "new": "else IntentKind.ENDORSEMENT_REJECTION"
+  },
+  {
+    "name": "withdraw-inflections-disabled",
+    "category": "withdrawal morphology",
+    "module": "claim_withdrawal",
+    "old": "_WITHDRAW_ACTIVE = r\"(?:withdraw|am withdrawing|withdrew)\"",
+    "new": "_WITHDRAW_ACTIVE = r\"withdraw\""
+  },
+  {
+    "name": "withdraw-passive-disabled",
+    "category": "withdrawal morphology",
+    "module": "claim_withdrawal",
+    "old": "_WITHDRAW_PASSIVE = r\"(?:has|have) been withdrawn\"",
+    "new": "_WITHDRAW_PASSIVE = r\"NEVER\""
+  },
+  {
+    "name": "each-quantifier-omitted",
+    "category": "withdrawal cardinality",
+    "module": "claim_withdrawal",
+    "old": "(each|both|all)(?: of",
+    "new": "(both|all)(?: of"
+  },
+  {
+    "name": "some-withdrawal-guesses-all",
+    "category": "withdrawal ambiguity",
+    "module": "claim_withdrawal",
+    "old": "if partial:",
+    "new": "if partial and partial.group(1).lower() == \"some\":\n        return WithdrawalTarget(TargetKind.PLURAL, target)\n    if partial:"
+  },
+  {
+    "name": "still-stand-by-becomes-withdrawal",
+    "category": "withdrawal scope",
+    "module": "claim_withdrawal",
+    "append": "\n_original_intent = withdrawal_intent\ndef withdrawal_intent(text):\n    text = re.sub(r\"I still stand by\", \"I no longer stand by\", text, flags=re.I)\n    return _original_intent(text)\n"
+  },
+  {
+    "name": "reported-progressive-becomes-own",
+    "category": "withdrawal scope",
+    "module": "claim_language",
+    "append": "\n_original_extract = extract_claims\ndef extract_claims(text, terms):\n    text = re.sub(r\"The previous agent said \", \"\", text, flags=re.I)\n    return _original_extract(text, terms)\n"
   }
 ]
