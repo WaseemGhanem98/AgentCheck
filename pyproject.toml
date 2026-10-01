@@ -63,7 +63,7 @@ pydantic-ai = [
     # 2.32 through 2.40 verified; static recipes and execution-state guards.
     # Focused controls cover admitted SDK surfaces; see docs/pydantic-ai.md and
     # SUPPORTED_SDK_MINOR_RANGE in agentcheck/adapters/pydantic_ai.py.
-    "pydantic-ai-slim>=2.32,<2.41",
+    "pydantic-ai-slim>=2.32,<2.52",
 ]
 all = [
     "agentcheck-ai[openai-agents]",
